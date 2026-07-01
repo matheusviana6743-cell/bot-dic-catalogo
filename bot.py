@@ -479,21 +479,51 @@ async def start_web_server():
 # =====================================================
 
 def criar_embed_procurado(registro: Dict[str, Any]) -> discord.Embed:
-    cor = discord.Color.red() if registro.get("status") == "A PROCURAR" else discord.Color.dark_gray()
+    cor = discord.Color.red() if registro.get("status", "A PROCURAR") == "A PROCURAR" else discord.Color.dark_gray()
+
+    descricao = f"""
+🚨 **MANDADO DE PRISÃO E PROCURAÇÃO INVESTIGATIVA** 🚨
+
+A Polícia DENARC de Capital Morada, por intermédio da **Divisão de Investigações Criminais (DIC)**, informa que o indivíduo abaixo encontra-se oficialmente procurado pelas autoridades competentes.
+
+As investigações apontam seu envolvimento em atividades criminosas, havendo mandado ativo para sua localização, abordagem e condução para os procedimentos cabíveis.
+
+📍 **ÚLTIMO AVISTAMENTO:** {registro.get("ultimo_avistamento", "Não informado")}
+
+⚠️ **CRIMES IMPUTADOS:**
+{registro.get("crimes", "Não informado")}
+
+━━━━━━━━━━━━━━━━━━━━━━━
+
+🆔 **IDENTIFICAÇÃO DO PROCURADO**
+
+👤 **Nome:** {registro.get("nome", "Não informado")}
+🆔 **RG:** {registro.get("rg", "Não informado")}
+
+━━━━━━━━━━━━━━━━━━━━━━━
+
+📞 Qualquer informação sobre o paradeiro deste indivíduo deverá ser repassada imediatamente a um agente da DENARC ou da DIC.
+
+🔒 O sigilo do denunciante será integralmente preservado.
+
+🔹 Polícia DENARC de Capital Morada
+🔹 Divisão de Investigações Criminais (DIC)
+"""
+
     embed = discord.Embed(
-        title="🚨 Mandado de Busca e Apreensão/Prisão",
-        description="**Sistema de Procurados - DIC**",
+        description=descricao,
         color=cor,
     )
-    embed.add_field(name="👤 Nome", value=registro.get("nome", "Não informado"), inline=True)
-    embed.add_field(name="🪪 RG", value=registro.get("rg", "Não informado"), inline=True)
-    embed.add_field(name="📌 Status", value=registro.get("status", "A PROCURAR"), inline=True)
-    embed.add_field(name="⚖️ Crimes Cometidos", value=registro.get("crimes", "Não informado"), inline=False)
-    embed.add_field(name="📍 Último Avistamento", value=registro.get("ultimo_avistamento", "Não informado"), inline=False)
-    embed.add_field(name="ℹ️ Informações", value=registro.get("informacoes", "Não informado"), inline=False)
+
+    if registro.get("status") == "RETIRADO":
+        embed.add_field(
+            name="📌 Status",
+            value=f"**RETIRADO**\\nMotivo: {registro.get('motivo_retirada', 'Não informado')}",
+            inline=False,
+        )
+
     embed.set_footer(text=f"Caso: {registro.get('caso')} • Cadastro: {registro.get('data')}")
     return embed
-
 
 async def postar_procurado_oficial(registro: Dict[str, Any]) -> Optional[discord.Message]:
     canal = bot.get_channel(PROCURADOS_CHANNEL_ID)
@@ -688,6 +718,7 @@ class PainelProcuradosView(View):
     async def lista(self, interaction: discord.Interaction, button: Button):
         procurados = carregar_procurados()
         ativos = [p for p in procurados if p.get("status", "A PROCURAR") == "A PROCURAR"]
+
         if not ativos:
             texto = "Nenhum procurado ativo cadastrado."
         else:
@@ -697,12 +728,61 @@ class PainelProcuradosView(View):
             texto = "\n".join(linhas)
             if len(ativos) > 20:
                 texto += f"\n... e mais {len(ativos)-20} no catálogo."
-        await interaction.response.send_message(f"📋 **Procurados ativos:**\n{texto}\n\n🔗 {CATALOG_PUBLIC_URL}", ephemeral=True)
+
+        await interaction.response.send_message(
+            f"📋 **Procurados ativos:**\n{texto}\n\n🔗 {CATALOG_PUBLIC_URL}",
+            ephemeral=True
+        )
 
     @discord.ui.button(label="Retirar Procurado", emoji="❌", style=discord.ButtonStyle.gray, custom_id="dic_retirar_procurado")
     async def retirar(self, interaction: discord.Interaction, button: Button):
         await interaction.response.send_modal(RetirarProcuradoModal())
 
+    @discord.ui.button(label="Abrir Catálogo", emoji="📄", style=discord.ButtonStyle.blurple, custom_id="dic_abrir_catalogo")
+    async def abrir_catalogo(self, interaction: discord.Interaction, button: Button):
+        gerar_catalogo_html()
+        await interaction.response.send_message(f"📄 **Catálogo de Procurados:**\n{CATALOG_PUBLIC_URL}", ephemeral=True)
+
+    @discord.ui.button(label="Sincronizar Antigos", emoji="🔄", style=discord.ButtonStyle.green, custom_id="dic_sincronizar_antigos")
+    async def sincronizar_antigos(self, interaction: discord.Interaction, button: Button):
+        if isinstance(interaction.user, discord.Member):
+            if not interaction.user.guild_permissions.administrator and not usuario_tem_admin(interaction.user):
+                await interaction.response.send_message("❌ Apenas a equipe pode sincronizar procurados antigos.", ephemeral=True)
+                return
+
+        if not PROCURADOS_CHANNEL_ID:
+            await interaction.response.send_message("❌ Configure PROCURADOS_CHANNEL_ID.", ephemeral=True)
+            return
+
+        canal = bot.get_channel(PROCURADOS_CHANNEL_ID)
+        if not isinstance(canal, discord.TextChannel):
+            await interaction.response.send_message("❌ Não encontrei o canal oficial de procurados.", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        importados = 0
+        analisados = 0
+        lista = carregar_procurados()
+
+        async for msg in canal.history(limit=1000, oldest_first=True):
+            analisados += 1
+            registro = await importar_mensagem_antiga(msg)
+            if registro:
+                lista.append(registro)
+                importados += 1
+
+        lista = remover_duplicados(lista)
+        salvar_procurados(lista)
+        gerar_catalogo_html()
+
+        await interaction.followup.send(
+            f"✅ Sincronização finalizada.\n"
+            f"Mensagens analisadas: `{analisados}`\n"
+            f"Procurados importados: `{importados}`\n"
+            f"Catálogo: {CATALOG_PUBLIC_URL}",
+            ephemeral=True,
+        )
 
 async def retirar_procurado(interaction: discord.Interaction, rg: str, motivo: str):
     lista = carregar_procurados()
@@ -838,69 +918,16 @@ async def painelprocurados(interaction: discord.Interaction):
         title="🚨 Sistema de Procurados - DIC",
         description=(
             "Utilize os botões abaixo para gerenciar procurados.\n\n"
-            "➕ **Novo Procurado** — Cadastrar um novo procurado.\n"
-            "📋 **Lista de Procurados** — Ver procurados ativos.\n"
-            "❌ **Retirar Procurado** — Retirar um procurado pelo RG."
+            "➕ **Novo Procurado** — cadastrar um novo procurado.\n"
+            "📋 **Lista de Procurados** — ver procurados ativos.\n"
+            "❌ **Retirar Procurado** — retirar um procurado pelo RG.\n"
+            "📄 **Abrir Catálogo** — abrir o catálogo HTML.\n"
+            "🔄 **Sincronizar Antigos** — importar procurados antigos do canal oficial."
         ),
         color=discord.Color.red(),
     )
     await interaction.response.send_message(embed=embed, view=PainelProcuradosView())
 
-
-@bot.tree.command(name="catalogo", description="Mostra o link do catálogo de procurados.")
-async def catalogo(interaction: discord.Interaction):
-    await interaction.response.send_message(f"📄 **Catálogo de Procurados:**\n{CATALOG_PUBLIC_URL}", ephemeral=True)
-
-
-@bot.tree.command(name="retirarprocurado", description="Retira um procurado pelo RG.")
-@app_commands.describe(rg="RG do procurado", motivo="Motivo da retirada")
-async def retirarprocurado(interaction: discord.Interaction, rg: str, motivo: str = "Não informado"):
-    await retirar_procurado(interaction, rg, motivo)
-
-
-@bot.tree.command(name="sincronizarcatalogo", description="Importa procurados antigos do canal oficial para o catálogo.")
-@app_commands.checks.has_permissions(administrator=True)
-async def sincronizarcatalogo(interaction: discord.Interaction):
-    if not PROCURADOS_CHANNEL_ID:
-        await interaction.response.send_message("❌ Configure PROCURADOS_CHANNEL_ID no .env.", ephemeral=True)
-        return
-
-    canal = bot.get_channel(PROCURADOS_CHANNEL_ID)
-    if not isinstance(canal, discord.TextChannel):
-        await interaction.response.send_message("❌ Não encontrei o canal de procurados.", ephemeral=True)
-        return
-
-    await interaction.response.defer(ephemeral=True)
-
-    importados = 0
-    analisados = 0
-    lista = carregar_procurados()
-
-    async for msg in canal.history(limit=1000, oldest_first=True):
-        analisados += 1
-        registro = await importar_mensagem_antiga(msg)
-        if registro:
-            lista.append(registro)
-            importados += 1
-
-    lista = remover_duplicados(lista)
-    salvar_procurados(lista)
-    gerar_catalogo_html()
-
-    await interaction.followup.send(
-        f"✅ Sincronização finalizada.\n"
-        f"Mensagens analisadas: `{analisados}`\n"
-        f"Procurados importados: `{importados}`\n"
-        f"Catálogo: {CATALOG_PUBLIC_URL}",
-        ephemeral=True,
-    )
-
-
-@bot.tree.command(name="regerarcatalogo", description="Recria o HTML do catálogo a partir do JSON salvo.")
-@app_commands.checks.has_permissions(administrator=True)
-async def regerarcatalogo(interaction: discord.Interaction):
-    gerar_catalogo_html()
-    await interaction.response.send_message(f"✅ Catálogo recriado: {CATALOG_PUBLIC_URL}", ephemeral=True)
 
 # =====================================================
 # EVENTOS
@@ -914,11 +941,20 @@ async def on_ready():
     try:
         if GUILD_ID:
             guild_obj = discord.Object(id=GUILD_ID)
+
+            # Limpa os slash commands antigos/repetidos desse servidor
+            # e deixa apenas os comandos que existem neste arquivo.
+            bot.tree.clear_commands(guild=guild_obj)
             bot.tree.copy_global_to(guild=guild_obj)
             await bot.tree.sync(guild=guild_obj)
+
+            # Também sincroniza globalmente para remover comandos antigos globais.
+            # Pode demorar um pouco para sumir no Discord.
+            await bot.tree.sync()
         else:
             await bot.tree.sync()
-        print("Comandos sincronizados!")
+
+        print("Comandos sincronizados! Comando principal: /painelprocurados")
     except Exception as e:
         print(f"Erro ao sincronizar comandos: {e}")
 
