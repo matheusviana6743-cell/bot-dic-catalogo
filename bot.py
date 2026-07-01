@@ -1,410 +1,569 @@
-# =====================================================
-# BOT DIC COMPLETO - MESAS + PROCURADOS + CATALOGO HTML
-# Feito para GTA RP / personagens ficticios
-# =====================================================
-
 import os
 import re
-import json
 import html
+import json
+import uuid
+import shutil
 import asyncio
 import datetime
 import unicodedata
 from pathlib import Path
-from typing import Optional, Dict, Any, List
+from zoneinfo import ZoneInfo
 
 import discord
 from discord import app_commands
-from discord.ext import commands, tasks
-from discord.ui import View, Button, Modal, TextInput
-from dotenv import load_dotenv
+from discord.ext import commands
+from discord.ui import Modal, TextInput, View, Button
 from aiohttp import web
+from dotenv import load_dotenv
+
 
 # =====================================================
-# CONFIGURACAO
+# CONFIGURAÇÃO
 # =====================================================
 
 load_dotenv()
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN", "").strip()
 GUILD_ID = int(os.getenv("GUILD_ID", "0") or 0)
-
-# Procurados
 PROCURADOS_CHANNEL_ID = int(os.getenv("PROCURADOS_CHANNEL_ID", "0") or 0)
-HISTORICO_PROCURADOS_ID = int(os.getenv("HISTORICO_PROCURADOS_ID", "0") or 0)
-LOGS_CHANNEL_ID = int(os.getenv("LOGS_CHANNEL_ID", "0") or 0)
-PROCURADOS_TEMP_CATEGORY_ID = int(os.getenv("PROCURADOS_TEMP_CATEGORY_ID", "0") or 0)
-
-# Mesas
-CATEGORIA_MESAS_ABERTAS_ID = int(os.getenv("CATEGORIA_MESAS_ABERTAS_ID", "0") or 0)
-CATEGORIA_MESAS_FECHADAS_ID = int(os.getenv("CATEGORIA_MESAS_FECHADAS_ID", "0") or 0)
-BACKUP_CHANNEL_ID = int(os.getenv("BACKUP_CHANNEL_ID", "0") or 0)
-
-# Catalogo
 CATALOG_PUBLIC_URL = os.getenv("CATALOG_PUBLIC_URL", "http://127.0.0.1:8000/").strip()
 PORT = int(os.getenv("PORT", "8000") or 8000)
 
-
-def _ids_env(nome: str) -> List[int]:
-    ids: List[int] = []
-    for parte in os.getenv(nome, "").split(","):
-        parte = parte.strip()
-        if parte.isdigit():
-            ids.append(int(parte))
-    return ids
-
-CARGOS_ADMIN_IDS = _ids_env("CARGOS_ADMIN_IDS")
-CARGOS_EQUIPE_IDS = _ids_env("CARGOS_EQUIPE_IDS") or CARGOS_ADMIN_IDS
-
 BASE_DIR = Path(__file__).parent
-DATA_DIR = BASE_DIR / "data"
 PUBLIC_DIR = BASE_DIR / "public"
 UPLOADS_DIR = PUBLIC_DIR / "uploads"
-BACKUP_DIR = BASE_DIR / "backups"
-
-CATALOGO_JSON = DATA_DIR / "procurados.json"
+DATA_DIR = BASE_DIR / "data"
 CATALOGO_HTML = PUBLIC_DIR / "index.html"
-MESAS_JSON = DATA_DIR / "mesas.json"
+CATALOGO_JSON = DATA_DIR / "procurados.json"
 
-for pasta in [DATA_DIR, PUBLIC_DIR, UPLOADS_DIR, BACKUP_DIR]:
-    pasta.mkdir(exist_ok=True)
+PUBLIC_DIR.mkdir(exist_ok=True)
+UPLOADS_DIR.mkdir(exist_ok=True)
+DATA_DIR.mkdir(exist_ok=True)
+
+FUSO_BR = ZoneInfo("America/Sao_Paulo")
+
 
 # =====================================================
-# BOT
+# FUNÇÕES BÁSICAS
 # =====================================================
 
-intents = discord.Intents.default()
-intents.guilds = True
-intents.members = True
-intents.messages = True
-intents.message_content = True
-
-bot = commands.Bot(command_prefix="!", intents=intents)
-
-cadastros_pendentes: Dict[int, Dict[str, Any]] = {}
-
-# =====================================================
-# FUNCOES GERAIS
-# =====================================================
-
-def agora_br() -> str:
-    tz = datetime.timezone(datetime.timedelta(hours=-3))
-    return datetime.datetime.now(tz).strftime("%d/%m/%Y %H:%M")
+def agora_br():
+    return datetime.datetime.now(FUSO_BR)
 
 
-def data_caso() -> str:
-    tz = datetime.timezone(datetime.timedelta(hours=-3))
-    return datetime.datetime.now(tz).strftime("%Y%m%d-%H%M%S")
+def data_hora_br():
+    return agora_br().strftime("%d/%m/%Y %H:%M")
 
 
-def slugify(texto: str) -> str:
-    texto = str(texto or "").strip().lower()
+def data_caso():
+    return agora_br().strftime("%Y%m%d-%H%M%S")
+
+
+def somente_numero(texto: str) -> str:
+    return re.sub(r"\D", "", texto or "")
+
+
+def slug(texto: str) -> str:
+    texto = str(texto or "")
     texto = unicodedata.normalize("NFKD", texto).encode("ascii", "ignore").decode("ascii")
-    texto = re.sub(r"[^a-z0-9]+", "-", texto)
-    texto = texto.strip("-")
-    return texto[:70] or "item"
+    texto = re.sub(r"[^a-zA-Z0-9_-]+", "-", texto).strip("-").lower()
+    return texto or "sem-nome"
 
 
-def limpar_rg(rg: str) -> str:
-    return re.sub(r"\s+", "", str(rg or "").lower())
-
-
-def escape(texto: Any) -> str:
+def esc(texto) -> str:
     return html.escape(str(texto or ""))
 
 
-def carregar_json(caminho: Path, padrao):
-    if not caminho.exists():
-        return padrao
+def esc_br(texto) -> str:
+    return esc(texto).replace("\n", "<br>")
+
+
+def carregar_procurados():
+    if not CATALOGO_JSON.exists():
+        return []
     try:
-        with open(caminho, "r", encoding="utf-8") as f:
+        with open(CATALOGO_JSON, "r", encoding="utf-8") as f:
             return json.load(f)
     except Exception:
-        return padrao
+        return []
 
 
-def salvar_json(caminho: Path, dados) -> None:
-    with open(caminho, "w", encoding="utf-8") as f:
-        json.dump(dados, f, ensure_ascii=False, indent=2)
+def salvar_procurados(lista):
+    with open(CATALOGO_JSON, "w", encoding="utf-8") as f:
+        json.dump(lista, f, ensure_ascii=False, indent=2)
 
 
-def carregar_procurados() -> List[Dict[str, Any]]:
-    dados = carregar_json(CATALOGO_JSON, [])
-    return dados if isinstance(dados, list) else []
-
-
-def salvar_procurados(lista: List[Dict[str, Any]]) -> None:
-    salvar_json(CATALOGO_JSON, lista)
-
-
-def carregar_mesas() -> List[Dict[str, Any]]:
-    dados = carregar_json(MESAS_JSON, [])
-    return dados if isinstance(dados, list) else []
-
-
-def salvar_mesas(lista: List[Dict[str, Any]]) -> None:
-    salvar_json(MESAS_JSON, lista)
-
-
-def procurar_por_rg(rg: str) -> Optional[Dict[str, Any]]:
-    alvo = limpar_rg(rg)
+def procurar_por_rg(rg: str):
+    rg_limpo = somente_numero(rg)
     for p in carregar_procurados():
-        if limpar_rg(p.get("rg", "")) == alvo:
+        if somente_numero(p.get("rg", "")) == rg_limpo:
             return p
     return None
 
 
-def remover_duplicados(lista: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    vistos = set()
-    saida = []
-    for item in lista:
-        rg = limpar_rg(item.get("rg", ""))
-        chave = rg or item.get("id") or item.get("caso")
-        if chave in vistos:
-            continue
-        vistos.add(chave)
-        saida.append(item)
-    return saida
+def upsert_procurado(dados: dict):
+    lista = carregar_procurados()
+    rg_limpo = somente_numero(dados.get("rg", ""))
+
+    atualizado = False
+    for i, p in enumerate(lista):
+        if somente_numero(p.get("rg", "")) == rg_limpo and rg_limpo:
+            lista[i].update(dados)
+            atualizado = True
+            break
+
+    if not atualizado:
+        lista.append(dados)
+
+    salvar_procurados(lista)
+    gerar_catalogo_html()
 
 
-async def enviar_log(texto: str) -> None:
-    if not LOGS_CHANNEL_ID:
-        return
-    canal = bot.get_channel(LOGS_CHANNEL_ID)
-    if canal:
-        try:
-            await canal.send(texto[:1900])
-        except Exception:
-            pass
+def marcar_retirado(rg: str, motivo: str, responsavel: str):
+    lista = carregar_procurados()
+    rg_limpo = somente_numero(rg)
+    achou = False
+
+    for p in lista:
+        if somente_numero(p.get("rg", "")) == rg_limpo:
+            p["status"] = "RETIRADO"
+            p["motivo_retirada"] = motivo
+            p["retirado_por"] = responsavel
+            p["data_retirada"] = data_hora_br()
+            achou = True
+            break
+
+    salvar_procurados(lista)
+    gerar_catalogo_html()
+    return achou
 
 
-def usuario_tem_admin(member: discord.Member) -> bool:
-    if not CARGOS_ADMIN_IDS:
-        return True
-    cargos = {role.id for role in member.roles}
-    return any(cargo in cargos for cargo in CARGOS_ADMIN_IDS)
+def eh_imagem(attachment: discord.Attachment):
+    nome = attachment.filename.lower()
+    return nome.endswith((".png", ".jpg", ".jpeg", ".webp", ".gif"))
 
 
-def cargos_equipe_permissoes(guild: discord.Guild) -> Dict[Any, discord.PermissionOverwrite]:
-    overwrites: Dict[Any, discord.PermissionOverwrite] = {
-        guild.default_role: discord.PermissionOverwrite(view_channel=False)
-    }
-    for cargo_id in set(CARGOS_EQUIPE_IDS + CARGOS_ADMIN_IDS):
-        cargo = guild.get_role(cargo_id)
-        if cargo:
-            overwrites[cargo] = discord.PermissionOverwrite(
-                view_channel=True,
-                send_messages=True,
-                attach_files=True,
-                read_message_history=True,
-            )
-    if guild.me:
-        overwrites[guild.me] = discord.PermissionOverwrite(
-            view_channel=True,
-            send_messages=True,
-            manage_channels=True,
-            attach_files=True,
-            read_message_history=True,
-        )
-    return overwrites
+async def salvar_attachment(attachment: discord.Attachment, prefixo: str, rg: str):
+    extensao = os.path.splitext(attachment.filename)[1].lower()
+    if extensao not in [".png", ".jpg", ".jpeg", ".webp", ".gif"]:
+        extensao = ".png"
+
+    nome_arquivo = f"{slug(rg)}-{prefixo}-{uuid.uuid4().hex[:8]}{extensao}"
+    caminho = UPLOADS_DIR / nome_arquivo
+
+    await attachment.save(caminho)
+    return f"uploads/{nome_arquivo}", caminho
+
 
 # =====================================================
-# CATALOGO HTML COM FOTO EM TELA CHEIA
+# CATÁLOGO HTML
 # =====================================================
 
-def gerar_catalogo_html() -> None:
+def gerar_catalogo_html():
     procurados = carregar_procurados()
     ativos = [p for p in procurados if p.get("status", "A PROCURAR") == "A PROCURAR"]
     retirados = [p for p in procurados if p.get("status") == "RETIRADO"]
 
     cards = ""
-    for p in procurados:
-        status = p.get("status", "A PROCURAR")
-        classe_status = "retirado" if status == "RETIRADO" else "ativo"
-        foto_ind = p.get("foto_individuo", "") or ""
-        foto_rg = p.get("foto_rg", "") or ""
-        link_msg = p.get("mensagem_url", "")
 
-        def img_html(src: str, alt: str, vazio: str):
-            if not src:
-                return f'<div class="placeholder">{vazio}</div>'
-            src_e = escape(src)
-            return f'<img class="zoom-img" src="{src_e}" alt="{escape(alt)}" onclick="abrirFoto(\'{src_e}\')">'
-
-        cards += f"""
-        <article class="card {classe_status}">
-            <div class="card-head">
-                <div><span>Nº DO CASO</span><b>{escape(p.get('caso'))}</b></div>
-                <div><span>DATA</span><b>{escape(p.get('data'))}</b></div>
-                <div class="status">{escape(status)}</div>
-            </div>
-
-            <div class="card-grid">
-                <div class="photos">
-                    <div class="photo big">
-                        <div class="photo-title">Foto do Indivíduo</div>
-                        {img_html(foto_ind, 'Foto do indivíduo', 'Sem foto')}
-                    </div>
-                    <div class="photo small">
-                        <div class="photo-title">Foto do RG</div>
-                        {img_html(foto_rg, 'Foto do RG', 'Sem RG')}
-                    </div>
-                </div>
-
-                <div class="info">
-                    <div class="linha"><b>Nome</b><p>{escape(p.get('nome'))}</p></div>
-                    <div class="linha"><b>RG</b><p>{escape(p.get('rg'))}</p></div>
-                    <div class="box"><b>Crimes Cometidos</b><p>{escape(p.get('crimes'))}</p></div>
-                    <div class="box destaque"><b>Último Avistamento</b><p>{escape(p.get('ultimo_avistamento'))}</p></div>
-                    <div class="box"><b>Informações</b><p>{escape(p.get('informacoes'))}</p></div>
-                    {f'<a class="msg" href="{escape(link_msg)}" target="_blank">Abrir mensagem no Discord</a>' if link_msg else ''}
-                    {f'<div class="motivo"><b>Motivo da retirada:</b> {escape(p.get("motivo_retirada"))}</div>' if p.get('motivo_retirada') else ''}
-                </div>
-            </div>
-        </article>
-        """
-
-    if not cards:
+    if not procurados:
         cards = """
         <div class="vazio">
             <h2>Nenhum procurado cadastrado ainda.</h2>
-            <p>Quando o bot finalizar um cadastro, ele aparecerá aqui automaticamente.</p>
+            <p>Quando o bot cadastrar um procurado, ele aparecerá automaticamente aqui.</p>
         </div>
         """
 
-    html_final = f"""
-<!DOCTYPE html>
+    for p in procurados:
+        status = p.get("status", "A PROCURAR")
+        status_class = "retirado" if status == "RETIRADO" else "ativo"
+
+        foto_ind = p.get("foto_individuo") or ""
+        foto_rg = p.get("foto_rg") or ""
+
+        if foto_ind:
+            foto_ind_html = f'<img src="{esc(foto_ind)}" alt="Foto do indivíduo">'
+        else:
+            foto_ind_html = '<div class="placeholder">SEM FOTO</div>'
+
+        if foto_rg:
+            foto_rg_html = f'<img src="{esc(foto_rg)}" alt="Foto do RG">'
+        else:
+            foto_rg_html = '<div class="placeholder">SEM RG</div>'
+
+        motivo = ""
+        if status == "RETIRADO":
+            motivo = f"""
+            <div class="campo retirada">
+                <b>Motivo da Retirada</b>
+                <p>{esc_br(p.get("motivo_retirada", ""))}</p>
+                <small>Retirado por {esc(p.get("retirado_por", ""))} em {esc(p.get("data_retirada", ""))}</small>
+            </div>
+            """
+
+        link_msg = ""
+        if p.get("discord_jump_url"):
+            link_msg = f'<a class="link-discord" href="{esc(p.get("discord_jump_url"))}" target="_blank">Abrir postagem no Discord</a>'
+
+        cards += f"""
+        <section class="card">
+            <div class="card-head">
+                <div>
+                    <span>Nº DO CASO</span>
+                    <strong>{esc(p.get("caso", ""))}</strong>
+                </div>
+                <div>
+                    <span>CADASTRO</span>
+                    <strong>{esc(p.get("data_cadastro", ""))}</strong>
+                </div>
+                <div class="status {status_class}">
+                    {esc(status)}
+                </div>
+            </div>
+
+            <div class="card-body">
+                <div class="fotos">
+                    <div class="foto">
+                        <h3>Foto do Indivíduo</h3>
+                        {foto_ind_html}
+                    </div>
+
+                    <div class="foto rg">
+                        <h3>Foto do RG</h3>
+                        {foto_rg_html}
+                    </div>
+                </div>
+
+                <div class="dados">
+                    <div class="linha">
+                        <b>Nome</b>
+                        <p>{esc(p.get("nome", ""))}</p>
+                    </div>
+
+                    <div class="linha">
+                        <b>RG</b>
+                        <p>{esc(p.get("rg", ""))}</p>
+                    </div>
+
+                    <div class="campo">
+                        <b>Crimes Cometidos</b>
+                        <p>{esc_br(p.get("crimes_cometidos", ""))}</p>
+                    </div>
+
+                    <div class="campo destaque">
+                        <b>Último Avistamento</b>
+                        <p>{esc_br(p.get("ultimo_avistamento", ""))}</p>
+                    </div>
+
+                    <div class="campo">
+                        <b>Informações</b>
+                        <p>{esc_br(p.get("informacoes", ""))}</p>
+                    </div>
+
+                    {motivo}
+                    {link_msg}
+                </div>
+            </div>
+        </section>
+        """
+
+    html_final = f"""<!DOCTYPE html>
 <html lang="pt-BR">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Catálogo de Procurados - DIC</title>
-    <style>
-        * {{ box-sizing: border-box; }}
-        body {{
-            margin: 0;
-            font-family: Arial, Helvetica, sans-serif;
-            background:
-                radial-gradient(circle at top, rgba(230,169,55,.12), transparent 35%),
-                linear-gradient(135deg, #07111f, #02060d 70%);
-            color: #f7f7f7;
-        }}
-        header {{
-            border-bottom: 2px solid #d99a2b;
-            padding: 28px 18px;
-            text-align: center;
-            background: rgba(0,0,0,.38);
-            position: sticky;
-            top: 0;
-            z-index: 10;
-            backdrop-filter: blur(7px);
-        }}
-        header h1 {{
-            margin: 0;
-            color: #f0b64d;
-            font-size: clamp(30px, 5vw, 62px);
-            letter-spacing: 2px;
-            text-transform: uppercase;
-        }}
-        header p {{ margin: 8px 0 0; color: #ddd; }}
-        .stats {{ display:flex; gap:14px; justify-content:center; flex-wrap:wrap; margin-top:18px; }}
-        .stat {{ border:1px solid rgba(240,182,77,.55); background:rgba(8,19,35,.9); padding:10px 18px; border-radius:12px; min-width:150px; }}
-        .stat span {{ display:block; font-size:12px; color:#bfc6d1; text-transform:uppercase; }}
-        .stat b {{ font-size:24px; color:#fff; }}
-        main {{ width:min(1380px, 96%); margin:24px auto 50px; display:grid; grid-template-columns:repeat(auto-fit, minmax(520px, 1fr)); gap:22px; }}
-        .card {{ border:1px solid rgba(240,182,77,.55); background:linear-gradient(180deg, rgba(8,19,35,.97), rgba(3,8,16,.97)); box-shadow:0 0 0 1px rgba(255,255,255,.05), 0 18px 50px rgba(0,0,0,.32); border-radius:18px; overflow:hidden; }}
-        .card.retirado {{ opacity:.65; filter:grayscale(.35); }}
-        .card-head {{ display:grid; grid-template-columns:1fr 1fr auto; gap:12px; padding:14px; border-bottom:1px solid rgba(240,182,77,.32); align-items:center; }}
-        .card-head span {{ display:block; font-size:11px; color:#f0b64d; text-transform:uppercase; font-weight:bold; }}
-        .card-head b {{ display:block; margin-top:4px; }}
-        .status {{ color:#101820; background:#f0b64d; font-weight:900; padding:8px 12px; border-radius:10px; white-space:nowrap; }}
-        .retirado .status {{ background:#c94a4a; color:#fff; }}
-        .card-grid {{ display:grid; grid-template-columns:210px 1fr; gap:16px; padding:16px; }}
-        .photos {{ display:grid; gap:14px; }}
-        .photo {{ border:1px solid rgba(240,182,77,.55); background:#081323; border-radius:14px; padding:10px; }}
-        .photo-title {{ text-align:center; color:#f0b64d; font-weight:800; margin-bottom:8px; text-transform:uppercase; font-size:13px; }}
-        .photo img {{ width:100%; height:240px; object-fit:cover; border-radius:10px; background:#ddd; display:block; }}
-        .photo.small img {{ height:125px; object-fit:cover; }}
-        .zoom-img {{ cursor: zoom-in; transition: transform .15s ease, filter .15s ease; }}
-        .zoom-img:hover {{ transform: scale(1.02); filter: brightness(1.08); }}
-        .placeholder {{ height:240px; border:1px dashed #98a2b3; display:grid; place-items:center; color:#98a2b3; border-radius:10px; }}
-        .photo.small .placeholder {{ height:125px; }}
-        .info {{ display:grid; gap:10px; }}
-        .linha, .box {{ background:#f6f7f9; color:#07111f; border-radius:12px; padding:10px 12px; border-left:5px solid #f0b64d; }}
-        .linha b, .box b {{ display:block; color:#07111f; margin-bottom:3px; }}
-        .linha p, .box p {{ margin:0; white-space:pre-wrap; line-height:1.35; }}
-        .destaque {{ background:#fff4dc; }}
-        .msg {{ display:inline-block; color:#f0b64d; text-decoration:none; font-weight:bold; margin-top:4px; }}
-        .motivo {{ background:rgba(201,74,74,.18); color:#ffd7d7; border:1px solid rgba(201,74,74,.4); padding:10px; border-radius:10px; }}
-        .vazio {{ grid-column:1 / -1; text-align:center; padding:60px 20px; border:1px dashed rgba(240,182,77,.6); border-radius:18px; background:rgba(8,19,35,.7); }}
-        footer {{ text-align:center; color:#bfc6d1; border-top:1px solid rgba(240,182,77,.25); padding:18px; }}
-        #lightbox {{ display:none; position:fixed; inset:0; background:rgba(0,0,0,.92); z-index:9999; align-items:center; justify-content:center; padding:22px; }}
-        #lightbox.ativo {{ display:flex; }}
-        #lightbox img {{ max-width:96vw; max-height:92vh; border-radius:12px; box-shadow:0 0 30px rgba(0,0,0,.7); }}
-        #fecharLightbox {{ position:fixed; top:18px; right:22px; background:#f0b64d; color:#06111f; border:0; padding:10px 15px; border-radius:10px; font-weight:900; cursor:pointer; }}
-        @media (max-width:720px) {{ main {{ grid-template-columns:1fr; }} .card-grid {{ grid-template-columns:1fr; }} .card-head {{ grid-template-columns:1fr; }} .photo img {{ height:330px; }} }}
-    </style>
-</head>
-<body>
-    <header>
-        <h1>Catálogo de Procurados</h1>
-        <p>DIC • Atualizado automaticamente pelo bot • Clique nas fotos para abrir em tela cheia</p>
-        <div class="stats">
-            <div class="stat"><span>Registros totais</span><b>{len(procurados)}</b></div>
-            <div class="stat"><span>Ativos</span><b>{len(ativos)}</b></div>
-            <div class="stat"><span>Retirados</span><b>{len(retirados)}</b></div>
-            <div class="stat"><span>Última atualização</span><b style="font-size:16px">{agora_br()}</b></div>
-        </div>
-    </header>
-    <main>{cards}</main>
-    <footer>Uso exclusivo para GTA RP / sistema interno autorizado. Não use com dados reais de pessoas.</footer>
+<meta charset="UTF-8">
+<title>Catálogo de Procurados - DIC</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
 
-    <div id="lightbox" onclick="fecharFoto()">
-        <button id="fecharLightbox" onclick="fecharFoto()">Fechar ✕</button>
-        <img id="lightboxImg" src="" alt="Foto em tela cheia">
+<style>
+* {{
+    box-sizing: border-box;
+}}
+
+body {{
+    margin: 0;
+    background: radial-gradient(circle at top, #10213b 0%, #050b14 55%, #02050a 100%);
+    color: #fff;
+    font-family: Arial, Helvetica, sans-serif;
+}}
+
+header {{
+    padding: 34px 18px 20px;
+    text-align: center;
+    border-bottom: 2px solid #c8952d;
+    background: linear-gradient(90deg, #050b14, #0c1b31, #050b14);
+}}
+
+header h1 {{
+    margin: 0;
+    font-size: clamp(30px, 5vw, 64px);
+    letter-spacing: 2px;
+    color: #f3c45d;
+    text-transform: uppercase;
+}}
+
+header p {{
+    margin: 8px 0 0;
+    color: #d9d9d9;
+    font-size: 16px;
+}}
+
+.stats {{
+    display: flex;
+    justify-content: center;
+    gap: 15px;
+    flex-wrap: wrap;
+    padding: 16px;
+    background: rgba(0,0,0,.30);
+    border-bottom: 1px solid rgba(200,149,45,.45);
+}}
+
+.stat {{
+    min-width: 170px;
+    padding: 12px 16px;
+    border: 1px solid rgba(200,149,45,.55);
+    border-radius: 12px;
+    background: rgba(7,17,31,.85);
+}}
+
+.stat small {{
+    display: block;
+    color: #f3c45d;
+    font-weight: 700;
+    text-transform: uppercase;
+    font-size: 12px;
+}}
+
+.stat strong {{
+    display: block;
+    margin-top: 6px;
+    font-size: 22px;
+}}
+
+main {{
+    max-width: 1250px;
+    margin: 0 auto;
+    padding: 24px 14px 40px;
+}}
+
+.card {{
+    margin-bottom: 24px;
+    border: 1px solid rgba(200,149,45,.72);
+    border-radius: 16px;
+    overflow: hidden;
+    background: rgba(7,17,31,.90);
+    box-shadow: 0 12px 28px rgba(0,0,0,.35);
+}}
+
+.card-head {{
+    display: grid;
+    grid-template-columns: 1fr 1fr auto;
+    gap: 10px;
+    padding: 12px 14px;
+    background: #07111f;
+    border-bottom: 1px solid rgba(200,149,45,.55);
+    align-items: center;
+}}
+
+.card-head span {{
+    display: block;
+    color: #f3c45d;
+    font-size: 11px;
+    font-weight: 700;
+}}
+
+.card-head strong {{
+    font-size: 14px;
+}}
+
+.status {{
+    padding: 8px 12px;
+    border-radius: 999px;
+    font-weight: 800;
+    font-size: 13px;
+    border: 1px solid #f3c45d;
+    color: #f3c45d;
+}}
+
+.status.retirado {{
+    color: #ff7070;
+    border-color: #ff7070;
+}}
+
+.card-body {{
+    display: grid;
+    grid-template-columns: 310px 1fr;
+    gap: 16px;
+    padding: 16px;
+}}
+
+.fotos {{
+    display: grid;
+    gap: 14px;
+}}
+
+.foto {{
+    border: 1px solid rgba(200,149,45,.70);
+    border-radius: 12px;
+    padding: 10px;
+    background: #030812;
+}}
+
+.foto h3 {{
+    margin: 0 0 8px;
+    color: #f3c45d;
+    text-align: center;
+    font-size: 14px;
+    text-transform: uppercase;
+}}
+
+.foto img {{
+    width: 100%;
+    max-height: 320px;
+    object-fit: cover;
+    border-radius: 9px;
+    border: 1px solid rgba(255,255,255,.15);
+    background: #111;
+}}
+
+.foto.rg img {{
+    max-height: 185px;
+    object-fit: contain;
+    background: #fff;
+}}
+
+.placeholder {{
+    height: 180px;
+    display: grid;
+    place-items: center;
+    color: #888;
+    border: 1px dashed #777;
+    border-radius: 9px;
+}}
+
+.dados {{
+    display: grid;
+    gap: 10px;
+}}
+
+.linha, .campo {{
+    padding: 12px;
+    border: 1px solid rgba(255,255,255,.12);
+    border-radius: 10px;
+    background: rgba(255,255,255,.055);
+}}
+
+.linha b, .campo b {{
+    display: block;
+    color: #f3c45d;
+    margin-bottom: 5px;
+}}
+
+.linha p, .campo p {{
+    margin: 0;
+    line-height: 1.45;
+    white-space: normal;
+}}
+
+.destaque {{
+    border-color: rgba(243,196,93,.65);
+    background: rgba(243,196,93,.08);
+}}
+
+.retirada {{
+    border-color: rgba(255,112,112,.60);
+    background: rgba(255,112,112,.08);
+}}
+
+.retirada b {{
+    color: #ff9090;
+}}
+
+.link-discord {{
+    display: inline-block;
+    width: fit-content;
+    padding: 10px 12px;
+    border-radius: 9px;
+    background: #5865f2;
+    color: white;
+    text-decoration: none;
+    font-weight: 700;
+}}
+
+.vazio {{
+    text-align: center;
+    padding: 60px 15px;
+    border: 1px dashed rgba(200,149,45,.6);
+    border-radius: 14px;
+    background: rgba(7,17,31,.75);
+}}
+
+footer {{
+    text-align: center;
+    padding: 22px;
+    color: #bdbdbd;
+    border-top: 1px solid rgba(200,149,45,.45);
+    background: #050b14;
+}}
+
+@media (max-width: 800px) {{
+    .card-body {{
+        grid-template-columns: 1fr;
+    }}
+
+    .card-head {{
+        grid-template-columns: 1fr;
+    }}
+
+    .foto img {{
+        max-height: 420px;
+    }}
+}}
+</style>
+</head>
+
+<body>
+<header>
+    <h1>Catálogo de Procurados</h1>
+    <p>Documento automático da DIC • Atualizado pelo bot</p>
+</header>
+
+<section class="stats">
+    <div class="stat">
+        <small>Registros totais</small>
+        <strong>{len(procurados)}</strong>
     </div>
 
-    <script>
-        function abrirFoto(src) {{
-            document.getElementById('lightboxImg').src = src;
-            document.getElementById('lightbox').classList.add('ativo');
-        }}
-        function fecharFoto() {{
-            document.getElementById('lightbox').classList.remove('ativo');
-            document.getElementById('lightboxImg').src = '';
-        }}
-        document.addEventListener('keydown', function(e) {{
-            if (e.key === 'Escape') fecharFoto();
-        }});
-        document.getElementById('lightboxImg').addEventListener('click', function(e) {{ e.stopPropagation(); }});
-    </script>
+    <div class="stat">
+        <small>A procurar</small>
+        <strong>{len(ativos)}</strong>
+    </div>
+
+    <div class="stat">
+        <small>Retirados</small>
+        <strong>{len(retirados)}</strong>
+    </div>
+
+    <div class="stat">
+        <small>Última atualização</small>
+        <strong>{esc(data_hora_br())}</strong>
+    </div>
+</section>
+
+<main>
+    {cards}
+</main>
+
+<footer>
+    🔹 Polícia DENARC de Capital Morada • Divisão de Investigações Criminais (DIC)
+</footer>
 </body>
 </html>
-    """
+"""
+
     with open(CATALOGO_HTML, "w", encoding="utf-8") as f:
         f.write(html_final)
 
-
-async def salvar_anexo_publico(anexo: discord.Attachment, prefixo: str) -> str:
-    ext = Path(anexo.filename).suffix.lower()
-    if ext not in [".png", ".jpg", ".jpeg", ".webp", ".gif"]:
-        ext = ".png"
-    nome = f"{data_caso()}-{slugify(prefixo)}-{slugify(Path(anexo.filename).stem)}{ext}"
-    caminho = UPLOADS_DIR / nome
-    await anexo.save(str(caminho))
-    return f"uploads/{nome}"
-
-
-async def salvar_procurado_catalogo(registro: Dict[str, Any]) -> None:
-    lista = carregar_procurados()
-    lista.append(registro)
-    lista = remover_duplicados(lista)
-    salvar_procurados(lista)
-    gerar_catalogo_html()
-
-# =====================================================
-# SERVIDOR HTML
-# =====================================================
 
 async def pagina_inicial(request):
     gerar_catalogo_html()
@@ -413,40 +572,54 @@ async def pagina_inicial(request):
 
 async def start_web_server():
     gerar_catalogo_html()
+
     app = web.Application()
     app.router.add_get("/", pagina_inicial)
     app.router.add_get("/index.html", pagina_inicial)
     app.router.add_static("/uploads/", path=str(UPLOADS_DIR), show_index=False)
+
     runner = web.AppRunner(app)
     await runner.setup()
+
     site = web.TCPSite(runner, "0.0.0.0", PORT)
     await site.start()
-    print(f"Catalogo rodando na porta {PORT}")
+
+    print(f"Catálogo rodando na porta {PORT}")
+
 
 # =====================================================
-# PROCURADOS
+# MENSAGEM DO PROCURADO NO DISCORD
 # =====================================================
 
-def criar_texto_procurado(registro: Dict[str, Any]) -> str:
-    return f"""
-🚨 **MANDADO DE PRISÃO E PROCURAÇÃO INVESTIGATIVA** 🚨
+def montar_descricao_mandado(nome, rg, crimes_cometidos, ultimo_avistamento, informacoes=""):
+    extra_info = ""
+    if informacoes and informacoes.strip() and informacoes.strip() != "-":
+        extra_info = f"""
+━━━━━━━━━━━━━━━━━━━━━━━
+
+📌 **INFORMAÇÕES COMPLEMENTARES**
+
+{informacoes}
+"""
+
+    return f"""🚨 **MANDADO DE PRISÃO E PROCURAÇÃO INVESTIGATIVA** 🚨
 
 A Polícia DENARC de Capital Morada, por intermédio da **Divisão de Investigações Criminais (DIC)**, informa que o indivíduo abaixo encontra-se oficialmente procurado pelas autoridades competentes.
 
 As investigações apontam seu envolvimento em atividades criminosas, havendo mandado ativo para sua localização, abordagem e condução para os procedimentos cabíveis.
 
-📍 **ÚLTIMO AVISTAMENTO:** {registro.get('ultimo_avistamento', 'Não informado')}
+📍 **ÚLTIMO AVISTAMENTO:** {ultimo_avistamento}
 
 ⚠️ **CRIMES IMPUTADOS:**
-{registro.get('crimes', 'Não informado')}
+{crimes_cometidos}
 
 ━━━━━━━━━━━━━━━━━━━━━━━
 
 🆔 **IDENTIFICAÇÃO DO PROCURADO**
 
-👤 **Nome:** {registro.get('nome', 'Não informado')}
-🆔 **RG:** {registro.get('rg', 'Não informado')}
-
+👤 **Nome:** {nome}
+🆔 **RG:** {rg}
+{extra_info}
 ━━━━━━━━━━━━━━━━━━━━━━━
 
 📞 Qualquer informação sobre o paradeiro deste indivíduo deverá ser repassada imediatamente a um agente da DENARC ou da DIC.
@@ -454,577 +627,351 @@ As investigações apontam seu envolvimento em atividades criminosas, havendo ma
 🔒 O sigilo do denunciante será integralmente preservado.
 
 🔹 Polícia DENARC de Capital Morada
-🔹 Divisão de Investigações Criminais (DIC)
-""".strip()
+🔹 Divisão de Investigações Criminais (DIC)"""
 
 
-def criar_embed_procurado(registro: Dict[str, Any]) -> discord.Embed:
-    cor = discord.Color.red() if registro.get("status") == "A PROCURAR" else discord.Color.dark_gray()
-    embed = discord.Embed(description=criar_texto_procurado(registro), color=cor)
-    embed.set_footer(text=f"Caso: {registro.get('caso')} • Cadastro: {registro.get('data')}")
+def montar_embed_mandado(nome, rg, crimes, ultimo, informacoes, caso):
+    embed = discord.Embed(
+        description=montar_descricao_mandado(
+            nome=nome,
+            rg=rg,
+            crimes_cometidos=crimes,
+            ultimo_avistamento=ultimo,
+            informacoes=informacoes
+        ),
+        color=discord.Color.red()
+    )
+    embed.set_footer(text=f"Caso: {caso} • Cadastro: {data_hora_br()}")
     return embed
 
 
-async def postar_procurado_oficial(registro: Dict[str, Any]) -> Optional[discord.Message]:
-    canal = bot.get_channel(PROCURADOS_CHANNEL_ID)
-    if not canal:
-        return None
-
-    arquivos = []
-    for chave, nome in [("foto_individuo", "foto_individuo"), ("foto_rg", "foto_rg")]:
-        rel = registro.get(chave, "")
-        if rel:
-            caminho = PUBLIC_DIR / rel
-            if caminho.exists():
-                arquivos.append(discord.File(str(caminho), filename=f"{nome}_{registro.get('rg','')}.png"))
-
-    embed = criar_embed_procurado(registro)
-    msg = await canal.send(embed=embed, files=arquivos)
-    return msg
-
+# =====================================================
+# MODAIS E BOTÕES
+# =====================================================
 
 class NovoProcuradoModal(Modal, title="Cadastrar Novo Procurado"):
-    nome = TextInput(label="Nome", placeholder="Nome do procurado", max_length=100)
-    rg = TextInput(label="RG", placeholder="RG do procurado", max_length=50)
-    crimes = TextInput(label="Crimes Cometidos", placeholder="Ex: Art. 8.3\nFormação de Quadrilha", style=discord.TextStyle.paragraph, max_length=1000)
-    ultimo = TextInput(label="Último Avistamento", placeholder="Ex: Caixa d'água", style=discord.TextStyle.paragraph, max_length=600)
-    informacoes = TextInput(label="Informações", placeholder="Detalhes extras da investigação", style=discord.TextStyle.paragraph, max_length=1200, required=False)
+    nome = TextInput(
+        label="Nome do procurado",
+        placeholder="Ex: RODRIGUES ARTHUR",
+        max_length=100
+    )
+
+    rg = TextInput(
+        label="RG",
+        placeholder="Ex: 24348",
+        max_length=40
+    )
+
+    crimes_cometidos = TextInput(
+        label="Crimes cometidos",
+        placeholder="Ex: Art. 2.2.1 - Sequestro de Oficial\nArt. 8.3 - Formação de Quadrilha",
+        style=discord.TextStyle.paragraph,
+        max_length=1000
+    )
+
+    ultimo_avistamento = TextInput(
+        label="Último avistamento",
+        placeholder="Ex: Caixa d'água",
+        style=discord.TextStyle.paragraph,
+        max_length=500
+    )
+
+    informacoes = TextInput(
+        label="Informações extras",
+        placeholder="Ex: Suspeito de alta periculosidade...",
+        style=discord.TextStyle.paragraph,
+        required=False,
+        max_length=1000
+    )
 
     async def on_submit(self, interaction: discord.Interaction):
         guild = interaction.guild
-        if guild is None:
-            await interaction.response.send_message("❌ Use isso dentro de um servidor.", ephemeral=True)
-            return
 
-        categoria = guild.get_channel(PROCURADOS_TEMP_CATEGORY_ID) if PROCURADOS_TEMP_CATEGORY_ID else None
         overwrites = {
             guild.default_role: discord.PermissionOverwrite(view_channel=False),
-            interaction.user: discord.PermissionOverwrite(view_channel=True, send_messages=True, attach_files=True, read_message_history=True),
+            interaction.user: discord.PermissionOverwrite(
+                view_channel=True,
+                send_messages=True,
+                attach_files=True,
+                read_message_history=True
+            ),
+            guild.me: discord.PermissionOverwrite(
+                view_channel=True,
+                send_messages=True,
+                manage_channels=True,
+                attach_files=True,
+                read_message_history=True
+            )
         }
-        if guild.me:
-            overwrites[guild.me] = discord.PermissionOverwrite(view_channel=True, send_messages=True, manage_channels=True, read_message_history=True, attach_files=True)
-        for cargo_id in set(CARGOS_ADMIN_IDS + CARGOS_EQUIPE_IDS):
-            cargo = guild.get_role(cargo_id)
-            if cargo:
-                overwrites[cargo] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True, attach_files=True)
 
-        nome_canal = f"📸・procurado-{slugify(str(self.nome.value))}"
-        canal = await guild.create_text_channel(name=nome_canal, category=categoria, overwrites=overwrites)
+        nome_canal = f"procurado-{slug(self.nome.value)}-{somente_numero(self.rg.value) or 'sem-rg'}"
+        canal = await guild.create_text_channel(
+            name=nome_canal[:90],
+            overwrites=overwrites,
+            reason=f"Cadastro provisório de procurado por {interaction.user}"
+        )
 
-        cadastros_pendentes[canal.id] = {
-            "nome": str(self.nome.value),
-            "rg": str(self.rg.value),
-            "crimes": str(self.crimes.value),
-            "ultimo_avistamento": str(self.ultimo.value),
-            "informacoes": str(self.informacoes.value or ""),
-            "autor_id": interaction.user.id,
-            "autor_nome": str(interaction.user),
-        }
+        view = FinalizarProcuradoView(
+            nome=self.nome.value,
+            rg=self.rg.value,
+            crimes=str(self.crimes_cometidos.value),
+            ultimo_avistamento=str(self.ultimo_avistamento.value),
+            informacoes=str(self.informacoes.value or ""),
+            autor_id=interaction.user.id,
+            autor_nome=str(interaction.user)
+        )
 
         await canal.send(
             f"🚨 **Cadastro de Procurado — DIC**\n\n"
             f"👤 **Nome:** {self.nome.value}\n"
-            f"🪪 **RG:** {self.rg.value}\n\n"
-            f"📸 Envie aqui **2 imagens obrigatórias**:\n"
-            f"**1. Foto do indivíduo**\n"
-            f"**2. Foto do RG**\n\n"
-            f"Depois clique em **✅ Finalizar Cadastro**.",
-            view=FinalizarProcuradoView()
+            f"🆔 **RG:** {self.rg.value}\n\n"
+            f"📸 **Envie 2 imagens neste canal:**\n"
+            f"1️⃣ **Foto do indivíduo**\n"
+            f"2️⃣ **Foto do RG / identificação**\n\n"
+            f"Depois de enviar as duas imagens, clique em **✅ Finalizar Cadastro**.\n\n"
+            f"⚠️ Este canal é provisório e pode ser apagado depois.",
+            view=view
         )
 
-        await enviar_log(f"📁 Canal provisório de procurado criado por {interaction.user.mention}: {canal.mention}")
-        await interaction.response.send_message(f"✅ Canal provisório criado: {canal.mention}", ephemeral=True)
+        await interaction.response.send_message(
+            f"✅ Canal provisório criado: {canal.mention}\nEnvie as duas fotos lá e finalize o cadastro.",
+            ephemeral=True
+        )
 
 
 class FinalizarProcuradoView(View):
-    def __init__(self):
+    def __init__(self, nome, rg, crimes, ultimo_avistamento, informacoes, autor_id, autor_nome):
         super().__init__(timeout=None)
+        self.nome = nome
+        self.rg = rg
+        self.crimes = crimes
+        self.ultimo_avistamento = ultimo_avistamento
+        self.informacoes = informacoes
+        self.autor_id = autor_id
+        self.autor_nome = autor_nome
 
-    @discord.ui.button(label="Finalizar Cadastro", emoji="✅", style=discord.ButtonStyle.green, custom_id="dic_finalizar_procurado")
+    @discord.ui.button(
+        label="Finalizar Cadastro",
+        emoji="✅",
+        style=discord.ButtonStyle.success
+    )
     async def finalizar(self, interaction: discord.Interaction, button: Button):
-        canal = interaction.channel
-        if not isinstance(canal, discord.TextChannel):
-            await interaction.response.send_message("❌ Canal inválido.", ephemeral=True)
+        if interaction.user.id != self.autor_id and not interaction.user.guild_permissions.manage_guild:
+            await interaction.response.send_message("❌ Apenas quem iniciou o cadastro ou a administração pode finalizar.", ephemeral=True)
             return
 
-        dados = cadastros_pendentes.get(canal.id)
-        if not dados:
-            await interaction.response.send_message("❌ Não encontrei os dados desse cadastro. Crie novamente pelo painel.", ephemeral=True)
-            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
 
-        if interaction.user.id != dados.get("autor_id") and isinstance(interaction.user, discord.Member) and not usuario_tem_admin(interaction.user):
-            await interaction.response.send_message("❌ Apenas quem criou ou a equipe pode finalizar.", ephemeral=True)
-            return
-
-        anexos: List[discord.Attachment] = []
-        async for msg in canal.history(limit=100, oldest_first=True):
-            for a in msg.attachments:
-                if (a.content_type and a.content_type.startswith("image/")) or Path(a.filename).suffix.lower() in [".png", ".jpg", ".jpeg", ".webp", ".gif"]:
-                    anexos.append(a)
+        anexos = []
+        async for msg in interaction.channel.history(limit=100, oldest_first=True):
+            for anexo in msg.attachments:
+                if eh_imagem(anexo):
+                    anexos.append(anexo)
 
         if len(anexos) < 2:
-            await interaction.response.send_message("❌ Envie as 2 imagens: foto do indivíduo e foto do RG.", ephemeral=True)
+            await interaction.followup.send(
+                "❌ Envie as duas imagens antes de finalizar: **foto do indivíduo** e **foto do RG**.",
+                ephemeral=True
+            )
             return
 
-        await interaction.response.defer(ephemeral=True)
-        foto_ind = await salvar_anexo_publico(anexos[0], f"individuo-{dados['rg']}")
-        foto_rg = await salvar_anexo_publico(anexos[1], f"rg-{dados['rg']}")
+        foto_ind_url, foto_ind_path = await salvar_attachment(anexos[0], "individuo", self.rg)
+        foto_rg_url, foto_rg_path = await salvar_attachment(anexos[1], "rg", self.rg)
 
-        registro = {
-            "id": data_caso(),
-            "caso": f"DIC-{data_caso()}",
-            "data": agora_br(),
+        caso = f"DIC-{data_caso()}"
+
+        canal_oficial = interaction.guild.get_channel(PROCURADOS_CHANNEL_ID)
+        if not canal_oficial:
+            await interaction.followup.send(
+                "❌ Canal oficial de procurados não encontrado. Confira `PROCURADOS_CHANNEL_ID` no `.env`.",
+                ephemeral=True
+            )
+            return
+
+        embed = montar_embed_mandado(
+            nome=self.nome,
+            rg=self.rg,
+            crimes=self.crimes,
+            ultimo=self.ultimo_avistamento,
+            informacoes=self.informacoes,
+            caso=caso
+        )
+
+        arquivos = [
+            discord.File(str(foto_ind_path), filename=f"foto_individuo_{slug(self.rg)}{foto_ind_path.suffix}"),
+            discord.File(str(foto_rg_path), filename=f"foto_rg_{slug(self.rg)}{foto_rg_path.suffix}")
+        ]
+
+        mensagem = await canal_oficial.send(files=arquivos, embed=embed)
+
+        dados = {
+            "id": uuid.uuid4().hex,
+            "caso": caso,
+            "nome": self.nome,
+            "rg": self.rg,
+            "crimes_cometidos": self.crimes,
+            "ultimo_avistamento": self.ultimo_avistamento,
+            "informacoes": self.informacoes,
+            "foto_individuo": foto_ind_url,
+            "foto_rg": foto_rg_url,
             "status": "A PROCURAR",
-            "nome": dados["nome"],
-            "rg": dados["rg"],
-            "crimes": dados["crimes"],
-            "ultimo_avistamento": dados["ultimo_avistamento"],
-            "informacoes": dados["informacoes"],
-            "foto_individuo": foto_ind,
-            "foto_rg": foto_rg,
-            "autor_id": dados["autor_id"],
-            "autor_nome": dados["autor_nome"],
-            "mensagem_id": None,
-            "mensagem_url": None,
+            "data_cadastro": data_hora_br(),
+            "autor_id": self.autor_id,
+            "autor_nome": self.autor_nome,
+            "discord_message_id": mensagem.id,
+            "discord_jump_url": mensagem.jump_url
         }
 
-        msg = await postar_procurado_oficial(registro)
-        if msg:
-            registro["mensagem_id"] = msg.id
-            registro["mensagem_url"] = msg.jump_url
+        upsert_procurado(dados)
 
-        await salvar_procurado_catalogo(registro)
-        cadastros_pendentes.pop(canal.id, None)
+        await interaction.followup.send(
+            f"✅ Procurado cadastrado com sucesso!\n"
+            f"📌 Postagem: {mensagem.jump_url}\n"
+            f"📄 Catálogo: {CATALOG_PUBLIC_URL}",
+            ephemeral=True
+        )
 
-        await enviar_log(f"✅ Procurado cadastrado: {registro['nome']} | RG {registro['rg']} | Catálogo: {CATALOG_PUBLIC_URL}")
-        await interaction.followup.send(f"✅ Procurado cadastrado e enviado ao catálogo: {CATALOG_PUBLIC_URL}", ephemeral=True)
-        await canal.send("✅ Cadastro finalizado. Este canal será apagado em 5 segundos.")
-        await asyncio.sleep(5)
         try:
-            await canal.delete(reason="Cadastro de procurado finalizado")
+            await interaction.channel.send("✅ Cadastro finalizado. Este canal será apagado em 10 segundos.")
+            await asyncio.sleep(10)
+            await interaction.channel.delete(reason="Cadastro de procurado finalizado")
         except Exception:
             pass
 
-    @discord.ui.button(label="Cancelar", emoji="❌", style=discord.ButtonStyle.red, custom_id="dic_cancelar_procurado")
+    @discord.ui.button(
+        label="Cancelar Cadastro",
+        emoji="🗑️",
+        style=discord.ButtonStyle.danger
+    )
     async def cancelar(self, interaction: discord.Interaction, button: Button):
-        canal = interaction.channel
-        if isinstance(canal, discord.TextChannel):
-            cadastros_pendentes.pop(canal.id, None)
-            await interaction.response.send_message("Cadastro cancelado. Canal será apagado.", ephemeral=True)
-            await asyncio.sleep(3)
-            try:
-                await canal.delete(reason="Cadastro de procurado cancelado")
-            except Exception:
-                pass
+        if interaction.user.id != self.autor_id and not interaction.user.guild_permissions.manage_guild:
+            await interaction.response.send_message("❌ Apenas quem iniciou o cadastro ou a administração pode cancelar.", ephemeral=True)
+            return
+
+        await interaction.response.send_message("🗑️ Cadastro cancelado. Canal será apagado em 5 segundos.", ephemeral=True)
+        await asyncio.sleep(5)
+        try:
+            await interaction.channel.delete(reason="Cadastro de procurado cancelado")
+        except Exception:
+            pass
 
 
 class RetirarProcuradoModal(Modal, title="Retirar Procurado"):
-    rg = TextInput(label="RG", placeholder="RG do procurado", max_length=50)
-    motivo = TextInput(label="Motivo", placeholder="Motivo da retirada", style=discord.TextStyle.paragraph, max_length=800, required=False)
+    rg = TextInput(
+        label="RG do procurado",
+        placeholder="Ex: 24348",
+        max_length=40
+    )
+
+    motivo = TextInput(
+        label="Motivo da retirada",
+        placeholder="Ex: Capturado / Mandado encerrado / Erro no cadastro",
+        style=discord.TextStyle.paragraph,
+        max_length=500
+    )
 
     async def on_submit(self, interaction: discord.Interaction):
-        await retirar_procurado(interaction, str(self.rg.value), str(self.motivo.value or "Não informado"))
+        ok = marcar_retirado(self.rg.value, self.motivo.value, str(interaction.user))
+
+        if ok:
+            await interaction.response.send_message(
+                f"✅ Procurado de RG `{self.rg.value}` foi marcado como **RETIRADO** no catálogo.\n{CATALOG_PUBLIC_URL}",
+                ephemeral=True
+            )
+        else:
+            await interaction.response.send_message(
+                f"❌ Nenhum procurado encontrado com o RG `{self.rg.value}`.",
+                ephemeral=True
+            )
 
 
 class PainelProcuradosView(View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="Novo Procurado", emoji="➕", style=discord.ButtonStyle.danger, custom_id="dic_novo_procurado")
-    async def novo(self, interaction: discord.Interaction, button: Button):
+    @discord.ui.button(
+        label="Novo Procurado",
+        emoji="➕",
+        style=discord.ButtonStyle.danger,
+        custom_id="dic_procurados_novo"
+    )
+    async def novo_procurado(self, interaction: discord.Interaction, button: Button):
         await interaction.response.send_modal(NovoProcuradoModal())
 
-    @discord.ui.button(label="Lista de Procurados", emoji="📋", style=discord.ButtonStyle.blurple, custom_id="dic_lista_procurados")
-    async def lista(self, interaction: discord.Interaction, button: Button):
+    @discord.ui.button(
+        label="Lista de Procurados",
+        emoji="📋",
+        style=discord.ButtonStyle.primary,
+        custom_id="dic_procurados_lista"
+    )
+    async def lista_procurados(self, interaction: discord.Interaction, button: Button):
         procurados = carregar_procurados()
         ativos = [p for p in procurados if p.get("status", "A PROCURAR") == "A PROCURAR"]
-        if not ativos:
-            texto = "Nenhum procurado ativo cadastrado."
-        else:
-            linhas = [f"• **{p.get('nome','Sem nome')}** — RG: `{p.get('rg','')}`" for p in ativos[:20]]
-            texto = "\n".join(linhas)
-            if len(ativos) > 20:
-                texto += f"\n... e mais {len(ativos)-20} no catálogo."
-        await interaction.response.send_message(f"📋 **Procurados ativos:**\n{texto}\n\n🔗 {CATALOG_PUBLIC_URL}", ephemeral=True)
 
-    @discord.ui.button(label="Retirar Procurado", emoji="❌", style=discord.ButtonStyle.gray, custom_id="dic_retirar_procurado")
-    async def retirar(self, interaction: discord.Interaction, button: Button):
+        if not ativos:
+            texto = "📋 Não há procurados ativos no momento."
+        else:
+            linhas = []
+            for p in ativos[:20]:
+                linhas.append(f"• **{p.get('nome', 'Sem nome')}** — RG `{p.get('rg', 'Sem RG')}`")
+            texto = "\n".join(linhas)
+
+        await interaction.response.send_message(
+            f"📋 **Procurados Ativos:**\n{texto}\n\n📄 **Catálogo:** {CATALOG_PUBLIC_URL}",
+            ephemeral=True
+        )
+
+    @discord.ui.button(
+        label="Retirar Procurado",
+        emoji="❌",
+        style=discord.ButtonStyle.secondary,
+        custom_id="dic_procurados_retirar"
+    )
+    async def retirar_procurado(self, interaction: discord.Interaction, button: Button):
         await interaction.response.send_modal(RetirarProcuradoModal())
 
-    @discord.ui.button(label="Abrir Catálogo", emoji="📄", style=discord.ButtonStyle.green, custom_id="dic_abrir_catalogo")
-    async def abrir_catalogo(self, interaction: discord.Interaction, button: Button):
-        await interaction.response.send_message(f"📄 **Catálogo de Procurados:**\n{CATALOG_PUBLIC_URL}", ephemeral=True)
-
-    @discord.ui.button(label="Sincronizar Antigos", emoji="🔄", style=discord.ButtonStyle.secondary, custom_id="dic_sync_catalogo")
-    async def sync_old(self, interaction: discord.Interaction, button: Button):
-        await sincronizar_catalogo_core(interaction)
-
-
-async def retirar_procurado(interaction: discord.Interaction, rg: str, motivo: str):
-    lista = carregar_procurados()
-    alvo = limpar_rg(rg)
-    encontrado = None
-    for p in lista:
-        if limpar_rg(p.get("rg", "")) == alvo:
-            encontrado = p
-            break
-
-    if not encontrado:
-        await interaction.response.send_message("❌ Não encontrei procurado com esse RG no catálogo.", ephemeral=True)
-        return
-
-    encontrado["status"] = "RETIRADO"
-    encontrado["motivo_retirada"] = motivo
-    encontrado["data_retirada"] = agora_br()
-    encontrado["retirado_por"] = str(interaction.user)
-    salvar_procurados(lista)
-    gerar_catalogo_html()
-
-    if encontrado.get("mensagem_id") and PROCURADOS_CHANNEL_ID:
-        canal = bot.get_channel(PROCURADOS_CHANNEL_ID)
-        if canal:
-            try:
-                msg = await canal.fetch_message(int(encontrado["mensagem_id"]))
-                embed = discord.Embed(
-                    description=criar_texto_procurado(encontrado) + f"\n\n❌ **STATUS:** RETIRADO\n📌 **Motivo:** {motivo}",
-                    color=discord.Color.dark_gray(),
-                )
-                await msg.edit(embed=embed)
-            except Exception:
-                pass
-
-    if HISTORICO_PROCURADOS_ID:
-        historico = bot.get_channel(HISTORICO_PROCURADOS_ID)
-        if historico:
-            try:
-                await historico.send(f"❌ **Procurado Retirado**\n👤 Nome: {encontrado.get('nome')}\n🪪 RG: {encontrado.get('rg')}\n📌 Motivo: {motivo}\n👮 Retirado por: {interaction.user.mention}")
-            except Exception:
-                pass
-
-    await enviar_log(f"❌ Procurado retirado: {encontrado.get('nome')} | RG {encontrado.get('rg')} | Motivo: {motivo}")
-    await interaction.response.send_message(f"✅ Procurado retirado e catálogo atualizado.\n🔗 {CATALOG_PUBLIC_URL}", ephemeral=True)
-
-
-def extrair_por_labels(texto: str) -> Dict[str, str]:
-    dados = {}
-    padroes = {
-        "nome": r"(?:nome|indiv[ií]duo)\s*[:\-]\s*(.+)",
-        "rg": r"(?:rg|passaporte)\s*[:\-]\s*(.+)",
-        "crimes": r"(?:crimes cometidos|crimes imputados|crimes|crime)\s*[:\-]\s*(.+)",
-        "ultimo_avistamento": r"(?:[úu]ltimo avistamento|avistamento)\s*[:\-]\s*(.+)",
-        "informacoes": r"(?:informa[cç][õo]es|observa[cç][õo]es|detalhes)\s*[:\-]\s*(.+)",
-    }
-    for chave, padrao in padroes.items():
-        m = re.search(padrao, texto, flags=re.I)
-        if m:
-            dados[chave] = m.group(1).strip()[:1000]
-    return dados
-
-
-async def importar_mensagem_antiga(msg: discord.Message) -> Optional[Dict[str, Any]]:
-    texto_total = msg.content or ""
-    for embed in msg.embeds:
-        if embed.title:
-            texto_total += "\n" + embed.title
-        if embed.description:
-            texto_total += "\n" + embed.description
-        for field in embed.fields:
-            texto_total += f"\n{field.name}: {field.value}"
-
-    dados = extrair_por_labels(texto_total)
-    if not dados.get("rg") or not dados.get("nome"):
-        return None
-    if procurar_por_rg(dados.get("rg", "")):
-        return None
-
-    imagens = []
-    for a in msg.attachments:
-        if (a.content_type and a.content_type.startswith("image/")) or Path(a.filename).suffix.lower() in [".png", ".jpg", ".jpeg", ".webp", ".gif"]:
-            imagens.append(a)
-
-    foto_ind = await salvar_anexo_publico(imagens[0], f"sync-ind-{dados.get('rg','')}") if len(imagens) >= 1 else ""
-    foto_rg = await salvar_anexo_publico(imagens[1], f"sync-rg-{dados.get('rg','')}") if len(imagens) >= 2 else ""
-
-    return {
-        "id": f"SYNC-{msg.id}",
-        "caso": f"SYNC-{msg.id}",
-        "data": msg.created_at.strftime("%d/%m/%Y %H:%M"),
-        "status": "A PROCURAR",
-        "nome": dados.get("nome", ""),
-        "rg": dados.get("rg", ""),
-        "crimes": dados.get("crimes", "Não identificado na mensagem antiga"),
-        "ultimo_avistamento": dados.get("ultimo_avistamento", "Não identificado na mensagem antiga"),
-        "informacoes": dados.get("informacoes", "Importado automaticamente do histórico do canal."),
-        "foto_individuo": foto_ind,
-        "foto_rg": foto_rg,
-        "autor_id": None,
-        "autor_nome": "Sincronização antiga",
-        "mensagem_id": msg.id,
-        "mensagem_url": msg.jump_url,
-    }
-
-
-async def sincronizar_catalogo_core(interaction: discord.Interaction):
-    if not PROCURADOS_CHANNEL_ID:
-        await interaction.response.send_message("❌ Configure PROCURADOS_CHANNEL_ID.", ephemeral=True)
-        return
-    canal = bot.get_channel(PROCURADOS_CHANNEL_ID)
-    if not isinstance(canal, discord.TextChannel):
-        await interaction.response.send_message("❌ Não encontrei o canal de procurados.", ephemeral=True)
-        return
-    await interaction.response.defer(ephemeral=True)
-    importados = 0
-    analisados = 0
-    lista = carregar_procurados()
-    async for msg in canal.history(limit=1000, oldest_first=True):
-        analisados += 1
-        registro = await importar_mensagem_antiga(msg)
-        if registro:
-            lista.append(registro)
-            importados += 1
-    lista = remover_duplicados(lista)
-    salvar_procurados(lista)
-    gerar_catalogo_html()
-    await interaction.followup.send(f"✅ Sincronização finalizada.\nMensagens analisadas: `{analisados}`\nProcurados importados: `{importados}`\nCatálogo: {CATALOG_PUBLIC_URL}", ephemeral=True)
 
 # =====================================================
-# MESAS
+# BOT
 # =====================================================
 
-TOPICOS_MESA = [
-    "📌 Painel",
-    "🖼️ Fotos líderes",
-    "👥 Fotos dos membros",
-    "📻 Rádio",
-    "📍 Localização",
-    "⚖️ Crimes da comunidade",
-    "📦 Baú de líder",
-    "📦 Baú de membros",
-    "🌾 Rota de farm",
-    "⚙️ Rota de produção",
-    "🧪 Ingredientes base e produtos",
-    "🕵️ Informante",
-    "💬 Chat",
-]
+intents = discord.Intents.default()
+intents.message_content = True
+intents.members = True
+intents.guilds = True
 
 
-def registrar_mesa(dados: Dict[str, Any]) -> None:
-    mesas = carregar_mesas()
-    mesas = [m for m in mesas if m.get("canal_id") != dados.get("canal_id")]
-    mesas.append(dados)
-    salvar_mesas(mesas)
-
-
-def buscar_mesa_por_canal(canal_id: int) -> Optional[Dict[str, Any]]:
-    for mesa in carregar_mesas():
-        if int(mesa.get("canal_id", 0)) == canal_id:
-            return mesa
-    return None
-
-
-class CriarMesaModal(Modal, title="Criar Mesa de Investigação"):
-    apelido = TextInput(label="Apelido do agente", placeholder="Ex: Baiano", max_length=50)
-    familia = TextInput(label="Nome da família/organização", placeholder="Ex: Olimpo", max_length=80)
-    observacao = TextInput(label="Observação inicial", placeholder="Opcional", style=discord.TextStyle.paragraph, required=False, max_length=600)
-
-    async def on_submit(self, interaction: discord.Interaction):
-        await criar_mesa_core(interaction, str(self.apelido.value), str(self.familia.value), str(self.observacao.value or ""))
-
-
-class FecharMesaView(View):
+class DICBot(commands.Bot):
     def __init__(self):
-        super().__init__(timeout=None)
+        super().__init__(command_prefix="!", intents=intents)
 
-    @discord.ui.button(label="Fechar Mesa", emoji="🔒", style=discord.ButtonStyle.red, custom_id="dic_fechar_mesa_botao")
-    async def fechar(self, interaction: discord.Interaction, button: Button):
-        await fechar_mesa_core(interaction, motivo="Fechada pelo botão")
+    async def setup_hook(self):
+        self.add_view(PainelProcuradosView())
 
-
-class PainelMesasView(View):
-    def __init__(self):
-        super().__init__(timeout=None)
-
-    @discord.ui.button(label="Criar Mesa", emoji="➕", style=discord.ButtonStyle.green, custom_id="dic_criar_mesa")
-    async def criar(self, interaction: discord.Interaction, button: Button):
-        await interaction.response.send_modal(CriarMesaModal())
-
-    @discord.ui.button(label="Reabrir Mesa", emoji="🔓", style=discord.ButtonStyle.blurple, custom_id="dic_reabrir_mesa")
-    async def reabrir(self, interaction: discord.Interaction, button: Button):
-        await interaction.response.send_message("Use `/reabrirmesa canal:#canal` para escolher a mesa que será reaberta.", ephemeral=True)
-
-    @discord.ui.button(label="Histórico", emoji="📂", style=discord.ButtonStyle.gray, custom_id="dic_historico_mesas")
-    async def historico(self, interaction: discord.Interaction, button: Button):
-        await historico_mesa_core(interaction)
-
-    @discord.ui.button(label="Backup", emoji="📦", style=discord.ButtonStyle.gray, custom_id="dic_backup_mesas")
-    async def backup(self, interaction: discord.Interaction, button: Button):
-        await backup_core(interaction)
-
-    @discord.ui.button(label="Estatísticas", emoji="📊", style=discord.ButtonStyle.gray, custom_id="dic_stats_mesas")
-    async def stats(self, interaction: discord.Interaction, button: Button):
-        await estatisticas_core(interaction)
-
-
-async def criar_mesa_core(interaction: discord.Interaction, apelido: str, familia: str, observacao: str = ""):
-    guild = interaction.guild
-    if guild is None:
-        await interaction.response.send_message("❌ Use dentro de um servidor.", ephemeral=True)
-        return
-
-    categoria = guild.get_channel(CATEGORIA_MESAS_ABERTAS_ID) if CATEGORIA_MESAS_ABERTAS_ID else None
-    overwrites = cargos_equipe_permissoes(guild)
-    overwrites[interaction.user] = discord.PermissionOverwrite(view_channel=True, send_messages=True, attach_files=True, read_message_history=True)
-
-    nome_canal = f"🕵️┃{slugify(apelido)}-{slugify(familia)}"
-    canal = await guild.create_text_channel(name=nome_canal, category=categoria, overwrites=overwrites)
-
-    texto_topicos = "\n".join([f"**{t}**\n> Preencha as informações deste tópico abaixo.\n" for t in TOPICOS_MESA])
-    embed = discord.Embed(
-        title=f"🕵️ Mesa de Investigação — {familia}",
-        description=(
-            f"👮 **Agente:** {interaction.user.mention}\n"
-            f"📛 **Apelido:** {apelido}\n"
-            f"🏷️ **Organização/Família:** {familia}\n"
-            f"🕒 **Criada em:** {agora_br()}\n\n"
-            f"📝 **Observação:** {observacao or 'Nenhuma'}\n\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"{texto_topicos}"
-        ),
-        color=discord.Color.gold(),
-    )
-    await canal.send(embed=embed, view=FecharMesaView())
-
-    registrar_mesa({
-        "canal_id": canal.id,
-        "nome_canal": canal.name,
-        "apelido": apelido,
-        "familia": familia,
-        "autor_id": interaction.user.id,
-        "autor_nome": str(interaction.user),
-        "status": "ABERTA",
-        "criada_em": agora_br(),
-        "fechada_em": None,
-    })
-
-    await enviar_log(f"➕ Mesa criada: {canal.mention} | Família: {familia} | Por: {interaction.user.mention}")
-    await interaction.response.send_message(f"✅ Mesa criada: {canal.mention}", ephemeral=True)
-
-
-async def fechar_mesa_core(interaction: discord.Interaction, motivo: str = "Fechada"):
-    canal = interaction.channel
-    if not isinstance(canal, discord.TextChannel):
-        await interaction.response.send_message("❌ Use dentro do canal da mesa.", ephemeral=True)
-        return
-
-    mesa = buscar_mesa_por_canal(canal.id)
-    if not mesa:
-        await interaction.response.send_message("❌ Esse canal não parece ser uma mesa cadastrada.", ephemeral=True)
-        return
-
-    guild = interaction.guild
-    categoria_fechada = guild.get_channel(CATEGORIA_MESAS_FECHADAS_ID) if guild and CATEGORIA_MESAS_FECHADAS_ID else None
-    try:
-        if categoria_fechada:
-            await canal.edit(category=categoria_fechada, name=f"🔒・{canal.name}")
+        if GUILD_ID:
+            guild_obj = discord.Object(id=GUILD_ID)
+            self.tree.copy_global_to(guild=guild_obj)
+            await self.tree.sync(guild=guild_obj)
+            print("Comandos sincronizados no servidor.")
         else:
-            await canal.edit(name=f"🔒・{canal.name}")
-    except Exception:
-        pass
-
-    mesas = carregar_mesas()
-    for m in mesas:
-        if int(m.get("canal_id", 0)) == canal.id:
-            m["status"] = "FECHADA"
-            m["fechada_em"] = agora_br()
-            m["motivo_fechamento"] = motivo
-    salvar_mesas(mesas)
-
-    await enviar_log(f"🔒 Mesa fechada: {canal.mention} | Por: {interaction.user.mention}")
-    await interaction.response.send_message("🔒 Mesa fechada com sucesso.", ephemeral=True)
+            await self.tree.sync()
+            print("Comandos sincronizados globalmente.")
 
 
-async def reabrir_mesa_core(interaction: discord.Interaction, canal: discord.TextChannel):
-    mesa = buscar_mesa_por_canal(canal.id)
-    if not mesa:
-        await interaction.response.send_message("❌ Essa mesa não foi encontrada no histórico.", ephemeral=True)
-        return
-    guild = interaction.guild
-    categoria_aberta = guild.get_channel(CATEGORIA_MESAS_ABERTAS_ID) if guild and CATEGORIA_MESAS_ABERTAS_ID else None
-    try:
-        novo_nome = canal.name.replace("🔒・", "").replace("🔒-", "")
-        await canal.edit(category=categoria_aberta, name=novo_nome)
-    except Exception:
-        pass
-    mesas = carregar_mesas()
-    for m in mesas:
-        if int(m.get("canal_id", 0)) == canal.id:
-            m["status"] = "ABERTA"
-            m["reaberta_em"] = agora_br()
-    salvar_mesas(mesas)
-    await enviar_log(f"🔓 Mesa reaberta: {canal.mention} | Por: {interaction.user.mention}")
-    await interaction.response.send_message(f"🔓 Mesa reaberta: {canal.mention}", ephemeral=True)
+bot = DICBot()
 
 
-async def historico_mesa_core(interaction: discord.Interaction):
-    mesas = carregar_mesas()
-    if not mesas:
-        await interaction.response.send_message("📂 Nenhuma mesa registrada ainda.", ephemeral=True)
-        return
-    linhas = []
-    for m in mesas[-25:]:
-        linhas.append(f"• **{m.get('familia','Sem nome')}** | `{m.get('status')}` | <#{m.get('canal_id')}> | {m.get('criada_em')}")
-    await interaction.response.send_message("📂 **Histórico de Mesas:**\n" + "\n".join(linhas), ephemeral=True)
+@bot.event
+async def on_ready():
+    print(f"Bot online como {bot.user}")
 
-
-async def backup_core(interaction: discord.Interaction):
-    guild = interaction.guild
-    if guild is None:
-        await interaction.response.send_message("❌ Use dentro de um servidor.", ephemeral=True)
-        return
-    await interaction.response.defer(ephemeral=True)
-    arquivo = BACKUP_DIR / f"backup-{data_caso()}.json"
-    dados = {
-        "data": agora_br(),
-        "servidor": guild.name,
-        "procurados": carregar_procurados(),
-        "mesas": carregar_mesas(),
-    }
-    salvar_json(arquivo, dados)
-    canal_backup = bot.get_channel(BACKUP_CHANNEL_ID) if BACKUP_CHANNEL_ID else None
-    if canal_backup:
-        try:
-            await canal_backup.send(f"📦 **Backup Executado**\nServidor: {guild.name}\nData: {agora_br()}", file=discord.File(str(arquivo)))
-        except Exception:
-            pass
-    await enviar_log(f"📦 Backup executado: {arquivo.name}")
-    await interaction.followup.send(f"✅ Backup criado: `{arquivo.name}`", ephemeral=True)
-
-
-async def estatisticas_core(interaction: discord.Interaction):
-    procurados = carregar_procurados()
-    mesas = carregar_mesas()
-    ativos = len([p for p in procurados if p.get("status", "A PROCURAR") == "A PROCURAR"])
-    retirados = len([p for p in procurados if p.get("status") == "RETIRADO"])
-    abertas = len([m for m in mesas if m.get("status") == "ABERTA"])
-    fechadas = len([m for m in mesas if m.get("status") == "FECHADA"])
-    await interaction.response.send_message(
-        f"📊 **Estatísticas DIC**\n\n"
-        f"🚨 Procurados totais: `{len(procurados)}`\n"
-        f"🟢 Procurados ativos: `{ativos}`\n"
-        f"🔴 Procurados retirados: `{retirados}`\n\n"
-        f"🕵️ Mesas totais: `{len(mesas)}`\n"
-        f"🟢 Mesas abertas: `{abertas}`\n"
-        f"🔒 Mesas fechadas: `{fechadas}`\n\n"
-        f"📄 Catálogo: {CATALOG_PUBLIC_URL}",
-        ephemeral=True,
-    )
 
 # =====================================================
-# SLASH COMMANDS - TODOS
+# COMANDOS
 # =====================================================
 
-@bot.tree.command(name="painelprocurados", description="Envia o painel de gerenciamento de procurados.")
-@app_commands.checks.has_permissions(administrator=True)
+@bot.tree.command(name="painelprocurados", description="Envia o painel de procurados da DIC.")
+@app_commands.default_permissions(manage_guild=True)
 async def painelprocurados(interaction: discord.Interaction):
     embed = discord.Embed(
         title="🚨 Sistema de Procurados - DIC",
@@ -1032,149 +979,170 @@ async def painelprocurados(interaction: discord.Interaction):
             "Utilize os botões abaixo para gerenciar procurados.\n\n"
             "➕ **Novo Procurado** — Cadastrar um novo procurado.\n"
             "📋 **Lista de Procurados** — Ver procurados ativos.\n"
-            "❌ **Retirar Procurado** — Retirar um procurado pelo RG.\n"
-            "📄 **Abrir Catálogo** — Enviar o link do catálogo.\n"
-            "🔄 **Sincronizar Antigos** — Puxar procurados antigos do canal."
+            "❌ **Retirar Procurado** — Retirar um procurado pelo RG."
         ),
-        color=discord.Color.red(),
+        color=discord.Color.red()
     )
+
     await interaction.response.send_message(embed=embed, view=PainelProcuradosView())
-
-
-@bot.tree.command(name="painelmesas", description="Envia o painel de gerenciamento de mesas.")
-@app_commands.checks.has_permissions(administrator=True)
-async def painelmesas(interaction: discord.Interaction):
-    embed = discord.Embed(
-        title="🕵️ Sistema de Mesas - DIC",
-        description=(
-            "Utilize os botões abaixo para gerenciar as mesas.\n\n"
-            "➕ **Criar Mesa** — Abre uma nova mesa de investigação.\n"
-            "🔓 **Reabrir Mesa** — Reabre uma mesa fechada.\n"
-            "📂 **Histórico** — Mostra mesas registradas.\n"
-            "📦 **Backup** — Gera backup dos dados.\n"
-            "📊 **Estatísticas** — Mostra números do sistema."
-        ),
-        color=discord.Color.gold(),
-    )
-    await interaction.response.send_message(embed=embed, view=PainelMesasView())
 
 
 @bot.tree.command(name="catalogo", description="Mostra o link do catálogo de procurados.")
 async def catalogo(interaction: discord.Interaction):
-    await interaction.response.send_message(f"📄 **Catálogo de Procurados:**\n{CATALOG_PUBLIC_URL}", ephemeral=True)
+    gerar_catalogo_html()
+    await interaction.response.send_message(
+        f"📄 **Catálogo de Procurados - DIC:**\n{CATALOG_PUBLIC_URL}",
+        ephemeral=True
+    )
+
+
+@bot.tree.command(name="regerarcatalogo", description="Regera o HTML do catálogo.")
+@app_commands.default_permissions(manage_guild=True)
+async def regerarcatalogo(interaction: discord.Interaction):
+    gerar_catalogo_html()
+    await interaction.response.send_message(
+        f"✅ Catálogo regenerado.\n{CATALOG_PUBLIC_URL}",
+        ephemeral=True
+    )
 
 
 @bot.tree.command(name="retirarprocurado", description="Retira um procurado pelo RG.")
 @app_commands.describe(rg="RG do procurado", motivo="Motivo da retirada")
-async def retirarprocurado(interaction: discord.Interaction, rg: str, motivo: str = "Não informado"):
-    await retirar_procurado(interaction, rg, motivo)
+@app_commands.default_permissions(manage_guild=True)
+async def retirarprocurado(interaction: discord.Interaction, rg: str, motivo: str):
+    ok = marcar_retirado(rg, motivo, str(interaction.user))
+
+    if ok:
+        await interaction.response.send_message(
+            f"✅ Procurado de RG `{rg}` marcado como **RETIRADO** no catálogo.\n{CATALOG_PUBLIC_URL}",
+            ephemeral=True
+        )
+    else:
+        await interaction.response.send_message(
+            f"❌ Nenhum procurado encontrado com o RG `{rg}`.",
+            ephemeral=True
+        )
 
 
-@bot.tree.command(name="sincronizarcatalogo", description="Importa procurados antigos do canal oficial para o catálogo.")
-@app_commands.checks.has_permissions(administrator=True)
-async def sincronizarcatalogo(interaction: discord.Interaction):
-    await sincronizar_catalogo_core(interaction)
+def extrair_linha(desc: str, campo: str):
+    padrao = rf"{campo}:\*\*\s*(.+)"
+    m = re.search(padrao, desc, flags=re.IGNORECASE)
+    if m:
+        return m.group(1).strip()
+    return ""
 
 
-@bot.tree.command(name="regerarcatalogo", description="Recria o HTML do catálogo.")
-@app_commands.checks.has_permissions(administrator=True)
-async def regerarcatalogo(interaction: discord.Interaction):
-    gerar_catalogo_html()
-    await interaction.response.send_message(f"✅ Catálogo recriado: {CATALOG_PUBLIC_URL}", ephemeral=True)
+def extrair_bloco(desc: str, inicio: str, fim_regex: str):
+    padrao = rf"{inicio}:\*\*\s*(.*?)(?:{fim_regex})"
+    m = re.search(padrao, desc, flags=re.IGNORECASE | re.DOTALL)
+    if m:
+        return m.group(1).strip()
+    return ""
 
 
-@bot.tree.command(name="criarmesa", description="Cria uma mesa de investigação.")
-@app_commands.describe(apelido="Apelido do agente", familia="Nome da família/organização", observacao="Observação opcional")
-async def criarmesa(interaction: discord.Interaction, apelido: str, familia: str, observacao: str = ""):
-    await criar_mesa_core(interaction, apelido, familia, observacao)
+@bot.tree.command(name="sincronizarcatalogo", description="Tenta puxar procurados antigos do canal oficial para o catálogo.")
+@app_commands.describe(limite="Quantidade de mensagens para analisar. Ex: 200")
+@app_commands.default_permissions(manage_guild=True)
+async def sincronizarcatalogo(interaction: discord.Interaction, limite: int = 200):
+    await interaction.response.defer(ephemeral=True, thinking=True)
 
-
-@bot.tree.command(name="fecharmesa", description="Fecha a mesa do canal atual.")
-@app_commands.describe(motivo="Motivo do fechamento")
-async def fecharmesa(interaction: discord.Interaction, motivo: str = "Fechada por comando"):
-    await fechar_mesa_core(interaction, motivo)
-
-
-@bot.tree.command(name="reabrirmesa", description="Reabre uma mesa fechada.")
-@app_commands.describe(canal="Canal da mesa")
-async def reabrirmesa(interaction: discord.Interaction, canal: discord.TextChannel):
-    await reabrir_mesa_core(interaction, canal)
-
-
-@bot.tree.command(name="historicomesa", description="Mostra histórico das mesas.")
-async def historicomesa(interaction: discord.Interaction):
-    await historico_mesa_core(interaction)
-
-
-@bot.tree.command(name="backup", description="Gera backup dos dados do bot.")
-@app_commands.checks.has_permissions(administrator=True)
-async def backup(interaction: discord.Interaction):
-    await backup_core(interaction)
-
-
-@bot.tree.command(name="estatisticas", description="Mostra estatísticas do sistema.")
-async def estatisticas(interaction: discord.Interaction):
-    await estatisticas_core(interaction)
-
-# =====================================================
-# EVENTOS
-# =====================================================
-
-comandos_ja_sincronizados = False
-
-@bot.event
-async def on_ready():
-    global comandos_ja_sincronizados
-
-    bot.add_view(PainelProcuradosView())
-    bot.add_view(FinalizarProcuradoView())
-    bot.add_view(PainelMesasView())
-    bot.add_view(FecharMesaView())
-
-    if comandos_ja_sincronizados:
-        print(f"Bot online como {bot.user}")
+    canal = interaction.guild.get_channel(PROCURADOS_CHANNEL_ID)
+    if not canal:
+        await interaction.followup.send("❌ Canal de procurados não encontrado.", ephemeral=True)
         return
 
-    try:
-        if GUILD_ID:
-            guild_obj = discord.Object(id=GUILD_ID)
+    existentes = carregar_procurados()
+    rgs_existentes = {somente_numero(p.get("rg", "")) for p in existentes}
 
-            # 1) Copia todos os comandos definidos no código para o servidor correto.
-            bot.tree.copy_global_to(guild=guild_obj)
-            comandos_servidor = await bot.tree.sync(guild=guild_obj)
+    adicionados = 0
+    ultimos_anexos = []
 
-            # 2) Limpa comandos globais antigos para tirar duplicados do Discord.
-            bot.tree.clear_commands(guild=None)
-            comandos_globais = await bot.tree.sync()
+    async for msg in canal.history(limit=limite, oldest_first=True):
+        imagens_msg = [a for a in msg.attachments if eh_imagem(a)]
+        if imagens_msg:
+            ultimos_anexos = imagens_msg
 
-            print(f"Comandos sincronizados no servidor: {len(comandos_servidor)}")
-            print(f"Comandos globais antigos limpos: {len(comandos_globais)}")
-            print("Comandos ativos:", ", ".join(f"/{cmd.name}" for cmd in comandos_servidor))
-        else:
-            comandos_globais = await bot.tree.sync()
-            print(f"Comandos sincronizados globalmente: {len(comandos_globais)}")
-            print("AVISO: GUILD_ID está 0. Os comandos podem demorar para aparecer no Discord.")
+        for embed in msg.embeds:
+            desc = embed.description or ""
 
-        comandos_ja_sincronizados = True
-    except Exception as e:
-        print(f"Erro ao sincronizar comandos: {e}")
+            if "MANDADO" not in desc.upper() or "Nome:" not in desc:
+                continue
 
-    print(f"Bot online como {bot.user}")
+            nome = extrair_linha(desc, "Nome")
+            rg = extrair_linha(desc, "RG")
+            ultimo = extrair_linha(desc, "ÚLTIMO AVISTAMENTO") or extrair_linha(desc, "Ultimo Avistamento")
+            crimes = extrair_bloco(desc, "CRIMES IMPUTADOS", r"━━━━━━━━|🆔")
+            informacoes = extrair_bloco(desc, "INFORMAÇÕES COMPLEMENTARES", r"━━━━━━━━|📞")
+
+            if not nome or not rg:
+                continue
+
+            rg_limpo = somente_numero(rg)
+            if rg_limpo in rgs_existentes:
+                continue
+
+            foto_ind_url = ""
+            foto_rg_url = ""
+
+            anexos_usar = imagens_msg or ultimos_anexos
+            if len(anexos_usar) >= 1:
+                try:
+                    foto_ind_url, _ = await salvar_attachment(anexos_usar[0], "individuo", rg)
+                except Exception:
+                    pass
+
+            if len(anexos_usar) >= 2:
+                try:
+                    foto_rg_url, _ = await salvar_attachment(anexos_usar[1], "rg", rg)
+                except Exception:
+                    pass
+
+            dados = {
+                "id": uuid.uuid4().hex,
+                "caso": f"SYNC-{msg.id}",
+                "nome": nome,
+                "rg": rg,
+                "crimes_cometidos": crimes,
+                "ultimo_avistamento": ultimo,
+                "informacoes": informacoes,
+                "foto_individuo": foto_ind_url,
+                "foto_rg": foto_rg_url,
+                "status": "A PROCURAR",
+                "data_cadastro": data_hora_br(),
+                "autor_id": 0,
+                "autor_nome": "Sincronização automática",
+                "discord_message_id": msg.id,
+                "discord_jump_url": msg.jump_url
+            }
+
+            upsert_procurado(dados)
+            rgs_existentes.add(rg_limpo)
+            adicionados += 1
+
+    gerar_catalogo_html()
+    await interaction.followup.send(
+        f"✅ Sincronização finalizada.\n"
+        f"📌 Novos registros adicionados: **{adicionados}**\n"
+        f"📄 Catálogo: {CATALOG_PUBLIC_URL}",
+        ephemeral=True
+    )
+
 
 # =====================================================
-# MAIN
+# INICIAR BOT + SITE
 # =====================================================
 
 async def main():
     if not DISCORD_TOKEN or DISCORD_TOKEN == "COLE_O_TOKEN_DO_BOT_AQUI":
-        print("ERRO: Coloque o token correto nas variáveis do Railway ou no arquivo .env.")
+        print("ERRO: coloque o DISCORD_TOKEN nas variáveis de ambiente ou no arquivo .env")
         return
+
+    if not PROCURADOS_CHANNEL_ID:
+        print("AVISO: PROCURADOS_CHANNEL_ID está vazio. O cadastro não vai conseguir postar no canal oficial.")
+
     await start_web_server()
     await bot.start(DISCORD_TOKEN)
 
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        print("Bot desligado.")
+    asyncio.run(main())
