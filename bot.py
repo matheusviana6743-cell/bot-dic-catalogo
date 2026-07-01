@@ -455,15 +455,24 @@ async def salvar_procurado_catalogo(registro: Dict[str, Any]) -> None:
 # SERVIDOR HTML
 # =====================================================
 
+async def pagina_inicial(request):
+    gerar_catalogo_html()
+    return web.FileResponse(CATALOGO_HTML)
+
+
 async def start_web_server():
     gerar_catalogo_html()
     app = web.Application()
-    app.router.add_static("/", path=str(PUBLIC_DIR), show_index=False)
+
+    app.router.add_get("/", pagina_inicial)
+    app.router.add_get("/index.html", pagina_inicial)
+    app.router.add_static("/uploads/", path=str(UPLOADS_DIR), show_index=False)
+
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", PORT)
     await site.start()
-    print(f"Catalogo rodando em http://127.0.0.1:{PORT}/")
+    print(f"Catalogo rodando na porta {PORT}")
 
 # =====================================================
 # EMBEDS / POSTAGEM
