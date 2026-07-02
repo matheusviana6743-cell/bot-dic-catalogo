@@ -204,6 +204,9 @@ def cargos_equipe_permissoes(guild: discord.Guild) -> Dict[Any, discord.Permissi
                 send_messages=True,
                 attach_files=True,
                 read_message_history=True,
+                create_public_threads=True,
+                send_messages_in_threads=True,
+                manage_threads=True,
             )
     if guild.me:
         overwrites[guild.me] = discord.PermissionOverwrite(
@@ -212,6 +215,9 @@ def cargos_equipe_permissoes(guild: discord.Guild) -> Dict[Any, discord.Permissi
             manage_channels=True,
             attach_files=True,
             read_message_history=True,
+            create_public_threads=True,
+            send_messages_in_threads=True,
+            manage_threads=True,
         )
     return overwrites
 
@@ -219,30 +225,75 @@ def cargos_equipe_permissoes(guild: discord.Guild) -> Dict[Any, discord.Permissi
 # CATALOGO HTML COM FOTO EM TELA CHEIA
 # =====================================================
 
+def valor_crimes_registro(registro: Dict[str, Any]) -> str:
+    """Aceita o nome atual e também chaves usadas por versões antigas."""
+    for chave in ("crimes", "crimes_cometidos", "crimes_imputados", "crime"):
+        valor = str(registro.get(chave, "") or "").strip()
+        if valor and valor.lower() not in {
+            "não informado",
+            "nao informado",
+            "não identificado na mensagem antiga",
+            "nao identificado na mensagem antiga",
+        }:
+            return valor
+    return "Não informado"
+
+
+def registro_tem_valor_util(valor: Any) -> bool:
+    texto = str(valor or "").strip().lower()
+    return bool(texto) and texto not in {
+        "não informado",
+        "nao informado",
+        "não identificado na mensagem antiga",
+        "nao identificado na mensagem antiga",
+        "importado automaticamente do histórico do canal.",
+    }
+
+
 def gerar_catalogo_html() -> None:
     procurados = carregar_procurados()
-    ativos = [p for p in procurados if p.get("status", "A PROCURAR") == "A PROCURAR"]
-    retirados = [p for p in procurados if p.get("status") == "RETIRADO"]
 
-    cards = ""
-    for p in procurados:
-        status = p.get("status", "A PROCURAR")
+    # Corrige registros criados por versões antigas.
+    alterou = False
+    for registro in procurados:
+        crimes = valor_crimes_registro(registro)
+        if registro.get("crimes") != crimes:
+            registro["crimes"] = crimes
+            alterou = True
+    if alterou:
+        salvar_procurados(procurados)
+
+    ativos = [
+        p for p in procurados
+        if str(p.get("status", "A PROCURAR") or "A PROCURAR").upper() != "RETIRADO"
+    ]
+    retirados = [
+        p for p in procurados
+        if str(p.get("status", "") or "").upper() == "RETIRADO"
+    ]
+
+    def img_html(src: str, alt: str, vazio: str) -> str:
+        if not src:
+            return f'<div class="placeholder">{vazio}</div>'
+        src_e = escape(src)
+        return (
+            f'<img class="zoom-img" src="{src_e}" alt="{escape(alt)}" '
+            f'onclick="abrirFoto(this.src, this.alt)">'
+        )
+
+    def card_html(registro: Dict[str, Any]) -> str:
+        status = str(registro.get("status", "A PROCURAR") or "A PROCURAR").upper()
         classe_status = "retirado" if status == "RETIRADO" else "ativo"
-        foto_ind = p.get("foto_individuo", "") or ""
-        foto_rg = p.get("foto_rg", "") or ""
-        link_msg = p.get("mensagem_url", "")
+        foto_ind = registro.get("foto_individuo", "") or ""
+        foto_rg = registro.get("foto_rg", "") or ""
+        link_msg = registro.get("mensagem_url", "") or ""
+        crimes = valor_crimes_registro(registro)
 
-        def img_html(src: str, alt: str, vazio: str):
-            if not src:
-                return f'<div class="placeholder">{vazio}</div>'
-            src_e = escape(src)
-            return f'<img class="zoom-img" src="{src_e}" alt="{escape(alt)}" onclick="abrirFoto(\'{src_e}\')">'
-
-        cards += f"""
+        return f"""
         <article class="card {classe_status}">
             <div class="card-head">
-                <div><span>Nº DO CASO</span><b>{escape(p.get('caso'))}</b></div>
-                <div><span>DATA</span><b>{escape(p.get('data'))}</b></div>
+                <div><span>Nº DO CASO</span><b>{escape(registro.get('caso'))}</b></div>
+                <div><span>DATA</span><b>{escape(registro.get('data'))}</b></div>
                 <div class="status">{escape(status)}</div>
             </div>
 
@@ -259,23 +310,34 @@ def gerar_catalogo_html() -> None:
                 </div>
 
                 <div class="info">
-                    <div class="linha"><b>Nome</b><p>{escape(p.get('nome'))}</p></div>
-                    <div class="linha"><b>RG</b><p>{escape(p.get('rg'))}</p></div>
-                    <div class="box"><b>Crimes Cometidos</b><p>{escape(p.get('crimes'))}</p></div>
-                    <div class="box destaque"><b>Último Avistamento</b><p>{escape(p.get('ultimo_avistamento'))}</p></div>
-                    <div class="box"><b>Informações</b><p>{escape(p.get('informacoes'))}</p></div>
-                    {f'<a class="msg" href="{escape(link_msg)}" target="_blank">Abrir mensagem no Discord</a>' if link_msg else ''}
-                    {f'<div class="motivo"><b>Motivo da retirada:</b> {escape(p.get("motivo_retirada"))}</div>' if p.get('motivo_retirada') else ''}
+                    <div class="linha"><b>Nome</b><p>{escape(registro.get('nome'))}</p></div>
+                    <div class="linha"><b>RG</b><p>{escape(registro.get('rg'))}</p></div>
+                    <div class="box crimes"><b>Crimes Cometidos</b><p>{escape(crimes)}</p></div>
+                    <div class="box destaque"><b>Último Avistamento</b><p>{escape(registro.get('ultimo_avistamento'))}</p></div>
+                    <div class="box"><b>Informações</b><p>{escape(registro.get('informacoes'))}</p></div>
+                    {f'<a class="msg" href="{escape(link_msg)}" target="_blank" rel="noopener noreferrer">Abrir mensagem no Discord</a>' if link_msg else ''}
+                    {f'<div class="motivo"><b>Motivo da retirada:</b> {escape(registro.get("motivo_retirada"))}</div>' if registro.get('motivo_retirada') else ''}
                 </div>
             </div>
         </article>
         """
 
-    if not cards:
-        cards = """
+    cards_ativos = "".join(card_html(p) for p in ativos)
+    cards_retirados = "".join(card_html(p) for p in retirados)
+
+    if not cards_ativos:
+        cards_ativos = """
         <div class="vazio">
-            <h2>Nenhum procurado cadastrado ainda.</h2>
-            <p>Quando o bot finalizar um cadastro, ele aparecerá aqui automaticamente.</p>
+            <h2>Nenhum procurado ativo.</h2>
+            <p>Os novos procurados aparecerão nesta aba automaticamente.</p>
+        </div>
+        """
+
+    if not cards_retirados:
+        cards_retirados = """
+        <div class="vazio">
+            <h2>Nenhum procurado retirado.</h2>
+            <p>Os registros retirados aparecerão nesta aba.</p>
         </div>
         """
 
@@ -298,7 +360,7 @@ def gerar_catalogo_html() -> None:
         }}
         header {{
             border-bottom: 2px solid #d99a2b;
-            padding: 28px 18px;
+            padding: 28px 18px 22px;
             text-align: center;
             background: rgba(0,0,0,.38);
             position: sticky;
@@ -306,21 +368,30 @@ def gerar_catalogo_html() -> None:
             z-index: 10;
             backdrop-filter: blur(7px);
         }}
-        header h1 {{
-            margin: 0;
-            color: #f0b64d;
-            font-size: clamp(30px, 5vw, 62px);
-            letter-spacing: 2px;
-            text-transform: uppercase;
-        }}
-        header p {{ margin: 8px 0 0; color: #ddd; }}
+        header h1 {{ margin:0; color:#f0b64d; font-size:clamp(30px,5vw,62px); letter-spacing:2px; text-transform:uppercase; }}
+        header p {{ margin:8px 0 0; color:#ddd; }}
         .stats {{ display:flex; gap:14px; justify-content:center; flex-wrap:wrap; margin-top:18px; }}
         .stat {{ border:1px solid rgba(240,182,77,.55); background:rgba(8,19,35,.9); padding:10px 18px; border-radius:12px; min-width:150px; }}
         .stat span {{ display:block; font-size:12px; color:#bfc6d1; text-transform:uppercase; }}
         .stat b {{ font-size:24px; color:#fff; }}
-        main {{ width:min(1380px, 96%); margin:24px auto 50px; display:grid; grid-template-columns:repeat(auto-fit, minmax(520px, 1fr)); gap:22px; }}
-        .card {{ border:1px solid rgba(240,182,77,.55); background:linear-gradient(180deg, rgba(8,19,35,.97), rgba(3,8,16,.97)); box-shadow:0 0 0 1px rgba(255,255,255,.05), 0 18px 50px rgba(0,0,0,.32); border-radius:18px; overflow:hidden; }}
-        .card.retirado {{ opacity:.65; filter:grayscale(.35); }}
+        .abas {{ display:flex; justify-content:center; gap:10px; flex-wrap:wrap; margin-top:18px; }}
+        .aba-btn {{
+            border:1px solid rgba(240,182,77,.65);
+            background:#081323;
+            color:#f7f7f7;
+            padding:11px 18px;
+            border-radius:12px;
+            font-weight:800;
+            cursor:pointer;
+            transition:.15s ease;
+        }}
+        .aba-btn:hover {{ transform:translateY(-1px); border-color:#f0b64d; }}
+        .aba-btn.ativa {{ background:#f0b64d; color:#07111f; }}
+        .aba-conteudo {{ display:none; }}
+        .aba-conteudo.ativa {{ display:block; }}
+        .grade {{ width:min(1380px,96%); margin:24px auto 50px; display:grid; grid-template-columns:repeat(auto-fit,minmax(520px,1fr)); gap:22px; }}
+        .card {{ border:1px solid rgba(240,182,77,.55); background:linear-gradient(180deg,rgba(8,19,35,.97),rgba(3,8,16,.97)); box-shadow:0 0 0 1px rgba(255,255,255,.05),0 18px 50px rgba(0,0,0,.32); border-radius:18px; overflow:hidden; }}
+        .card.retirado {{ opacity:.82; filter:grayscale(.25); }}
         .card-head {{ display:grid; grid-template-columns:1fr 1fr auto; gap:12px; padding:14px; border-bottom:1px solid rgba(240,182,77,.32); align-items:center; }}
         .card-head span {{ display:block; font-size:11px; color:#f0b64d; text-transform:uppercase; font-weight:bold; }}
         .card-head b {{ display:block; margin-top:4px; }}
@@ -332,24 +403,31 @@ def gerar_catalogo_html() -> None:
         .photo-title {{ text-align:center; color:#f0b64d; font-weight:800; margin-bottom:8px; text-transform:uppercase; font-size:13px; }}
         .photo img {{ width:100%; height:240px; object-fit:cover; border-radius:10px; background:#ddd; display:block; }}
         .photo.small img {{ height:125px; object-fit:cover; }}
-        .zoom-img {{ cursor: zoom-in; transition: transform .15s ease, filter .15s ease; }}
-        .zoom-img:hover {{ transform: scale(1.02); filter: brightness(1.08); }}
+        .zoom-img {{ cursor:zoom-in; transition:transform .15s ease,filter .15s ease; }}
+        .zoom-img:hover {{ transform:scale(1.02); filter:brightness(1.08); }}
         .placeholder {{ height:240px; border:1px dashed #98a2b3; display:grid; place-items:center; color:#98a2b3; border-radius:10px; }}
         .photo.small .placeholder {{ height:125px; }}
         .info {{ display:grid; gap:10px; }}
-        .linha, .box {{ background:#f6f7f9; color:#07111f; border-radius:12px; padding:10px 12px; border-left:5px solid #f0b64d; }}
-        .linha b, .box b {{ display:block; color:#07111f; margin-bottom:3px; }}
-        .linha p, .box p {{ margin:0; white-space:pre-wrap; line-height:1.35; }}
+        .linha,.box {{ background:#f6f7f9; color:#07111f; border-radius:12px; padding:10px 12px; border-left:5px solid #f0b64d; }}
+        .linha b,.box b {{ display:block; color:#07111f; margin-bottom:3px; }}
+        .linha p,.box p {{ margin:0; white-space:pre-wrap; line-height:1.4; overflow-wrap:anywhere; }}
+        .box.crimes {{ min-height:90px; }}
         .destaque {{ background:#fff4dc; }}
         .msg {{ display:inline-block; color:#f0b64d; text-decoration:none; font-weight:bold; margin-top:4px; }}
         .motivo {{ background:rgba(201,74,74,.18); color:#ffd7d7; border:1px solid rgba(201,74,74,.4); padding:10px; border-radius:10px; }}
-        .vazio {{ grid-column:1 / -1; text-align:center; padding:60px 20px; border:1px dashed rgba(240,182,77,.6); border-radius:18px; background:rgba(8,19,35,.7); }}
+        .vazio {{ grid-column:1/-1; text-align:center; padding:60px 20px; border:1px dashed rgba(240,182,77,.6); border-radius:18px; background:rgba(8,19,35,.7); }}
         footer {{ text-align:center; color:#bfc6d1; border-top:1px solid rgba(240,182,77,.25); padding:18px; }}
-        #lightbox {{ display:none; position:fixed; inset:0; background:rgba(0,0,0,.92); z-index:9999; align-items:center; justify-content:center; padding:22px; }}
+        #lightbox {{ display:none; position:fixed; inset:0; background:rgba(0,0,0,.94); z-index:9999; align-items:center; justify-content:center; padding:22px; }}
         #lightbox.ativo {{ display:flex; }}
-        #lightbox img {{ max-width:96vw; max-height:92vh; border-radius:12px; box-shadow:0 0 30px rgba(0,0,0,.7); }}
+        #lightbox img {{ max-width:96vw; max-height:92vh; object-fit:contain; border-radius:12px; box-shadow:0 0 30px rgba(0,0,0,.7); }}
         #fecharLightbox {{ position:fixed; top:18px; right:22px; background:#f0b64d; color:#06111f; border:0; padding:10px 15px; border-radius:10px; font-weight:900; cursor:pointer; }}
-        @media (max-width:720px) {{ main {{ grid-template-columns:1fr; }} .card-grid {{ grid-template-columns:1fr; }} .card-head {{ grid-template-columns:1fr; }} .photo img {{ height:330px; }} }}
+        #legendaLightbox {{ position:fixed; bottom:16px; left:50%; transform:translateX(-50%); color:#fff; background:rgba(0,0,0,.65); padding:8px 12px; border-radius:10px; }}
+        @media (max-width:720px) {{
+            .grade {{ grid-template-columns:1fr; }}
+            .card-grid {{ grid-template-columns:1fr; }}
+            .card-head {{ grid-template-columns:1fr; }}
+            .photo img {{ height:330px; }}
+        }}
     </style>
 </head>
 <body>
@@ -362,35 +440,57 @@ def gerar_catalogo_html() -> None:
             <div class="stat"><span>Retirados</span><b>{len(retirados)}</b></div>
             <div class="stat"><span>Última atualização</span><b style="font-size:16px">{agora_br()}</b></div>
         </div>
+        <div class="abas">
+            <button id="btn-ativos" class="aba-btn ativa" onclick="mostrarAba('ativos')">🚨 Procurados Ativos ({len(ativos)})</button>
+            <button id="btn-retirados" class="aba-btn" onclick="mostrarAba('retirados')">✅ Retirados ({len(retirados)})</button>
+        </div>
     </header>
-    <main>{cards}</main>
-    <footer>Uso exclusivo para GTA RP / sistema interno autorizado. Não use com dados reais de pessoas.</footer>
+
+    <section id="aba-ativos" class="aba-conteudo ativa">
+        <main class="grade">{cards_ativos}</main>
+    </section>
+
+    <section id="aba-retirados" class="aba-conteudo">
+        <main class="grade">{cards_retirados}</main>
+    </section>
+
+    <footer>Uso exclusivo para GTA RP / sistema interno autorizado.</footer>
 
     <div id="lightbox" onclick="fecharFoto()">
         <button id="fecharLightbox" onclick="fecharFoto()">Fechar ✕</button>
         <img id="lightboxImg" src="" alt="Foto em tela cheia">
+        <div id="legendaLightbox"></div>
     </div>
 
     <script>
-        function abrirFoto(src) {{
+        function mostrarAba(nome) {{
+            document.querySelectorAll('.aba-conteudo').forEach(el => el.classList.remove('ativa'));
+            document.querySelectorAll('.aba-btn').forEach(el => el.classList.remove('ativa'));
+            document.getElementById('aba-' + nome).classList.add('ativa');
+            document.getElementById('btn-' + nome).classList.add('ativa');
+            window.scrollTo({{ top: 0, behavior: 'smooth' }});
+        }}
+        function abrirFoto(src, alt) {{
             document.getElementById('lightboxImg').src = src;
+            document.getElementById('legendaLightbox').textContent = alt || '';
             document.getElementById('lightbox').classList.add('ativo');
+            document.body.style.overflow = 'hidden';
         }}
         function fecharFoto() {{
             document.getElementById('lightbox').classList.remove('ativo');
             document.getElementById('lightboxImg').src = '';
+            document.getElementById('legendaLightbox').textContent = '';
+            document.body.style.overflow = '';
         }}
-        document.addEventListener('keydown', function(e) {{
-            if (e.key === 'Escape') fecharFoto();
-        }});
+        document.addEventListener('keydown', function(e) {{ if (e.key === 'Escape') fecharFoto(); }});
         document.getElementById('lightboxImg').addEventListener('click', function(e) {{ e.stopPropagation(); }});
+        document.getElementById('fecharLightbox').addEventListener('click', function(e) {{ e.stopPropagation(); }});
     </script>
 </body>
 </html>
     """
     with open(CATALOGO_HTML, "w", encoding="utf-8") as f:
         f.write(html_final)
-
 
 async def salvar_anexo_publico(anexo: discord.Attachment, prefixo: str) -> str:
     ext = Path(anexo.filename).suffix.lower()
@@ -403,6 +503,7 @@ async def salvar_anexo_publico(anexo: discord.Attachment, prefixo: str) -> str:
 
 
 async def salvar_procurado_catalogo(registro: Dict[str, Any]) -> None:
+    registro["crimes"] = valor_crimes_registro(registro)
     lista = carregar_procurados()
     lista.append(registro)
     lista = remover_duplicados(lista)
@@ -714,19 +815,63 @@ async def retirar_procurado(interaction: discord.Interaction, rg: str, motivo: s
     await interaction.response.send_message(f"✅ Procurado retirado e catálogo atualizado.\n🔗 {CATALOG_PUBLIC_URL}", ephemeral=True)
 
 
+def limpar_markdown_extracao(texto: str) -> str:
+    texto = str(texto or "").replace("**", "").replace("__", "")
+    return texto.replace("`", "")
+
+
+def extrair_bloco_rotulado(texto: str, rotulo: str, proximos: List[str]) -> str:
+    fim = "|".join(proximos)
+    padrao = rf"(?:{rotulo})\s*:\s*(.*?)(?=\n\s*(?:{fim})\s*:|\n\s*━+|\Z)"
+    m = re.search(padrao, texto, flags=re.I | re.S)
+    if not m:
+        return ""
+    valor = re.sub(r"\n{3,}", "\n\n", m.group(1).strip())
+    return valor[:1800]
+
+
 def extrair_por_labels(texto: str) -> Dict[str, str]:
-    dados = {}
-    padroes = {
-        "nome": r"(?:nome|indiv[ií]duo)\s*[:\-]\s*(.+)",
-        "rg": r"(?:rg|passaporte)\s*[:\-]\s*(.+)",
-        "crimes": r"(?:crimes cometidos|crimes imputados|crimes|crime)\s*[:\-]\s*(.+)",
-        "ultimo_avistamento": r"(?:[úu]ltimo avistamento|avistamento)\s*[:\-]\s*(.+)",
-        "informacoes": r"(?:informa[cç][õo]es|observa[cç][õo]es|detalhes)\s*[:\-]\s*(.+)",
-    }
-    for chave, padrao in padroes.items():
-        m = re.search(padrao, texto, flags=re.I)
-        if m:
-            dados[chave] = m.group(1).strip()[:1000]
+    texto_limpo = limpar_markdown_extracao(texto)
+    dados: Dict[str, str] = {}
+
+    m_nome = re.search(r"(?:nome|indiv[ií]duo)\s*[:\-]\s*([^\n]+)", texto_limpo, flags=re.I)
+    m_rg = re.search(r"(?:rg|passaporte)\s*[:\-]\s*([^\n]+)", texto_limpo, flags=re.I)
+    if m_nome:
+        dados["nome"] = m_nome.group(1).strip()[:200]
+    if m_rg:
+        dados["rg"] = m_rg.group(1).strip()[:100]
+
+    proximos_comuns = [
+        r"(?:📍\s*)?(?:último avistamento|ultimo avistamento|avistamento)",
+        r"(?:⚠️\s*)?(?:crimes cometidos|crimes imputados|crimes|crime)",
+        r"(?:ℹ️\s*)?(?:informações|informacoes|observações|observacoes|detalhes)",
+        r"(?:🆔\s*)?(?:identificação do procurado|identificacao do procurado)",
+        r"(?:👤\s*)?nome",
+        r"(?:🆔\s*)?rg",
+    ]
+
+    crimes = extrair_bloco_rotulado(
+        texto_limpo,
+        r"(?:⚠️\s*)?(?:crimes cometidos|crimes imputados|crimes|crime)",
+        proximos_comuns,
+    )
+    ultimo = extrair_bloco_rotulado(
+        texto_limpo,
+        r"(?:📍\s*)?(?:último avistamento|ultimo avistamento|avistamento)",
+        proximos_comuns,
+    )
+    informacoes = extrair_bloco_rotulado(
+        texto_limpo,
+        r"(?:ℹ️\s*)?(?:informações|informacoes|observações|observacoes|detalhes)",
+        proximos_comuns,
+    )
+
+    if crimes:
+        dados["crimes"] = crimes
+    if ultimo:
+        dados["ultimo_avistamento"] = ultimo
+    if informacoes:
+        dados["informacoes"] = informacoes
     return dados
 
 
@@ -743,22 +888,28 @@ async def importar_mensagem_antiga(msg: discord.Message) -> Optional[Dict[str, A
     dados = extrair_por_labels(texto_total)
     if not dados.get("rg") or not dados.get("nome"):
         return None
-    if procurar_por_rg(dados.get("rg", "")):
-        return None
+
+    existente = procurar_por_rg(dados.get("rg", ""))
 
     imagens = []
-    for a in msg.attachments:
-        if (a.content_type and a.content_type.startswith("image/")) or Path(a.filename).suffix.lower() in [".png", ".jpg", ".jpeg", ".webp", ".gif"]:
-            imagens.append(a)
+    for anexo in msg.attachments:
+        if (
+            anexo.content_type and anexo.content_type.startswith("image/")
+        ) or Path(anexo.filename).suffix.lower() in [".png", ".jpg", ".jpeg", ".webp", ".gif"]:
+            imagens.append(anexo)
 
-    foto_ind = await salvar_anexo_publico(imagens[0], f"sync-ind-{dados.get('rg','')}") if len(imagens) >= 1 else ""
-    foto_rg = await salvar_anexo_publico(imagens[1], f"sync-rg-{dados.get('rg','')}") if len(imagens) >= 2 else ""
+    foto_ind = str(existente.get("foto_individuo", "") if existente else "")
+    foto_rg = str(existente.get("foto_rg", "") if existente else "")
+    if not foto_ind and len(imagens) >= 1:
+        foto_ind = await salvar_anexo_publico(imagens[0], f"sync-ind-{dados.get('rg', '')}")
+    if not foto_rg and len(imagens) >= 2:
+        foto_rg = await salvar_anexo_publico(imagens[1], f"sync-rg-{dados.get('rg', '')}")
 
     return {
         "id": f"SYNC-{msg.id}",
         "caso": f"SYNC-{msg.id}",
         "data": msg.created_at.strftime("%d/%m/%Y %H:%M"),
-        "status": "A PROCURAR",
+        "status": str(existente.get("status", "A PROCURAR") if existente else "A PROCURAR"),
         "nome": dados.get("nome", ""),
         "rg": dados.get("rg", ""),
         "crimes": dados.get("crimes", "Não identificado na mensagem antiga"),
@@ -772,29 +923,77 @@ async def importar_mensagem_antiga(msg: discord.Message) -> Optional[Dict[str, A
         "mensagem_url": msg.jump_url,
     }
 
-
 async def sincronizar_catalogo_core(interaction: discord.Interaction):
     if not PROCURADOS_CHANNEL_ID:
         await interaction.response.send_message("❌ Configure PROCURADOS_CHANNEL_ID.", ephemeral=True)
         return
+
     canal = bot.get_channel(PROCURADOS_CHANNEL_ID)
     if not isinstance(canal, discord.TextChannel):
         await interaction.response.send_message("❌ Não encontrei o canal de procurados.", ephemeral=True)
         return
+
     await interaction.response.defer(ephemeral=True)
     importados = 0
+    atualizados = 0
     analisados = 0
     lista = carregar_procurados()
+
     async for msg in canal.history(limit=1000, oldest_first=True):
         analisados += 1
         registro = await importar_mensagem_antiga(msg)
-        if registro:
+        if not registro:
+            continue
+
+        alvo = limpar_rg(registro.get("rg", ""))
+        existente = next(
+            (p for p in lista if limpar_rg(p.get("rg", "")) == alvo),
+            None,
+        )
+
+        if existente is None:
+            registro["crimes"] = valor_crimes_registro(registro)
             lista.append(registro)
             importados += 1
+            continue
+
+        mudou = False
+        for campo in (
+            "nome",
+            "crimes",
+            "ultimo_avistamento",
+            "informacoes",
+            "foto_individuo",
+            "foto_rg",
+            "mensagem_id",
+            "mensagem_url",
+        ):
+            novo_valor = registro.get(campo)
+            valor_atual = existente.get(campo)
+            if registro_tem_valor_util(novo_valor) and not registro_tem_valor_util(valor_atual):
+                existente[campo] = novo_valor
+                mudou = True
+
+        crimes_novos = valor_crimes_registro(registro)
+        if registro_tem_valor_util(crimes_novos) and not registro_tem_valor_util(existente.get("crimes")):
+            existente["crimes"] = crimes_novos
+            mudou = True
+
+        if mudou:
+            atualizados += 1
+
     lista = remover_duplicados(lista)
     salvar_procurados(lista)
     gerar_catalogo_html()
-    await interaction.followup.send(f"✅ Sincronização finalizada.\nMensagens analisadas: `{analisados}`\nProcurados importados: `{importados}`\nCatálogo: {CATALOG_PUBLIC_URL}", ephemeral=True)
+
+    await interaction.followup.send(
+        f"✅ Sincronização finalizada.\n"
+        f"Mensagens analisadas: `{analisados}`\n"
+        f"Procurados importados: `{importados}`\n"
+        f"Registros corrigidos/atualizados: `{atualizados}`\n"
+        f"Catálogo: {CATALOG_PUBLIC_URL}",
+        ephemeral=True,
+    )
 
 # =====================================================
 # MESAS
@@ -816,6 +1015,48 @@ TOPICOS_MESA = [
     "💬 Chat",
 ]
 
+
+
+async def criar_topicos_reais_mesa(canal: discord.TextChannel) -> List[int]:
+    """Cria cada item da mesa como tópico/thread público e já aberto."""
+    topicos_ids: List[int] = []
+
+    await canal.send(
+        "🧵 **Tópicos da investigação**\n"
+        "Abra o tópico desejado para adicionar textos, imagens e provas."
+    )
+
+    for topico in TOPICOS_MESA:
+        mensagem = await canal.send(f"🧵 **{topico}**")
+        try:
+            try:
+                thread = await mensagem.create_thread(
+                    name=topico[:100],
+                    auto_archive_duration=10080,
+                    reason="Tópico automático da mesa de investigação",
+                )
+            except discord.HTTPException:
+                thread = await mensagem.create_thread(
+                    name=topico[:100],
+                    auto_archive_duration=1440,
+                    reason="Tópico automático da mesa de investigação",
+                )
+
+            await thread.send(
+                f"## {topico}\n"
+                "> Envie aqui todas as informações, imagens e provas relacionadas a este tópico."
+            )
+            topicos_ids.append(thread.id)
+            await asyncio.sleep(0.25)
+        except Exception as erro:
+            await mensagem.reply(
+                f"⚠️ Não foi possível abrir este tópico automaticamente: `{erro}`"
+            )
+            await enviar_log(
+                f"⚠️ Erro ao criar tópico `{topico}` no canal {canal.id}: {erro}"
+            )
+
+    return topicos_ids
 
 def registrar_mesa(dados: Dict[str, Any]) -> None:
     mesas = carregar_mesas()
@@ -910,19 +1151,26 @@ async def criar_mesa_core(interaction: discord.Interaction, apelido: str, famili
         await responder_interacao(interaction, "❌ Use dentro de um servidor.", ephemeral=True)
         return
 
-    # Criar o canal + mandar todos os tópicos pode passar de 3 segundos.
-    # Por isso o bot responde/defer primeiro e só depois cria a mesa.
     if not interaction.response.is_done():
         await interaction.response.defer(ephemeral=True, thinking=True)
 
     categoria = guild.get_channel(CATEGORIA_MESAS_ABERTAS_ID) if CATEGORIA_MESAS_ABERTAS_ID else None
     overwrites = cargos_equipe_permissoes(guild)
-    overwrites[interaction.user] = discord.PermissionOverwrite(view_channel=True, send_messages=True, attach_files=True, read_message_history=True)
+    overwrites[interaction.user] = discord.PermissionOverwrite(
+        view_channel=True,
+        send_messages=True,
+        attach_files=True,
+        read_message_history=True,
+        send_messages_in_threads=True,
+    )
 
     nome_canal = f"🕵️┃{slugify(apelido)}-{slugify(familia)}"
-    canal = await guild.create_text_channel(name=nome_canal, category=categoria, overwrites=overwrites)
+    canal = await guild.create_text_channel(
+        name=nome_canal,
+        category=categoria,
+        overwrites=overwrites,
+    )
 
-    # Mesa em mensagens normais, com todos os tópicos já abertos no canal.
     await canal.send(
         f"🕵️ **Mesa de Investigação — {familia}**\n"
         f"👮 **Agente:** {interaction.user.mention}\n"
@@ -931,17 +1179,14 @@ async def criar_mesa_core(interaction: discord.Interaction, apelido: str, famili
         f"🕒 **Criada em:** {agora_br()}\n"
         f"📝 **Observação:** {observacao or 'Nenhuma'}\n\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"📌 **Preencha as informações diretamente abaixo de cada tópico.**"
+        f"🧵 **Use os tópicos abertos abaixo para organizar a investigação.**"
     )
 
-    for topico in TOPICOS_MESA:
-        await canal.send(
-            f"## {topico}\n"
-            f"> Preencha as informações deste tópico abaixo.\n\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━"
-        )
-
-    await canal.send("🔒 Para encerrar esta mesa, clique no botão abaixo.", view=FecharMesaView())
+    topicos_ids = await criar_topicos_reais_mesa(canal)
+    await canal.send(
+        "🔒 Para encerrar esta mesa, clique no botão abaixo.",
+        view=FecharMesaView(),
+    )
 
     registrar_mesa({
         "canal_id": canal.id,
@@ -953,11 +1198,13 @@ async def criar_mesa_core(interaction: discord.Interaction, apelido: str, famili
         "status": "ABERTA",
         "criada_em": agora_br(),
         "fechada_em": None,
+        "topicos_ids": topicos_ids,
     })
 
-    await enviar_log(f"➕ Mesa criada: {canal.mention} | Família: {familia} | Por: {interaction.user.mention}")
+    await enviar_log(
+        f"➕ Mesa criada: {canal.mention} | Família: {familia} | Por: {interaction.user.mention}"
+    )
     await responder_interacao(interaction, f"✅ Mesa criada: {canal.mention}", ephemeral=True)
-
 
 async def fechar_mesa_core(interaction: discord.Interaction, motivo: str = "Fechada"):
     canal = interaction.channel
@@ -1117,10 +1364,15 @@ async def criar_mesa_por_texto(ctx: commands.Context, apelido: str, familia: str
         send_messages=True,
         attach_files=True,
         read_message_history=True,
+        send_messages_in_threads=True,
     )
 
     nome_canal = f"🕵️┃{slugify(apelido)}-{slugify(familia)}"
-    canal = await guild.create_text_channel(name=nome_canal, category=categoria, overwrites=overwrites)
+    canal = await guild.create_text_channel(
+        name=nome_canal,
+        category=categoria,
+        overwrites=overwrites,
+    )
 
     await canal.send(
         f"🕵️ **Mesa de Investigação — {familia}**\n"
@@ -1130,17 +1382,14 @@ async def criar_mesa_por_texto(ctx: commands.Context, apelido: str, familia: str
         f"🕒 **Criada em:** {agora_br()}\n"
         f"📝 **Observação:** {observacao or 'Nenhuma'}\n\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"📌 **Preencha as informações diretamente abaixo de cada tópico.**"
+        f"🧵 **Use os tópicos abertos abaixo para organizar a investigação.**"
     )
 
-    for topico in TOPICOS_MESA:
-        await canal.send(
-            f"## {topico}\n"
-            f"> Preencha as informações deste tópico abaixo.\n\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━"
-        )
-
-    await canal.send("🔒 Para encerrar esta mesa, clique no botão abaixo.", view=FecharMesaView())
+    topicos_ids = await criar_topicos_reais_mesa(canal)
+    await canal.send(
+        "🔒 Para encerrar esta mesa, clique no botão abaixo.",
+        view=FecharMesaView(),
+    )
 
     registrar_mesa({
         "canal_id": canal.id,
@@ -1152,11 +1401,13 @@ async def criar_mesa_por_texto(ctx: commands.Context, apelido: str, familia: str
         "status": "ABERTA",
         "criada_em": agora_br(),
         "fechada_em": None,
+        "topicos_ids": topicos_ids,
     })
 
-    await enviar_log(f"➕ Mesa criada por comando de texto: {canal.mention} | Família: {familia} | Por: {ctx.author.mention}")
+    await enviar_log(
+        f"➕ Mesa criada por comando de texto: {canal.mention} | Família: {familia} | Por: {ctx.author.mention}"
+    )
     await ctx.reply(f"✅ Mesa criada: {canal.mention}")
-
 
 async def fechar_mesa_por_texto(ctx: commands.Context, motivo: str = "Fechada por comando de texto"):
     canal = ctx.channel
@@ -1372,7 +1623,7 @@ async def on_ready():
     except Exception as e:
         print(f"Erro ao sincronizar comandos: {e}")
 
-    print('VERSAO FINAL RESOLVIDA: procurados-texto-normal | mesas-categorias-fixas | catalogo-lightbox')
+    print('VERSAO AJUSTADA: mesas-com-topicos-reais | crimes-corrigidos | catalogo-abas-ativos-retirados')
     print(f"Bot online como {bot.user}")
 
 # =====================================================
