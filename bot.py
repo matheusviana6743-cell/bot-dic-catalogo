@@ -35,6 +35,10 @@ HISTORICO_PROCURADOS_ID = int(os.getenv("HISTORICO_PROCURADOS_ID", "0") or 0)
 LOGS_CHANNEL_ID = int(os.getenv("LOGS_CHANNEL_ID", "0") or 0)
 PROCURADOS_TEMP_CATEGORY_ID = int(os.getenv("PROCURADOS_TEMP_CATEGORY_ID", "0") or 0)
 
+# Boletins
+BOLETINS_CHANNEL_ID = int(os.getenv("BOLETINS_CHANNEL_ID", "1490200514837745754") or 1490200514837745754)
+BOLETIM_TEMP_CATEGORY_ID = int(os.getenv("BOLETIM_TEMP_CATEGORY_ID", "0") or 0)
+
 # Mesas
 CATEGORIA_MESAS_ABERTAS_ID = int(os.getenv("CATEGORIA_MESAS_ABERTAS_ID", "1490200456855552192") or 1490200456855552192)
 CATEGORIA_MESAS_FECHADAS_ID = int(os.getenv("CATEGORIA_MESAS_FECHADAS_ID", "1515165416815722586") or 1515165416815722586)
@@ -65,6 +69,10 @@ BACKUP_DIR = BASE_DIR / "backups"
 CATALOGO_JSON = DATA_DIR / "procurados.json"
 CATALOGO_HTML = PUBLIC_DIR / "index.html"
 MESAS_JSON = DATA_DIR / "mesas.json"
+BOLETINS_JSON = DATA_DIR / "boletins.json"
+BOLETINS_PENDENTES_JSON = DATA_DIR / "boletins_pendentes.json"
+USUARIOS_RG_JSON = DATA_DIR / "usuarios_rg.json"
+BOLETINS_CONTADOR_JSON = DATA_DIR / "boletins_contador.json"
 
 for pasta in [DATA_DIR, PUBLIC_DIR, UPLOADS_DIR, BACKUP_DIR]:
     pasta.mkdir(exist_ok=True)
@@ -82,6 +90,7 @@ intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 cadastros_pendentes: Dict[int, Dict[str, Any]] = {}
+boletins_pendentes: Dict[int, Dict[str, Any]] = {}
 
 # =====================================================
 # FUNCOES GERAIS
@@ -1317,6 +1326,1317 @@ async def estatisticas_core(interaction: discord.Interaction):
 
 
 
+
+# =====================================================
+# BOLETINS DE OCORRENCIA
+# =====================================================
+
+def agora_datetime_br() -> datetime.datetime:
+    tz = datetime.timezone(datetime.timedelta(hours=-3))
+    return datetime.datetime.now(tz)
+
+
+def data_atual_br() -> str:
+    return agora_datetime_br().strftime("%d/%m/%Y")
+
+
+def horario_atual_br() -> str:
+    return agora_datetime_br().strftime("%Hh%M")
+
+
+def carregar_boletins() -> List[Dict[str, Any]]:
+    dados = carregar_json(BOLETINS_JSON, [])
+    return dados if isinstance(dados, list) else []
+
+
+def salvar_boletins(lista: List[Dict[str, Any]]) -> None:
+    salvar_json(BOLETINS_JSON, lista)
+
+
+def carregar_usuarios_rg() -> Dict[str, str]:
+    dados = carregar_json(USUARIOS_RG_JSON, {})
+    return dados if isinstance(dados, dict) else {}
+
+
+def salvar_usuarios_rg(dados: Dict[str, str]) -> None:
+    salvar_json(USUARIOS_RG_JSON, dados)
+
+
+def salvar_boletins_pendentes() -> None:
+    salvar_json(
+        BOLETINS_PENDENTES_JSON,
+        {str(canal_id): dados for canal_id, dados in boletins_pendentes.items()},
+    )
+
+
+def carregar_boletins_pendentes_memoria() -> None:
+    boletins_pendentes.clear()
+    dados = carregar_json(BOLETINS_PENDENTES_JSON, {})
+    if not isinstance(dados, dict):
+        return
+    for canal_id, rascunho in dados.items():
+        try:
+            boletins_pendentes[int(canal_id)] = rascunho
+        except (TypeError, ValueError):
+            continue
+
+
+def usuario_tem_equipe(member: discord.Member) -> bool:
+    if member.guild_permissions.administrator:
+        return True
+    permitidos = set(CARGOS_ADMIN_IDS + CARGOS_EQUIPE_IDS)
+    if not permitidos:
+        return False
+    return any(cargo.id in permitidos for cargo in member.roles)
+
+
+def obter_rg_usuario(usuario_id: int) -> str:
+    return str(carregar_usuarios_rg().get(str(usuario_id), "") or "").strip()
+
+
+def vincular_rg_usuario(usuario_id: int, rg: str) -> None:
+    dados = carregar_usuarios_rg()
+    dados[str(usuario_id)] = str(rg).strip()
+    salvar_usuarios_rg(dados)
+
+
+def remover_rg_usuario(usuario_id: int) -> bool:
+    dados = carregar_usuarios_rg()
+    chave = str(usuario_id)
+    if chave not in dados:
+        return False
+    dados.pop(chave, None)
+    salvar_usuarios_rg(dados)
+    return True
+
+
+def gerar_numero_boletim() -> str:
+    agora = agora_datetime_br()
+    chave_data = agora.strftime("%Y%m%d")
+    contador = carregar_json(BOLETINS_CONTADOR_JSON, {})
+    if not isinstance(contador, dict):
+        contador = {}
+
+    if contador.get("data") == chave_data:
+        ultimo = int(contador.get("ultimo", 0) or 0) + 1
+    else:
+        ultimo = 1
+
+    salvar_json(
+        BOLETINS_CONTADOR_JSON,
+        {"data": chave_data, "ultimo": ultimo},
+    )
+    return f"BO-DIC-{chave_data}-{ultimo:03d}"
+
+
+def numero_curto_boletim(numero: str) -> str:
+    parte = str(numero or "").rsplit("-", 1)[-1]
+    return parte.zfill(3) if parte.isdigit() else parte
+
+
+def buscar_boletim_numero(numero: str) -> Optional[Dict[str, Any]]:
+    alvo = str(numero or "").strip().upper()
+    for boletim in carregar_boletins():
+        if str(boletim.get("numero", "")).strip().upper() == alvo:
+            return boletim
+    return None
+
+
+def obter_rascunho_boletim(
+    interaction: discord.Interaction,
+    exigir_dono: bool = True,
+) -> Optional[Dict[str, Any]]:
+    canal = interaction.channel
+    if not isinstance(canal, discord.TextChannel):
+        return None
+
+    dados = boletins_pendentes.get(canal.id)
+    if not dados:
+        return None
+
+    if exigir_dono and interaction.user.id != int(dados.get("comunicante_id", 0)):
+        if not isinstance(interaction.user, discord.Member) or not usuario_tem_equipe(interaction.user):
+            return None
+    return dados
+
+
+def dividir_texto_discord(texto: str, limite: int = 1900) -> List[str]:
+    texto = str(texto or "").strip()
+    if not texto:
+        return [""]
+    if len(texto) <= limite:
+        return [texto]
+
+    partes: List[str] = []
+    atual = ""
+    for bloco in texto.split("\n"):
+        linha = bloco + "\n"
+        if len(linha) > limite:
+            if atual.strip():
+                partes.append(atual.rstrip())
+                atual = ""
+            restante = linha
+            while len(restante) > limite:
+                corte = restante.rfind(" ", 0, limite)
+                if corte < limite // 2:
+                    corte = limite
+                partes.append(restante[:corte].rstrip())
+                restante = restante[corte:].lstrip()
+            atual = restante
+            continue
+
+        if len(atual) + len(linha) > limite:
+            partes.append(atual.rstrip())
+            atual = linha
+        else:
+            atual += linha
+
+    if atual.strip():
+        partes.append(atual.rstrip())
+    return partes
+
+
+def resumir_relato_sem_inventar(relato: str, limite: int = 430) -> str:
+    texto = re.sub(r"\s+", " ", str(relato or "")).strip()
+    if not texto:
+        return ""
+
+    sentencas = re.split(r"(?<=[.!?])\s+", texto)
+    selecionadas: List[str] = []
+    total = 0
+    for sentenca in sentencas:
+        sentenca = sentenca.strip()
+        if not sentenca:
+            continue
+        if selecionadas and total + len(sentenca) + 1 > limite:
+            break
+        if not selecionadas and len(sentenca) > limite:
+            selecionadas.append(sentenca[:limite].rstrip(" ,;:") + "...")
+            break
+        selecionadas.append(sentenca)
+        total += len(sentenca) + 1
+        if len(selecionadas) >= 2:
+            break
+
+    return " ".join(selecionadas).strip()
+
+
+def gerar_conclusao_automatica(
+    relato: str,
+    tipo_identificacao: str,
+    dados_individuo: Optional[Dict[str, Any]] = None,
+    dados_veiculo: Optional[Dict[str, Any]] = None,
+) -> str:
+    resumo = resumir_relato_sem_inventar(relato)
+    tipo = str(tipo_identificacao or "").lower()
+
+    if tipo == "veiculo":
+        encerramento = (
+            "Os dados do veículo e as provas coletadas foram registrados para "
+            "análise e continuidade das diligências investigativas."
+        )
+    elif tipo == "individuo":
+        encerramento = (
+            "As informações do indivíduo e as provas coletadas foram registradas "
+            "para continuidade das diligências investigativas."
+        )
+    else:
+        encerramento = (
+            "Os dados do indivíduo, do veículo e as provas coletadas foram "
+            "registrados para análise e continuidade das investigações."
+        )
+
+    if resumo:
+        return f"Conforme o relato, {resumo[0].lower() + resumo[1:] if len(resumo) > 1 else resumo.lower()} {encerramento}"
+    return encerramento
+
+
+def formatar_secao_individuo(dados: Dict[str, Any]) -> str:
+    if not dados:
+        return ""
+    return (
+        "👤 **INDIVÍDUO IDENTIFICADO**\n\n"
+        f"**Nome:** {dados.get('nome') or 'Não identificado'}\n"
+        f"**RG:** {dados.get('rg') or 'Não identificado'}\n"
+        f"**Características:** {dados.get('caracteristicas') or 'Não identificado'}\n"
+        f"**Participação no fato:** {dados.get('participacao') or 'Não identificado'}\n"
+        f"**Outras informações:** {dados.get('outras_informacoes') or 'Não identificado'}"
+    )
+
+
+def formatar_secao_veiculo(dados: Dict[str, Any]) -> str:
+    if not dados:
+        return ""
+    return (
+        "🚘 **VEÍCULO IDENTIFICADO**\n\n"
+        f"**Modelo:** {dados.get('modelo') or 'Não identificado'}\n"
+        f"**Placa:** {dados.get('placa') or 'Não identificado'}\n"
+        f"**Telefone:** {dados.get('telefone') or 'Não identificado'}\n"
+        f"**Proprietário:** {dados.get('proprietario') or 'Não identificado'}\n"
+        f"**RG do proprietário:** {dados.get('rg_proprietario') or 'Não identificado'}"
+    )
+
+
+def formatar_boletim(dados: Dict[str, Any], previa: bool = False) -> str:
+    secoes: List[str] = []
+    tipo = str(dados.get("tipo_identificacao", "") or "").lower()
+
+    if tipo in {"individuo", "ambos"}:
+        secao = formatar_secao_individuo(dados.get("dados_individuo", {}))
+        if secao:
+            secoes.append(secao)
+
+    if tipo in {"veiculo", "ambos"}:
+        secao = formatar_secao_veiculo(dados.get("dados_veiculo", {}))
+        if secao:
+            secoes.append(secao)
+
+    identificacoes = "\n\n━━━━━━━━━━━━━━━━━━━━━━━\n\n".join(secoes)
+    if identificacoes:
+        identificacoes = (
+            "\n\n━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            + identificacoes
+            + "\n\n━━━━━━━━━━━━━━━━━━━━━━━\n"
+        )
+    else:
+        identificacoes = "\n\n━━━━━━━━━━━━━━━━━━━━━━━\n"
+
+    provas_texto = (
+        "As provas encontram-se anexadas abaixo."
+        if not previa
+        else "As provas enviadas neste canal serão anexadas na publicação."
+    )
+
+    numero = str(dados.get("numero", ""))
+    comunicante = str(
+        dados.get("comunicante_mention")
+        or f"<@{dados.get('comunicante_id', 0)}>"
+    )
+
+    return (
+        f"📋 **BOLETIM DE OCORRÊNCIA — {numero_curto_boletim(numero)}**\n\n"
+        f"**Comunicante:** {comunicante}\n"
+        f"**RG:** {dados.get('rg') or 'Não informado'}\n\n"
+        f"**Data do fato:** {dados.get('data_fato') or data_atual_br()}\n"
+        f"**Horário aproximado:** {dados.get('horario_fato') or horario_atual_br()}\n"
+        f"**Local:** {dados.get('local') or 'Não informado'}\n\n"
+        f"**RELATO:**\n\n"
+        f"{dados.get('relato') or 'Não informado'}"
+        f"{identificacoes}\n"
+        f"📎 **PROVAS:**\n\n"
+        f"{provas_texto}\n\n"
+        f"**CONCLUSÃO:**\n\n"
+        f"{dados.get('conclusao') or 'A conclusão ainda não foi gerada.'}\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"**Número do boletim:** {numero}\n"
+        f"**Registrado por:** {comunicante}\n"
+        f"**Data do registro:** {data_atual_br()} — {horario_atual_br()}"
+    )
+
+
+async def enviar_previa_boletim(
+    canal: discord.TextChannel,
+    dados: Dict[str, Any],
+) -> None:
+    texto = "🔎 **PRÉVIA DO BOLETIM**\n\n" + formatar_boletim(dados, previa=True)
+    partes = dividir_texto_discord(texto)
+    mensagens_ids: List[int] = []
+    for indice, parte in enumerate(partes):
+        view = PreviaBoletimView() if indice == len(partes) - 1 else None
+        mensagem = await canal.send(parte, view=view)
+        mensagens_ids.append(mensagem.id)
+
+    dados["preview_message_ids"] = mensagens_ids
+    dados["etapa"] = "PREVIA"
+    boletins_pendentes[canal.id] = dados
+    salvar_boletins_pendentes()
+
+
+async def enviar_etapa_provas(
+    interaction: discord.Interaction,
+    dados: Dict[str, Any],
+) -> None:
+    canal = interaction.channel
+    if not isinstance(canal, discord.TextChannel):
+        await responder_interacao(interaction, "❌ Canal inválido.", ephemeral=True)
+        return
+
+    dados["etapa"] = "PROVAS"
+    boletins_pendentes[canal.id] = dados
+    salvar_boletins_pendentes()
+
+    mensagem = (
+        "📎 **ETAPA DE PROVAS**\n\n"
+        "Envie neste canal todas as fotos, vídeos, prints, documentos ou outros "
+        "arquivos relacionados ao boletim.\n\n"
+        "Quando terminar, clique em **Finalizar Provas**."
+    )
+    if interaction.response.is_done():
+        await canal.send(mensagem, view=ProvasBoletimView())
+    else:
+        await interaction.response.send_message(
+            mensagem,
+            view=ProvasBoletimView(),
+        )
+
+
+async def depois_identificacao(
+    interaction: discord.Interaction,
+    dados: Dict[str, Any],
+) -> None:
+    canal = interaction.channel
+    if not isinstance(canal, discord.TextChannel):
+        await responder_interacao(interaction, "❌ Canal inválido.", ephemeral=True)
+        return
+
+    retorno = dados.pop("retorno_identificacao", "")
+    dados["conclusao"] = gerar_conclusao_automatica(
+        dados.get("relato", ""),
+        dados.get("tipo_identificacao", ""),
+        dados.get("dados_individuo", {}),
+        dados.get("dados_veiculo", {}),
+    )
+    boletins_pendentes[canal.id] = dados
+    salvar_boletins_pendentes()
+
+    if retorno == "PREVIA":
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=True)
+        await enviar_previa_boletim(canal, dados)
+        await interaction.followup.send("✅ Identificação atualizada.", ephemeral=True)
+        return
+
+    await enviar_etapa_provas(interaction, dados)
+
+
+async def cancelar_boletim_core(interaction: discord.Interaction) -> None:
+    canal = interaction.channel
+    if not isinstance(canal, discord.TextChannel):
+        await responder_interacao(interaction, "❌ Canal inválido.", ephemeral=True)
+        return
+
+    dados = obter_rascunho_boletim(interaction)
+    if not dados:
+        await responder_interacao(
+            interaction,
+            "❌ Você não pode cancelar este boletim ou ele não foi encontrado.",
+            ephemeral=True,
+        )
+        return
+
+    boletins_pendentes.pop(canal.id, None)
+    salvar_boletins_pendentes()
+    await responder_interacao(
+        interaction,
+        "❌ Boletim cancelado. O canal será apagado em 3 segundos.",
+        ephemeral=True,
+    )
+    await asyncio.sleep(3)
+    try:
+        await canal.delete(reason="Boletim cancelado")
+    except Exception:
+        pass
+
+
+async def coletar_anexos_boletim(
+    canal: discord.TextChannel,
+) -> List[discord.Attachment]:
+    anexos: List[discord.Attachment] = []
+    async for mensagem in canal.history(limit=None, oldest_first=True):
+        if mensagem.author.bot:
+            continue
+        anexos.extend(mensagem.attachments)
+    return anexos
+
+
+async def enviar_anexos_boletim(
+    canal_oficial: discord.abc.Messageable,
+    anexos: List[discord.Attachment],
+    numero: str,
+) -> List[Dict[str, Any]]:
+    resultados: List[Dict[str, Any]] = []
+
+    for indice in range(0, len(anexos), 5):
+        lote = anexos[indice:indice + 5]
+        arquivos: List[discord.File] = []
+        originais: List[discord.Attachment] = []
+        for anexo in lote:
+            try:
+                arquivos.append(await anexo.to_file())
+                originais.append(anexo)
+            except Exception as erro:
+                await enviar_log(
+                    f"⚠️ Não foi possível preparar o anexo `{anexo.filename}` "
+                    f"do boletim {numero}: {erro}"
+                )
+
+        if not arquivos:
+            continue
+
+        try:
+            mensagem = await canal_oficial.send(
+                content=f"📎 **Provas — {numero}**",
+                files=arquivos,
+            )
+            for anexo_publicado in mensagem.attachments:
+                resultados.append({
+                    "id": anexo_publicado.id,
+                    "nome": anexo_publicado.filename,
+                    "url": anexo_publicado.url,
+                    "mensagem_id": mensagem.id,
+                    "mensagem_url": mensagem.jump_url,
+                })
+        except Exception as erro:
+            await enviar_log(
+                f"⚠️ Falha ao publicar um lote de provas do boletim {numero}: {erro}"
+            )
+            # Tenta novamente um arquivo por mensagem.
+            for original in originais:
+                try:
+                    arquivo = await original.to_file()
+                    mensagem = await canal_oficial.send(
+                        content=f"📎 **Prova — {numero}**",
+                        file=arquivo,
+                    )
+                    for anexo_publicado in mensagem.attachments:
+                        resultados.append({
+                            "id": anexo_publicado.id,
+                            "nome": anexo_publicado.filename,
+                            "url": anexo_publicado.url,
+                            "mensagem_id": mensagem.id,
+                            "mensagem_url": mensagem.jump_url,
+                        })
+                except Exception as erro_individual:
+                    await enviar_log(
+                        f"⚠️ Falha ao publicar `{original.filename}` no boletim "
+                        f"{numero}: {erro_individual}"
+                    )
+
+    return resultados
+
+
+async def publicar_boletim_core(interaction: discord.Interaction) -> None:
+    canal_temp = interaction.channel
+    if not isinstance(canal_temp, discord.TextChannel):
+        await responder_interacao(interaction, "❌ Canal inválido.", ephemeral=True)
+        return
+
+    dados = obter_rascunho_boletim(interaction)
+    if not dados:
+        await responder_interacao(
+            interaction,
+            "❌ Boletim não encontrado ou você não tem permissão.",
+            ephemeral=True,
+        )
+        return
+
+    if dados.get("publicando"):
+        await responder_interacao(
+            interaction,
+            "⏳ Este boletim já está sendo publicado.",
+            ephemeral=True,
+        )
+        return
+
+    if buscar_boletim_numero(str(dados.get("numero", ""))):
+        await responder_interacao(
+            interaction,
+            "⚠️ Este boletim já foi publicado.",
+            ephemeral=True,
+        )
+        return
+
+    dados["publicando"] = True
+    boletins_pendentes[canal_temp.id] = dados
+    salvar_boletins_pendentes()
+    await interaction.response.defer(ephemeral=True, thinking=True)
+
+    try:
+        canal_oficial = bot.get_channel(BOLETINS_CHANNEL_ID)
+        if canal_oficial is None:
+            canal_oficial = await bot.fetch_channel(BOLETINS_CHANNEL_ID)
+        if not isinstance(canal_oficial, discord.TextChannel):
+            raise RuntimeError("O canal oficial de boletins não foi encontrado.")
+
+        partes = dividir_texto_discord(formatar_boletim(dados, previa=False))
+        mensagens_publicadas: List[discord.Message] = []
+        for parte in partes:
+            mensagens_publicadas.append(await canal_oficial.send(parte))
+
+        mensagem_principal = mensagens_publicadas[0]
+        anexos_origem = await coletar_anexos_boletim(canal_temp)
+        anexos_publicados = await enviar_anexos_boletim(
+            canal_oficial,
+            anexos_origem,
+            str(dados.get("numero", "")),
+        )
+
+        registro = dict(dados)
+        registro.pop("preview_message_ids", None)
+        registro.pop("publicando", None)
+        registro["status"] = "PUBLICADO"
+        registro["mensagem_id"] = mensagem_principal.id
+        registro["mensagem_url"] = mensagem_principal.jump_url
+        registro["mensagens_oficiais"] = [
+            {"id": mensagem.id, "url": mensagem.jump_url}
+            for mensagem in mensagens_publicadas
+        ]
+        registro["anexos"] = anexos_publicados
+        registro["data_criacao"] = agora_br()
+        registro["canal_provisorio_id"] = canal_temp.id
+
+        boletins = carregar_boletins()
+        if not any(
+            str(item.get("numero", "")).upper()
+            == str(registro.get("numero", "")).upper()
+            for item in boletins
+        ):
+            boletins.append(registro)
+            salvar_boletins(boletins)
+
+        boletins_pendentes.pop(canal_temp.id, None)
+        salvar_boletins_pendentes()
+
+        await enviar_log(
+            f"📋 Boletim publicado: {registro.get('numero')} | "
+            f"Comunicante: <@{registro.get('comunicante_id')}> | "
+            f"Mensagem: {mensagem_principal.jump_url}"
+        )
+        await interaction.followup.send(
+            f"✅ Boletim publicado com sucesso: {mensagem_principal.jump_url}",
+            ephemeral=True,
+        )
+        await canal_temp.send("✅ Boletim publicado com sucesso. Este canal será apagado em 5 segundos.")
+        await asyncio.sleep(5)
+        await canal_temp.delete(reason="Boletim publicado com sucesso")
+    except Exception as erro:
+        dados["publicando"] = False
+        boletins_pendentes[canal_temp.id] = dados
+        salvar_boletins_pendentes()
+        await enviar_log(f"❌ Erro ao publicar boletim {dados.get('numero')}: {erro}")
+        await interaction.followup.send(
+            f"❌ Não foi possível publicar o boletim: `{erro}`\n"
+            "O canal e o rascunho foram mantidos.",
+            ephemeral=True,
+        )
+
+
+async def abrir_boletim_core(interaction: discord.Interaction) -> None:
+    guild = interaction.guild
+    if guild is None:
+        await responder_interacao(interaction, "❌ Use dentro de um servidor.", ephemeral=True)
+        return
+
+    if not interaction.response.is_done():
+        await interaction.response.defer(ephemeral=True, thinking=True)
+
+    numero = gerar_numero_boletim()
+    rg = obter_rg_usuario(interaction.user.id)
+
+    categoria: Optional[discord.CategoryChannel] = None
+    if BOLETIM_TEMP_CATEGORY_ID:
+        categoria_encontrada = guild.get_channel(BOLETIM_TEMP_CATEGORY_ID)
+        if isinstance(categoria_encontrada, discord.CategoryChannel):
+            categoria = categoria_encontrada
+    if categoria is None and isinstance(interaction.channel, discord.TextChannel):
+        categoria = interaction.channel.category
+
+    overwrites: Dict[Any, discord.PermissionOverwrite] = {
+        guild.default_role: discord.PermissionOverwrite(view_channel=False),
+        interaction.user: discord.PermissionOverwrite(
+            view_channel=True,
+            send_messages=True,
+            attach_files=True,
+            read_message_history=True,
+        ),
+    }
+    if guild.me:
+        overwrites[guild.me] = discord.PermissionOverwrite(
+            view_channel=True,
+            send_messages=True,
+            attach_files=True,
+            read_message_history=True,
+            manage_channels=True,
+        )
+    for cargo_id in set(CARGOS_ADMIN_IDS + CARGOS_EQUIPE_IDS):
+        cargo = guild.get_role(cargo_id)
+        if cargo:
+            overwrites[cargo] = discord.PermissionOverwrite(
+                view_channel=True,
+                send_messages=True,
+                attach_files=True,
+                read_message_history=True,
+            )
+
+    nome_usuario = slugify(
+        getattr(interaction.user, "display_name", interaction.user.name)
+    )[:35]
+    canal = await guild.create_text_channel(
+        name=f"📋・boletim-{nome_usuario}-{numero_curto_boletim(numero)}",
+        category=categoria,
+        overwrites=overwrites,
+        reason=f"Canal provisório do boletim {numero}",
+    )
+
+    dados = {
+        "numero": numero,
+        "comunicante_id": interaction.user.id,
+        "comunicante_mention": interaction.user.mention,
+        "comunicante_nome": str(interaction.user),
+        "rg": rg,
+        "data_fato": data_atual_br(),
+        "horario_fato": horario_atual_br(),
+        "local": "",
+        "relato": "",
+        "tipo_identificacao": "",
+        "dados_individuo": {},
+        "dados_veiculo": {},
+        "conclusao": "",
+        "etapa": "RG" if not rg else "DADOS_INICIAIS",
+        "status": "RASCUNHO",
+        "criado_em": agora_br(),
+        "canal_id": canal.id,
+    }
+    boletins_pendentes[canal.id] = dados
+    salvar_boletins_pendentes()
+
+    await canal.send(
+        f"📋 **Boletim de Ocorrência — {numero}**\n\n"
+        f"**Comunicante:** {interaction.user.mention}\n"
+        f"**RG:** {rg or 'Ainda não vinculado'}\n"
+        f"**Data:** {dados['data_fato']}\n"
+        f"**Horário:** {dados['horario_fato']}\n\n"
+        "O bot vai ajudar no preenchimento do boletim por etapas."
+    )
+
+    if rg:
+        await canal.send(
+            "Clique abaixo para informar o local e escrever o relato.",
+            view=IniciarBoletimView(),
+        )
+    else:
+        await canal.send(
+            "Seu Discord ainda não possui RG vinculado. Informe o RG para continuar.",
+            view=InformarRGBoletimView(),
+        )
+
+    await enviar_log(
+        f"📁 Canal provisório do boletim {numero} criado por "
+        f"{interaction.user.mention}: {canal.mention}"
+    )
+    await interaction.followup.send(
+        f"✅ Canal provisório criado: {canal.mention}",
+        ephemeral=True,
+    )
+
+
+def texto_consulta_boletim(boletim: Dict[str, Any]) -> str:
+    comunicante = boletim.get("comunicante_mention") or f"<@{boletim.get('comunicante_id', 0)}>"
+    return (
+        f"📋 **{boletim.get('numero', 'Boletim')}**\n"
+        f"**Comunicante:** {comunicante}\n"
+        f"**Data:** {boletim.get('data_fato', 'Não informado')}\n"
+        f"**Local:** {boletim.get('local', 'Não informado')}\n"
+        f"**Status:** {boletim.get('status', 'Não informado')}\n"
+        f"**Mensagem:** {boletim.get('mensagem_url', 'Sem link')}"
+    )
+
+
+class InformarRGBoletimModal(Modal, title="Informar RG"):
+    rg = TextInput(
+        label="RG do comunicante",
+        placeholder="Ex: 6027",
+        max_length=50,
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        dados = obter_rascunho_boletim(interaction)
+        if not dados:
+            await interaction.response.send_message(
+                "❌ Rascunho não encontrado ou sem permissão.",
+                ephemeral=True,
+            )
+            return
+
+        valor = str(self.rg.value).strip()
+        dados["rg"] = valor
+        dados["etapa"] = "DADOS_INICIAIS"
+        vincular_rg_usuario(interaction.user.id, valor)
+        boletins_pendentes[interaction.channel.id] = dados
+        salvar_boletins_pendentes()
+
+        await interaction.response.send_message(
+            f"✅ RG `{valor}` vinculado. Agora preencha o local e o relato.",
+            view=IniciarBoletimView(),
+        )
+
+
+class DadosIniciaisBoletimModal(Modal, title="Local e Relato"):
+    local = TextInput(
+        label="Local do fato",
+        placeholder="Ex: Porto, Caixa d'água, Ilha...",
+        max_length=200,
+    )
+    relato = TextInput(
+        label="Relato completo",
+        placeholder="Descreva toda a ocorrência...",
+        style=discord.TextStyle.paragraph,
+        max_length=4000,
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        dados = obter_rascunho_boletim(interaction)
+        if not dados:
+            await interaction.response.send_message(
+                "❌ Rascunho não encontrado ou sem permissão.",
+                ephemeral=True,
+            )
+            return
+
+        dados["local"] = str(self.local.value).strip()
+        dados["relato"] = str(self.relato.value).strip()
+        dados["etapa"] = "TIPO_IDENTIFICACAO"
+        boletins_pendentes[interaction.channel.id] = dados
+        salvar_boletins_pendentes()
+
+        await interaction.response.send_message(
+            "✅ Local e relato registrados.\n\n"
+            "Agora escolha o que foi identificado:",
+            view=TipoIdentificacaoBoletimView(),
+        )
+
+
+class VeiculoBoletimModal(Modal, title="Veículo Identificado"):
+    modelo = TextInput(label="Modelo", placeholder="Não identificado", max_length=100)
+    placa = TextInput(label="Placa", placeholder="Não identificado", max_length=50)
+    telefone = TextInput(label="Telefone", placeholder="Não identificado", max_length=100)
+    proprietario = TextInput(label="Proprietário", placeholder="Não identificado", max_length=150)
+    rg_proprietario = TextInput(label="RG do proprietário", placeholder="Não identificado", max_length=80)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        dados = obter_rascunho_boletim(interaction)
+        if not dados:
+            await interaction.response.send_message(
+                "❌ Rascunho não encontrado ou sem permissão.",
+                ephemeral=True,
+            )
+            return
+
+        dados["dados_veiculo"] = {
+            "modelo": str(self.modelo.value).strip(),
+            "placa": str(self.placa.value).strip(),
+            "telefone": str(self.telefone.value).strip(),
+            "proprietario": str(self.proprietario.value).strip(),
+            "rg_proprietario": str(self.rg_proprietario.value).strip(),
+        }
+        boletins_pendentes[interaction.channel.id] = dados
+        salvar_boletins_pendentes()
+        await depois_identificacao(interaction, dados)
+
+
+class IndividuoBoletimModal(Modal, title="Indivíduo Identificado"):
+    nome = TextInput(label="Nome", placeholder="Nome do indivíduo", max_length=150)
+    rg = TextInput(label="RG", placeholder="Não identificado", max_length=80, required=False)
+    caracteristicas = TextInput(
+        label="Características",
+        placeholder="Não identificado",
+        style=discord.TextStyle.paragraph,
+        max_length=800,
+        required=False,
+    )
+    participacao = TextInput(
+        label="Participação no fato",
+        placeholder="Não identificado",
+        style=discord.TextStyle.paragraph,
+        max_length=800,
+        required=False,
+    )
+    outras_informacoes = TextInput(
+        label="Outras informações",
+        placeholder="Não identificado",
+        style=discord.TextStyle.paragraph,
+        max_length=800,
+        required=False,
+    )
+
+    def __init__(self, continuar_veiculo: bool = False):
+        super().__init__()
+        self.continuar_veiculo = continuar_veiculo
+
+    async def on_submit(self, interaction: discord.Interaction):
+        dados = obter_rascunho_boletim(interaction)
+        if not dados:
+            await interaction.response.send_message(
+                "❌ Rascunho não encontrado ou sem permissão.",
+                ephemeral=True,
+            )
+            return
+
+        dados["dados_individuo"] = {
+            "nome": str(self.nome.value).strip(),
+            "rg": str(self.rg.value or "").strip(),
+            "caracteristicas": str(self.caracteristicas.value or "").strip(),
+            "participacao": str(self.participacao.value or "").strip(),
+            "outras_informacoes": str(self.outras_informacoes.value or "").strip(),
+        }
+        boletins_pendentes[interaction.channel.id] = dados
+        salvar_boletins_pendentes()
+
+        if self.continuar_veiculo:
+            await interaction.response.send_message(
+                "✅ Indivíduo registrado. Agora clique abaixo para preencher o veículo.",
+                view=ContinuarVeiculoBoletimView(),
+            )
+            return
+
+        await depois_identificacao(interaction, dados)
+
+
+class EditarLocalBoletimModal(Modal, title="Editar Local"):
+    local = TextInput(label="Novo local", max_length=200)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        dados = obter_rascunho_boletim(interaction)
+        if not dados:
+            await interaction.response.send_message("❌ Rascunho não encontrado.", ephemeral=True)
+            return
+        dados["local"] = str(self.local.value).strip()
+        boletins_pendentes[interaction.channel.id] = dados
+        salvar_boletins_pendentes()
+        await interaction.response.defer(ephemeral=True)
+        await enviar_previa_boletim(interaction.channel, dados)
+        await interaction.followup.send("✅ Local atualizado.", ephemeral=True)
+
+
+class EditarRelatoBoletimModal(Modal, title="Editar Relato"):
+    relato = TextInput(
+        label="Novo relato",
+        style=discord.TextStyle.paragraph,
+        max_length=4000,
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        dados = obter_rascunho_boletim(interaction)
+        if not dados:
+            await interaction.response.send_message("❌ Rascunho não encontrado.", ephemeral=True)
+            return
+        dados["relato"] = str(self.relato.value).strip()
+        dados["conclusao"] = gerar_conclusao_automatica(
+            dados["relato"],
+            dados.get("tipo_identificacao", ""),
+            dados.get("dados_individuo", {}),
+            dados.get("dados_veiculo", {}),
+        )
+        boletins_pendentes[interaction.channel.id] = dados
+        salvar_boletins_pendentes()
+        await interaction.response.defer(ephemeral=True)
+        await enviar_previa_boletim(interaction.channel, dados)
+        await interaction.followup.send(
+            "✅ Relato atualizado e conclusão refeita.",
+            ephemeral=True,
+        )
+
+
+class EditarConclusaoBoletimModal(Modal, title="Editar Conclusão"):
+    conclusao = TextInput(
+        label="Conclusão",
+        style=discord.TextStyle.paragraph,
+        max_length=2000,
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        dados = obter_rascunho_boletim(interaction)
+        if not dados:
+            await interaction.response.send_message("❌ Rascunho não encontrado.", ephemeral=True)
+            return
+        dados["conclusao"] = str(self.conclusao.value).strip()
+        boletins_pendentes[interaction.channel.id] = dados
+        salvar_boletins_pendentes()
+        await interaction.response.defer(ephemeral=True)
+        await enviar_previa_boletim(interaction.channel, dados)
+        await interaction.followup.send("✅ Conclusão atualizada.", ephemeral=True)
+
+
+class ConsultarBoletimModal(Modal, title="Consultar Boletim"):
+    numero = TextInput(
+        label="Número do boletim",
+        placeholder="BO-DIC-20260702-001",
+        max_length=40,
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        boletim = buscar_boletim_numero(str(self.numero.value))
+        if not boletim:
+            await interaction.response.send_message(
+                "❌ Boletim não encontrado.",
+                ephemeral=True,
+            )
+            return
+        await interaction.response.send_message(
+            texto_consulta_boletim(boletim),
+            ephemeral=True,
+        )
+
+
+class PainelBoletimView(View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(
+        label="Abrir Boletim",
+        emoji="📝",
+        style=discord.ButtonStyle.green,
+        custom_id="dic_boletim_abrir",
+    )
+    async def abrir(self, interaction: discord.Interaction, button: Button):
+        await abrir_boletim_core(interaction)
+
+    @discord.ui.button(
+        label="Meus Boletins",
+        emoji="📂",
+        style=discord.ButtonStyle.blurple,
+        custom_id="dic_boletim_meus",
+    )
+    async def meus(self, interaction: discord.Interaction, button: Button):
+        boletins = [
+            boletim
+            for boletim in carregar_boletins()
+            if int(boletim.get("comunicante_id", 0)) == interaction.user.id
+        ][-20:]
+        if not boletins:
+            await interaction.response.send_message(
+                "📂 Você ainda não possui boletins publicados.",
+                ephemeral=True,
+            )
+            return
+        linhas = [
+            f"• **{b.get('numero')}** | {b.get('data_fato')} | "
+            f"{b.get('local')} | {b.get('mensagem_url', 'Sem link')}"
+            for b in reversed(boletins)
+        ]
+        await interaction.response.send_message(
+            "📂 **Meus últimos boletins:**\n\n" + "\n".join(linhas),
+            ephemeral=True,
+        )
+
+    @discord.ui.button(
+        label="Consultar Boletim",
+        emoji="🔎",
+        style=discord.ButtonStyle.gray,
+        custom_id="dic_boletim_consultar",
+    )
+    async def consultar(self, interaction: discord.Interaction, button: Button):
+        await interaction.response.send_modal(ConsultarBoletimModal())
+
+    @discord.ui.button(
+        label="Histórico",
+        emoji="🗃️",
+        style=discord.ButtonStyle.gray,
+        custom_id="dic_boletim_historico",
+    )
+    async def historico(self, interaction: discord.Interaction, button: Button):
+        if not isinstance(interaction.user, discord.Member) or not usuario_tem_equipe(interaction.user):
+            await interaction.response.send_message(
+                "❌ Apenas a equipe autorizada pode consultar o histórico.",
+                ephemeral=True,
+            )
+            return
+        boletins = carregar_boletins()[-25:]
+        if not boletins:
+            await interaction.response.send_message(
+                "🗃️ Nenhum boletim publicado.",
+                ephemeral=True,
+            )
+            return
+        linhas = []
+        for b in reversed(boletins):
+            comunicante = b.get("comunicante_mention") or f"<@{b.get('comunicante_id', 0)}>"
+            linhas.append(
+                f"• **{b.get('numero')}** | {comunicante} | "
+                f"{b.get('data_fato')} | {b.get('local')} | "
+                f"{b.get('mensagem_url', 'Sem link')}"
+            )
+        await interaction.response.send_message(
+            "🗃️ **Últimos boletins:**\n\n" + "\n".join(linhas),
+            ephemeral=True,
+        )
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception, item) -> None:
+        await enviar_log(f"❌ Erro no painel de boletins: {error}")
+        try:
+            await responder_interacao(
+                interaction,
+                "❌ Ocorreu um erro no painel de boletins.",
+                ephemeral=True,
+            )
+        except Exception:
+            pass
+
+
+class InformarRGBoletimView(View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(
+        label="Informar RG",
+        emoji="🪪",
+        style=discord.ButtonStyle.blurple,
+        custom_id="dic_boletim_informar_rg",
+    )
+    async def informar(self, interaction: discord.Interaction, button: Button):
+        await interaction.response.send_modal(InformarRGBoletimModal())
+
+
+class IniciarBoletimView(View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(
+        label="Preencher Local e Relato",
+        emoji="📝",
+        style=discord.ButtonStyle.green,
+        custom_id="dic_boletim_dados_iniciais",
+    )
+    async def iniciar(self, interaction: discord.Interaction, button: Button):
+        if not obter_rascunho_boletim(interaction):
+            await interaction.response.send_message(
+                "❌ Rascunho não encontrado ou sem permissão.",
+                ephemeral=True,
+            )
+            return
+        await interaction.response.send_modal(DadosIniciaisBoletimModal())
+
+
+class TipoIdentificacaoBoletimView(View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(
+        label="Veículo",
+        emoji="🚘",
+        style=discord.ButtonStyle.blurple,
+        custom_id="dic_boletim_tipo_veiculo",
+    )
+    async def veiculo(self, interaction: discord.Interaction, button: Button):
+        dados = obter_rascunho_boletim(interaction)
+        if not dados:
+            await interaction.response.send_message("❌ Rascunho não encontrado.", ephemeral=True)
+            return
+        dados["tipo_identificacao"] = "veiculo"
+        dados["dados_individuo"] = {}
+        boletins_pendentes[interaction.channel.id] = dados
+        salvar_boletins_pendentes()
+        await interaction.response.send_modal(VeiculoBoletimModal())
+
+    @discord.ui.button(
+        label="Indivíduo",
+        emoji="👤",
+        style=discord.ButtonStyle.blurple,
+        custom_id="dic_boletim_tipo_individuo",
+    )
+    async def individuo(self, interaction: discord.Interaction, button: Button):
+        dados = obter_rascunho_boletim(interaction)
+        if not dados:
+            await interaction.response.send_message("❌ Rascunho não encontrado.", ephemeral=True)
+            return
+        dados["tipo_identificacao"] = "individuo"
+        dados["dados_veiculo"] = {}
+        boletins_pendentes[interaction.channel.id] = dados
+        salvar_boletins_pendentes()
+        await interaction.response.send_modal(IndividuoBoletimModal())
+
+    @discord.ui.button(
+        label="Ambos",
+        emoji="🔄",
+        style=discord.ButtonStyle.green,
+        custom_id="dic_boletim_tipo_ambos",
+    )
+    async def ambos(self, interaction: discord.Interaction, button: Button):
+        dados = obter_rascunho_boletim(interaction)
+        if not dados:
+            await interaction.response.send_message("❌ Rascunho não encontrado.", ephemeral=True)
+            return
+        dados["tipo_identificacao"] = "ambos"
+        boletins_pendentes[interaction.channel.id] = dados
+        salvar_boletins_pendentes()
+        await interaction.response.send_modal(
+            IndividuoBoletimModal(continuar_veiculo=True)
+        )
+
+
+class ContinuarVeiculoBoletimView(View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(
+        label="Preencher Veículo",
+        emoji="🚘",
+        style=discord.ButtonStyle.green,
+        custom_id="dic_boletim_continuar_veiculo",
+    )
+    async def continuar(self, interaction: discord.Interaction, button: Button):
+        if not obter_rascunho_boletim(interaction):
+            await interaction.response.send_message("❌ Rascunho não encontrado.", ephemeral=True)
+            return
+        await interaction.response.send_modal(VeiculoBoletimModal())
+
+
+class ProvasBoletimView(View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(
+        label="Finalizar Provas",
+        emoji="✅",
+        style=discord.ButtonStyle.green,
+        custom_id="dic_boletim_finalizar_provas",
+    )
+    async def finalizar(self, interaction: discord.Interaction, button: Button):
+        dados = obter_rascunho_boletim(interaction)
+        if not dados:
+            await interaction.response.send_message("❌ Rascunho não encontrado.", ephemeral=True)
+            return
+
+        dados["conclusao"] = gerar_conclusao_automatica(
+            dados.get("relato", ""),
+            dados.get("tipo_identificacao", ""),
+            dados.get("dados_individuo", {}),
+            dados.get("dados_veiculo", {}),
+        )
+        boletins_pendentes[interaction.channel.id] = dados
+        salvar_boletins_pendentes()
+
+        await interaction.response.defer(ephemeral=True)
+        await enviar_previa_boletim(interaction.channel, dados)
+        anexos = await coletar_anexos_boletim(interaction.channel)
+        await interaction.followup.send(
+            f"✅ Prévia gerada. Provas encontradas: `{len(anexos)}`.",
+            ephemeral=True,
+        )
+
+    @discord.ui.button(
+        label="Voltar",
+        emoji="↩️",
+        style=discord.ButtonStyle.gray,
+        custom_id="dic_boletim_voltar_identificacao",
+    )
+    async def voltar(self, interaction: discord.Interaction, button: Button):
+        if not obter_rascunho_boletim(interaction):
+            await interaction.response.send_message("❌ Rascunho não encontrado.", ephemeral=True)
+            return
+        await interaction.response.send_message(
+            "Escolha novamente o tipo de identificação:",
+            view=TipoIdentificacaoBoletimView(),
+        )
+
+    @discord.ui.button(
+        label="Cancelar Boletim",
+        emoji="❌",
+        style=discord.ButtonStyle.red,
+        custom_id="dic_boletim_cancelar_provas",
+    )
+    async def cancelar(self, interaction: discord.Interaction, button: Button):
+        await cancelar_boletim_core(interaction)
+
+
+class PreviaBoletimView(View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(
+        label="Publicar Boletim",
+        emoji="✅",
+        style=discord.ButtonStyle.green,
+        custom_id="dic_boletim_publicar",
+        row=0,
+    )
+    async def publicar(self, interaction: discord.Interaction, button: Button):
+        await publicar_boletim_core(interaction)
+
+    @discord.ui.button(
+        label="Editar Local",
+        emoji="✏️",
+        style=discord.ButtonStyle.blurple,
+        custom_id="dic_boletim_editar_local",
+        row=0,
+    )
+    async def editar_local(self, interaction: discord.Interaction, button: Button):
+        if not obter_rascunho_boletim(interaction):
+            await interaction.response.send_message("❌ Rascunho não encontrado.", ephemeral=True)
+            return
+        await interaction.response.send_modal(EditarLocalBoletimModal())
+
+    @discord.ui.button(
+        label="Editar Relato",
+        emoji="✏️",
+        style=discord.ButtonStyle.blurple,
+        custom_id="dic_boletim_editar_relato",
+        row=0,
+    )
+    async def editar_relato(self, interaction: discord.Interaction, button: Button):
+        if not obter_rascunho_boletim(interaction):
+            await interaction.response.send_message("❌ Rascunho não encontrado.", ephemeral=True)
+            return
+        await interaction.response.send_modal(EditarRelatoBoletimModal())
+
+    @discord.ui.button(
+        label="Editar Identificação",
+        emoji="✏️",
+        style=discord.ButtonStyle.gray,
+        custom_id="dic_boletim_editar_identificacao",
+        row=1,
+    )
+    async def editar_identificacao(self, interaction: discord.Interaction, button: Button):
+        dados = obter_rascunho_boletim(interaction)
+        if not dados:
+            await interaction.response.send_message("❌ Rascunho não encontrado.", ephemeral=True)
+            return
+        dados["retorno_identificacao"] = "PREVIA"
+        boletins_pendentes[interaction.channel.id] = dados
+        salvar_boletins_pendentes()
+        await interaction.response.send_message(
+            "Escolha novamente o tipo de identificação:",
+            view=TipoIdentificacaoBoletimView(),
+        )
+
+    @discord.ui.button(
+        label="Editar Conclusão",
+        emoji="✏️",
+        style=discord.ButtonStyle.gray,
+        custom_id="dic_boletim_editar_conclusao",
+        row=1,
+    )
+    async def editar_conclusao(self, interaction: discord.Interaction, button: Button):
+        if not obter_rascunho_boletim(interaction):
+            await interaction.response.send_message("❌ Rascunho não encontrado.", ephemeral=True)
+            return
+        await interaction.response.send_modal(EditarConclusaoBoletimModal())
+
+    @discord.ui.button(
+        label="Cancelar",
+        emoji="❌",
+        style=discord.ButtonStyle.red,
+        custom_id="dic_boletim_cancelar_previa",
+        row=1,
+    )
+    async def cancelar(self, interaction: discord.Interaction, button: Button):
+        await cancelar_boletim_core(interaction)
+
+
+def embed_painel_boletim_padrao() -> discord.Embed:
+    return discord.Embed(
+        title="📋 Sistema de Boletins - DIC",
+        description=(
+            "Utilize os botões abaixo para registrar e consultar boletins.\n\n"
+            "📝 **Abrir Boletim** — Cria um canal provisório privado.\n"
+            "📂 **Meus Boletins** — Mostra seus últimos registros.\n"
+            "🔎 **Consultar Boletim** — Consulta pelo número.\n"
+            "🗃️ **Histórico** — Exibe os boletins recentes para a equipe."
+        ),
+        color=discord.Color.blue(),
+    )
+
+
 # =====================================================
 # COMANDOS DE TEXTO (!) - PLANO B PARA QUANDO O DISCORD NÃO MOSTRAR SLASH
 # =====================================================
@@ -1443,6 +2763,29 @@ async def fechar_mesa_por_texto(ctx: commands.Context, motivo: str = "Fechada po
     await ctx.reply("🔒 Mesa fechada e movida para a categoria de mesas fechadas.")
 
 
+
+@bot.command(name="painelboletim")
+async def cmd_painelboletim(ctx: commands.Context):
+    """Abre o painel de boletins pelo comando !painelboletim."""
+    if not isinstance(ctx.author, discord.Member) or not usuario_tem_equipe(ctx.author):
+        await ctx.reply("❌ Apenas a equipe autorizada pode enviar este painel.")
+        return
+    await ctx.send(embed=embed_painel_boletim_padrao(), view=PainelBoletimView())
+
+
+@bot.command(name="consultarboletim")
+async def cmd_consultarboletim(ctx: commands.Context, *, numero: str = ""):
+    """Consulta um boletim pelo número."""
+    if not numero.strip():
+        await ctx.reply("❌ Use assim: `!consultarboletim BO-DIC-20260702-001`")
+        return
+    boletim = buscar_boletim_numero(numero)
+    if not boletim:
+        await ctx.reply("❌ Boletim não encontrado.")
+        return
+    await ctx.reply(texto_consulta_boletim(boletim))
+
+
 @bot.command(name="painelmesas")
 @commands.has_permissions(administrator=True)
 async def cmd_painelmesas(ctx: commands.Context):
@@ -1486,8 +2829,8 @@ async def cmd_catalogo(ctx: commands.Context):
 async def cmd_comandos(ctx: commands.Context):
     await ctx.reply(
         "📌 **Comandos disponíveis:**\n\n"
-        "**Slash:** `/painelprocurados`, `/painelmesas`, `/criarmesa`, `/fecharmesa`, `/backup`, `/estatisticas`\n"
-        "**Plano B por texto:** `!painelprocurados`, `!painelmesas`, `!criarmesa Apelido | Família | Observação`, `!fecharmesa`, `!catalogo`"
+        "**Slash:** `/painelprocurados`, `/painelmesas`, `/painelboletim`, `/criarmesa`, `/fecharmesa`, `/backup`, `/estatisticas`, `/consultarboletim`\n"
+        "**Plano B por texto:** `!painelprocurados`, `!painelmesas`, `!painelboletim`, `!criarmesa Apelido | Família | Observação`, `!fecharmesa`, `!catalogo`, `!consultarboletim NUMERO`"
     )
 
 
@@ -1510,6 +2853,71 @@ async def cmd_synccomandos(ctx: commands.Context):
 # =====================================================
 # SLASH COMMANDS - TODOS
 # =====================================================
+
+
+@bot.tree.command(name="painelboletim", description="Envia o painel de boletins de ocorrência.")
+async def painelboletim(interaction: discord.Interaction):
+    if not isinstance(interaction.user, discord.Member) or not usuario_tem_equipe(interaction.user):
+        await interaction.response.send_message(
+            "❌ Apenas a equipe autorizada pode enviar este painel.",
+            ephemeral=True,
+        )
+        return
+    await interaction.response.send_message(
+        embed=embed_painel_boletim_padrao(),
+        view=PainelBoletimView(),
+    )
+
+
+@bot.tree.command(name="vincularrg", description="Vincula um RG a um usuário do Discord.")
+@app_commands.describe(usuario="Usuário que receberá o RG", rg="RG do usuário")
+@app_commands.checks.has_permissions(administrator=True)
+async def vincularrg(
+    interaction: discord.Interaction,
+    usuario: discord.Member,
+    rg: str,
+):
+    vincular_rg_usuario(usuario.id, rg)
+    await interaction.response.send_message(
+        f"✅ RG `{rg}` vinculado a {usuario.mention}.",
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(name="removervinculorg", description="Remove o RG vinculado de um usuário.")
+@app_commands.describe(usuario="Usuário que terá o RG removido")
+@app_commands.checks.has_permissions(administrator=True)
+async def removervinculorg(
+    interaction: discord.Interaction,
+    usuario: discord.Member,
+):
+    removido = remover_rg_usuario(usuario.id)
+    mensagem = (
+        f"✅ RG de {usuario.mention} removido."
+        if removido
+        else f"⚠️ {usuario.mention} não possuía RG vinculado."
+    )
+    await interaction.response.send_message(mensagem, ephemeral=True)
+
+
+@bot.tree.command(name="consultarboletim", description="Consulta um boletim pelo número.")
+@app_commands.describe(numero="Ex: BO-DIC-20260702-001")
+async def consultarboletim(
+    interaction: discord.Interaction,
+    numero: str,
+):
+    boletim = buscar_boletim_numero(numero)
+    if not boletim:
+        await interaction.response.send_message(
+            "❌ Boletim não encontrado.",
+            ephemeral=True,
+        )
+        return
+    await interaction.response.send_message(
+        texto_consulta_boletim(boletim),
+        ephemeral=True,
+    )
+
 
 @bot.tree.command(name="painelprocurados", description="Envia o painel de gerenciamento de procurados.")
 @app_commands.checks.has_permissions(administrator=True)
@@ -1594,6 +3002,13 @@ async def on_ready():
     bot.add_view(FinalizarProcuradoView())
     bot.add_view(PainelMesasView())
     bot.add_view(FecharMesaView())
+    bot.add_view(PainelBoletimView())
+    bot.add_view(InformarRGBoletimView())
+    bot.add_view(IniciarBoletimView())
+    bot.add_view(TipoIdentificacaoBoletimView())
+    bot.add_view(ContinuarVeiculoBoletimView())
+    bot.add_view(ProvasBoletimView())
+    bot.add_view(PreviaBoletimView())
 
     if comandos_ja_sincronizados:
         print(f"Bot online como {bot.user}")
@@ -1623,7 +3038,7 @@ async def on_ready():
     except Exception as e:
         print(f"Erro ao sincronizar comandos: {e}")
 
-    print('VERSAO AJUSTADA: mesas-com-topicos-reais | crimes-corrigidos | catalogo-abas-ativos-retirados')
+    print('VERSAO COMPLETA: mesas | procurados | catalogo | boletins')
     print(f"Bot online como {bot.user}")
 
 # =====================================================
@@ -1631,6 +3046,7 @@ async def on_ready():
 # =====================================================
 
 async def main():
+    carregar_boletins_pendentes_memoria()
     if not DISCORD_TOKEN or DISCORD_TOKEN == "COLE_O_TOKEN_DO_BOT_AQUI":
         print("ERRO: Coloque o token correto nas variáveis do Railway ou no arquivo .env.")
         return
