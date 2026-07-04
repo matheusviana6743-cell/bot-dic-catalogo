@@ -7,6 +7,10 @@ import os
 import re
 import json
 import html
+import hmac
+import secrets
+import string
+import time
 import asyncio
 import datetime
 import unicodedata
@@ -31,7 +35,7 @@ GUILD_ID = int(os.getenv("GUILD_ID", "0") or 0)
 
 # Procurados
 PROCURADOS_CHANNEL_ID = int(os.getenv("PROCURADOS_CHANNEL_ID", "0") or 0)
-HISTORICO_PROCURADOS_ID = int(os.getenv("HISTORICO_PROCURADOS_ID", "0") or 0)
+HISTORICO_PROCURADOS_ID = int(os.getenv("HISTORICO_PROCURADOS_ID", "1490200536207855857") or 1490200536207855857)
 LOGS_CHANNEL_ID = int(os.getenv("LOGS_CHANNEL_ID", "0") or 0)
 PROCURADOS_TEMP_CATEGORY_ID = int(os.getenv("PROCURADOS_TEMP_CATEGORY_ID", "0") or 0)
 
@@ -46,6 +50,7 @@ BACKUP_CHANNEL_ID = int(os.getenv("BACKUP_CHANNEL_ID", "1515165673276440677") or
 
 # Catalogo
 CATALOG_PUBLIC_URL = os.getenv("CATALOG_PUBLIC_URL", "http://127.0.0.1:8000/").strip()
+CATALOG_ADMIN_PASSWORD = os.getenv("CATALOG_ADMIN_PASSWORD", "").strip()
 PORT = int(os.getenv("PORT", "8000") or 8000)
 
 
@@ -73,6 +78,7 @@ BOLETINS_JSON = DATA_DIR / "boletins.json"
 BOLETINS_PENDENTES_JSON = DATA_DIR / "boletins_pendentes.json"
 USUARIOS_RG_JSON = DATA_DIR / "usuarios_rg.json"
 BOLETINS_CONTADOR_JSON = DATA_DIR / "boletins_contador.json"
+CATALOG_ADMIN_JSON = DATA_DIR / "catalog_admin.json"
 
 for pasta in [DATA_DIR, PUBLIC_DIR, UPLOADS_DIR, BACKUP_DIR]:
     pasta.mkdir(exist_ok=True)
@@ -91,6 +97,7 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 cadastros_pendentes: Dict[int, Dict[str, Any]] = {}
 boletins_pendentes: Dict[int, Dict[str, Any]] = {}
+catalogo_tentativas_senha: Dict[str, List[float]] = {}
 
 # =====================================================
 # FUNCOES GERAIS
@@ -142,6 +149,59 @@ def carregar_json(caminho: Path, padrao):
 def salvar_json(caminho: Path, dados) -> None:
     with open(caminho, "w", encoding="utf-8") as f:
         json.dump(dados, f, ensure_ascii=False, indent=2)
+
+
+def garantir_senha_catalogo() -> str:
+    """Carrega a senha do Railway ou gera uma senha local persistente."""
+    global CATALOG_ADMIN_PASSWORD
+
+    if CATALOG_ADMIN_PASSWORD:
+        return CATALOG_ADMIN_PASSWORD
+
+    configuracao = carregar_json(CATALOG_ADMIN_JSON, {})
+    if isinstance(configuracao, dict):
+        senha_salva = str(configuracao.get("senha", "") or "").strip()
+        if senha_salva:
+            CATALOG_ADMIN_PASSWORD = senha_salva
+            return CATALOG_ADMIN_PASSWORD
+
+    alfabeto = string.ascii_letters + string.digits
+    CATALOG_ADMIN_PASSWORD = "DIC-" + "".join(
+        secrets.choice(alfabeto) for _ in range(14)
+    )
+    salvar_json(CATALOG_ADMIN_JSON, {"senha": CATALOG_ADMIN_PASSWORD})
+    print("ATENÇÃO: CATALOG_ADMIN_PASSWORD não foi configurada no Railway.")
+    print(f"SENHA TEMPORÁRIA DO CATÁLOGO: {CATALOG_ADMIN_PASSWORD}")
+    print(
+        "Cadastre essa senha na variável CATALOG_ADMIN_PASSWORD "
+        "para ela não mudar em novos deploys."
+    )
+    return CATALOG_ADMIN_PASSWORD
+
+
+def senha_catalogo_valida(senha: str) -> bool:
+    senha_ativa = garantir_senha_catalogo()
+    return bool(senha_ativa) and hmac.compare_digest(
+        str(senha or ""),
+        senha_ativa,
+    )
+
+
+def catalogo_limite_tentativas(ip: str) -> bool:
+    """Permite até 8 tentativas erradas por IP a cada 10 minutos."""
+    agora = time.monotonic()
+    janela = 600.0
+    tentativas = [
+        instante
+        for instante in catalogo_tentativas_senha.get(ip, [])
+        if agora - instante < janela
+    ]
+    catalogo_tentativas_senha[ip] = tentativas
+    return len(tentativas) < 8
+
+
+def registrar_falha_senha_catalogo(ip: str) -> None:
+    catalogo_tentativas_senha.setdefault(ip, []).append(time.monotonic())
 
 
 def carregar_procurados() -> List[Dict[str, Any]]:
@@ -272,12 +332,16 @@ def gerar_catalogo_html() -> None:
     if alterou:
         salvar_procurados(procurados)
 
-    ativos = [
+    visiveis = [
         p for p in procurados
+        if str(p.get("status", "A PROCURAR") or "A PROCURAR").upper() != "APAGADO"
+    ]
+    ativos = [
+        p for p in visiveis
         if str(p.get("status", "A PROCURAR") or "A PROCURAR").upper() != "RETIRADO"
     ]
     retirados = [
-        p for p in procurados
+        p for p in visiveis
         if str(p.get("status", "") or "").upper() == "RETIRADO"
     ]
 
@@ -297,6 +361,19 @@ def gerar_catalogo_html() -> None:
         foto_rg = registro.get("foto_rg", "") or ""
         link_msg = registro.get("mensagem_url", "") or ""
         crimes = valor_crimes_registro(registro)
+        registro_id_js = json.dumps(
+            str(
+                registro.get("id")
+                or registro.get("caso")
+                or registro.get("rg")
+                or ""
+            ),
+            ensure_ascii=False,
+        )
+        nome_js = json.dumps(
+            str(registro.get("nome") or "Sem nome"),
+            ensure_ascii=False,
+        )
 
         return f"""
         <article class="card {classe_status}">
@@ -326,6 +403,9 @@ def gerar_catalogo_html() -> None:
                     <div class="box"><b>Informações</b><p>{escape(registro.get('informacoes'))}</p></div>
                     {f'<a class="msg" href="{escape(link_msg)}" target="_blank" rel="noopener noreferrer">Abrir mensagem no Discord</a>' if link_msg else ''}
                     {f'<div class="motivo"><b>Motivo da retirada:</b> {escape(registro.get("motivo_retirada"))}</div>' if registro.get('motivo_retirada') else ''}
+                    <button class="apagar-registro" type="button" onclick='abrirExclusao({registro_id_js}, {nome_js})'>
+                        🗑️ Apagar permanentemente
+                    </button>
                 </div>
             </div>
         </article>
@@ -424,7 +504,79 @@ def gerar_catalogo_html() -> None:
         .destaque {{ background:#fff4dc; }}
         .msg {{ display:inline-block; color:#f0b64d; text-decoration:none; font-weight:bold; margin-top:4px; }}
         .motivo {{ background:rgba(201,74,74,.18); color:#ffd7d7; border:1px solid rgba(201,74,74,.4); padding:10px; border-radius:10px; }}
+        .apagar-registro {{
+            border:1px solid rgba(222,75,75,.72);
+            background:rgba(138,29,29,.25);
+            color:#ffdede;
+            padding:10px 12px;
+            border-radius:10px;
+            font-weight:800;
+            cursor:pointer;
+            transition:.15s ease;
+            justify-self:start;
+        }}
+        .apagar-registro:hover {{
+            background:#a92f2f;
+            color:#fff;
+            transform:translateY(-1px);
+        }}
         .vazio {{ grid-column:1/-1; text-align:center; padding:60px 20px; border:1px dashed rgba(240,182,77,.6); border-radius:18px; background:rgba(8,19,35,.7); }}
+        #modalExclusao {{
+            display:none;
+            position:fixed;
+            inset:0;
+            z-index:10000;
+            background:rgba(0,0,0,.86);
+            align-items:center;
+            justify-content:center;
+            padding:20px;
+        }}
+        #modalExclusao.ativo {{ display:flex; }}
+        .modal-exclusao-caixa {{
+            width:min(460px,96vw);
+            background:#081323;
+            border:1px solid rgba(240,182,77,.65);
+            border-radius:16px;
+            padding:22px;
+            box-shadow:0 20px 80px rgba(0,0,0,.55);
+        }}
+        .modal-exclusao-caixa h2 {{
+            margin:0 0 8px;
+            color:#f0b64d;
+        }}
+        .modal-exclusao-caixa p {{
+            color:#d8dde6;
+            line-height:1.45;
+        }}
+        .modal-exclusao-caixa input {{
+            width:100%;
+            background:#02060d;
+            color:#fff;
+            border:1px solid #586274;
+            border-radius:10px;
+            padding:12px;
+            font-size:16px;
+            margin:8px 0 12px;
+        }}
+        .modal-acoes {{
+            display:flex;
+            gap:10px;
+            flex-wrap:wrap;
+        }}
+        .modal-acoes button {{
+            border:0;
+            padding:11px 14px;
+            border-radius:10px;
+            font-weight:800;
+            cursor:pointer;
+        }}
+        .confirmar-exclusao {{ background:#c83d3d; color:#fff; }}
+        .cancelar-exclusao {{ background:#2a3546; color:#fff; }}
+        #mensagemExclusao {{
+            min-height:22px;
+            margin-top:10px;
+            color:#ffd078;
+        }}
         footer {{ text-align:center; color:#bfc6d1; border-top:1px solid rgba(240,182,77,.25); padding:18px; }}
         #lightbox {{ display:none; position:fixed; inset:0; background:rgba(0,0,0,.94); z-index:9999; align-items:center; justify-content:center; padding:22px; }}
         #lightbox.ativo {{ display:flex; }}
@@ -444,7 +596,7 @@ def gerar_catalogo_html() -> None:
         <h1>Catálogo de Procurados</h1>
         <p>DIC • Atualizado automaticamente pelo bot • Clique nas fotos para abrir em tela cheia</p>
         <div class="stats">
-            <div class="stat"><span>Registros totais</span><b>{len(procurados)}</b></div>
+            <div class="stat"><span>Registros totais</span><b>{len(visiveis)}</b></div>
             <div class="stat"><span>Ativos</span><b>{len(ativos)}</b></div>
             <div class="stat"><span>Retirados</span><b>{len(retirados)}</b></div>
             <div class="stat"><span>Última atualização</span><b style="font-size:16px">{agora_br()}</b></div>
@@ -465,6 +617,30 @@ def gerar_catalogo_html() -> None:
 
     <footer>Uso exclusivo para GTA RP / sistema interno autorizado.</footer>
 
+    <div id="modalExclusao" onclick="fecharExclusao(event)">
+        <div class="modal-exclusao-caixa" onclick="event.stopPropagation()">
+            <h2>🗑️ Apagar registro</h2>
+            <p id="textoExclusao">
+                Essa ação remove o procurado de forma permanente das abas de ativos e retirados.
+            </p>
+            <input
+                id="senhaExclusao"
+                type="password"
+                autocomplete="current-password"
+                placeholder="Senha administrativa do catálogo"
+            >
+            <div class="modal-acoes">
+                <button class="confirmar-exclusao" type="button" onclick="confirmarExclusao()">
+                    Apagar permanentemente
+                </button>
+                <button class="cancelar-exclusao" type="button" onclick="fecharExclusao()">
+                    Cancelar
+                </button>
+            </div>
+            <div id="mensagemExclusao"></div>
+        </div>
+    </div>
+
     <div id="lightbox" onclick="fecharFoto()">
         <button id="fecharLightbox" onclick="fecharFoto()">Fechar ✕</button>
         <img id="lightboxImg" src="" alt="Foto em tela cheia">
@@ -472,6 +648,72 @@ def gerar_catalogo_html() -> None:
     </div>
 
     <script>
+        let registroExclusaoId = '';
+        let registroExclusaoNome = '';
+
+        function abrirExclusao(id, nome) {{
+            registroExclusaoId = id || '';
+            registroExclusaoNome = nome || 'Sem nome';
+            document.getElementById('textoExclusao').textContent =
+                'Apagar permanentemente "' + registroExclusaoNome +
+                '"? Ele não aparecerá mais em nenhuma aba do catálogo.';
+            document.getElementById('senhaExclusao').value = '';
+            document.getElementById('mensagemExclusao').textContent = '';
+            document.getElementById('modalExclusao').classList.add('ativo');
+            setTimeout(
+                () => document.getElementById('senhaExclusao').focus(),
+                50
+            );
+        }}
+
+        function fecharExclusao(event) {{
+            if (
+                event
+                && event.target
+                && event.target.id !== 'modalExclusao'
+            ) {{
+                return;
+            }}
+            document.getElementById('modalExclusao').classList.remove('ativo');
+            registroExclusaoId = '';
+        }}
+
+        async function confirmarExclusao() {{
+            const senha = document.getElementById('senhaExclusao').value;
+            const mensagem = document.getElementById('mensagemExclusao');
+
+            if (!senha) {{
+                mensagem.textContent = 'Digite a senha administrativa.';
+                return;
+            }}
+
+            mensagem.textContent = 'Apagando registro...';
+            try {{
+                const resposta = await fetch('/api/catalogo/apagar', {{
+                    method: 'POST',
+                    headers: {{'Content-Type': 'application/json'}},
+                    body: JSON.stringify({{
+                        id: registroExclusaoId,
+                        senha: senha
+                    }})
+                }});
+                const dados = await resposta.json();
+
+                if (!resposta.ok || !dados.ok) {{
+                    mensagem.textContent =
+                        dados.erro || 'Não foi possível apagar o registro.';
+                    return;
+                }}
+
+                mensagem.textContent =
+                    'Registro apagado. Atualizando o catálogo...';
+                window.location.reload();
+            }} catch (erro) {{
+                mensagem.textContent =
+                    'Falha ao conectar ao servidor do catálogo.';
+            }}
+        }}
+
         function mostrarAba(nome) {{
             document.querySelectorAll('.aba-conteudo').forEach(el => el.classList.remove('ativa'));
             document.querySelectorAll('.aba-btn').forEach(el => el.classList.remove('ativa'));
@@ -491,7 +733,14 @@ def gerar_catalogo_html() -> None:
             document.getElementById('legendaLightbox').textContent = '';
             document.body.style.overflow = '';
         }}
-        document.addEventListener('keydown', function(e) {{ if (e.key === 'Escape') fecharFoto(); }});
+        document.addEventListener('keydown', function(e) {{
+            if (e.key === 'Escape') {{
+                fecharFoto();
+                document
+                    .getElementById('modalExclusao')
+                    .classList.remove('ativo');
+            }}
+        }});
         document.getElementById('lightboxImg').addEventListener('click', function(e) {{ e.stopPropagation(); }});
         document.getElementById('fecharLightbox').addEventListener('click', function(e) {{ e.stopPropagation(); }});
     </script>
@@ -528,12 +777,183 @@ async def pagina_inicial(request):
     return web.FileResponse(CATALOGO_HTML)
 
 
+async def obter_canal_por_id(canal_id: int):
+    if not canal_id:
+        return None
+
+    canal = bot.get_channel(canal_id)
+    if canal is not None:
+        return canal
+
+    try:
+        return await bot.fetch_channel(canal_id)
+    except Exception:
+        return None
+
+
+async def apagar_mensagens_discord_do_registro(
+    registro: Dict[str, Any],
+) -> None:
+    """Apaga o post ativo e/ou o post arquivado relacionado ao registro."""
+    alvos = [
+        (PROCURADOS_CHANNEL_ID, registro.get("mensagem_id")),
+        (
+            HISTORICO_PROCURADOS_ID,
+            registro.get("mensagem_arquivada_id"),
+        ),
+    ]
+
+    for canal_id, mensagem_id in alvos:
+        if not canal_id or not mensagem_id:
+            continue
+
+        canal = await obter_canal_por_id(int(canal_id))
+        if canal is None or not hasattr(canal, "fetch_message"):
+            continue
+
+        try:
+            mensagem = await canal.fetch_message(int(mensagem_id))
+            await mensagem.delete()
+        except discord.NotFound:
+            pass
+        except Exception as erro:
+            await enviar_log(
+                f"⚠️ Não foi possível apagar a mensagem `{mensagem_id}` "
+                f"do registro `{registro.get('id')}`: {erro}"
+            )
+
+
+def apagar_arquivos_locais_do_registro(
+    registro: Dict[str, Any],
+) -> None:
+    """Remove as fotos locais pertencentes ao registro apagado."""
+    for chave in ("foto_individuo", "foto_rg"):
+        caminho_relativo = str(registro.get(chave, "") or "").strip()
+
+        if (
+            not caminho_relativo
+            or not caminho_relativo.startswith("uploads/")
+        ):
+            continue
+
+        caminho = PUBLIC_DIR / caminho_relativo
+        try:
+            caminho_resolvido = caminho.resolve()
+            uploads_resolvido = UPLOADS_DIR.resolve()
+
+            if (
+                uploads_resolvido in caminho_resolvido.parents
+                and caminho_resolvido.exists()
+            ):
+                caminho_resolvido.unlink()
+        except Exception:
+            pass
+
+
+async def api_apagar_procurado(
+    request: web.Request,
+) -> web.Response:
+    ip = request.remote or "desconhecido"
+
+    if not catalogo_limite_tentativas(ip):
+        return web.json_response(
+            {
+                "ok": False,
+                "erro": "Muitas tentativas. Aguarde 10 minutos.",
+            },
+            status=429,
+        )
+
+    try:
+        dados = await request.json()
+    except Exception:
+        return web.json_response(
+            {"ok": False, "erro": "Requisição inválida."},
+            status=400,
+        )
+
+    senha = str(dados.get("senha", "") or "")
+    registro_id = str(dados.get("id", "") or "").strip()
+
+    if not senha_catalogo_valida(senha):
+        registrar_falha_senha_catalogo(ip)
+        return web.json_response(
+            {"ok": False, "erro": "Senha incorreta."},
+            status=401,
+        )
+
+    if not registro_id:
+        return web.json_response(
+            {"ok": False, "erro": "Registro não informado."},
+            status=400,
+        )
+
+    lista = carregar_procurados()
+    encontrado = None
+    nova_lista: List[Dict[str, Any]] = []
+
+    for registro in lista:
+        identificador = str(
+            registro.get("id")
+            or registro.get("caso")
+            or registro.get("rg")
+            or ""
+        )
+
+        if encontrado is None and identificador == registro_id:
+            encontrado = registro
+            continue
+
+        nova_lista.append(registro)
+
+    if encontrado is None:
+        return web.json_response(
+            {
+                "ok": False,
+                "erro": "O procurado já foi apagado ou não existe.",
+            },
+            status=404,
+        )
+
+    # Remove fisicamente do JSON. Assim não aparece em nenhuma aba.
+    salvar_procurados(nova_lista)
+    gerar_catalogo_html()
+
+    # Limpa, quando possível, os posts e as fotos relacionados.
+    await apagar_mensagens_discord_do_registro(encontrado)
+    apagar_arquivos_locais_do_registro(encontrado)
+
+    catalogo_tentativas_senha.pop(ip, None)
+
+    await enviar_log(
+        f"🗑️ **Procurado apagado permanentemente pelo catálogo**\n"
+        f"Nome: {encontrado.get('nome')}\n"
+        f"RG: {encontrado.get('rg')}\n"
+        f"Registro: {registro_id}"
+    )
+
+    return web.json_response(
+        {
+            "ok": True,
+            "mensagem": "Registro apagado permanentemente.",
+        }
+    )
+
+
 async def start_web_server():
     gerar_catalogo_html()
     app = web.Application()
     app.router.add_get("/", pagina_inicial)
     app.router.add_get("/index.html", pagina_inicial)
-    app.router.add_static("/uploads/", path=str(UPLOADS_DIR), show_index=False)
+    app.router.add_post(
+        "/api/catalogo/apagar",
+        api_apagar_procurado,
+    )
+    app.router.add_static(
+        "/uploads/",
+        path=str(UPLOADS_DIR),
+        show_index=False,
+    )
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", PORT)
@@ -600,6 +1020,121 @@ async def postar_procurado_oficial(registro: Dict[str, Any]) -> Optional[discord
     texto = cortar_discord(criar_texto_procurado(registro), 1900)
     msg = await canal.send(content=texto, files=arquivos)
     return msg
+
+
+def arquivos_locais_procurado(
+    registro: Dict[str, Any],
+) -> List[discord.File]:
+    arquivos: List[discord.File] = []
+
+    for chave, nome_base in (
+        ("foto_individuo", "foto_individuo"),
+        ("foto_rg", "foto_rg"),
+    ):
+        caminho_relativo = str(registro.get(chave, "") or "").strip()
+        if not caminho_relativo:
+            continue
+
+        caminho = PUBLIC_DIR / caminho_relativo
+        if not caminho.exists():
+            continue
+
+        extensao = caminho.suffix.lower() or ".png"
+        arquivos.append(
+            discord.File(
+                str(caminho),
+                filename=(
+                    f"{nome_base}_{registro.get('rg', '')}{extensao}"
+                ),
+            )
+        )
+
+    return arquivos
+
+
+async def arquivar_procurado_discord(
+    registro: Dict[str, Any],
+    motivo: str,
+    retirado_por: str,
+) -> discord.Message:
+    """
+    Publica o procurado completo no histórico.
+    O post ativo só é apagado depois do arquivamento confirmado.
+    """
+    canal_historico = await obter_canal_por_id(
+        HISTORICO_PROCURADOS_ID
+    )
+
+    if (
+        canal_historico is None
+        or not hasattr(canal_historico, "send")
+    ):
+        raise RuntimeError(
+            f"Canal de histórico `{HISTORICO_PROCURADOS_ID}` "
+            "não encontrado."
+        )
+
+    mensagem_original = None
+    if registro.get("mensagem_id") and PROCURADOS_CHANNEL_ID:
+        canal_ativo = await obter_canal_por_id(
+            PROCURADOS_CHANNEL_ID
+        )
+
+        if (
+            canal_ativo is not None
+            and hasattr(canal_ativo, "fetch_message")
+        ):
+            try:
+                mensagem_original = await canal_ativo.fetch_message(
+                    int(registro["mensagem_id"])
+                )
+            except Exception:
+                mensagem_original = None
+
+    arquivos: List[discord.File] = []
+
+    if mensagem_original is not None:
+        for anexo in mensagem_original.attachments[:10]:
+            try:
+                arquivos.append(
+                    await anexo.to_file(use_cached=True)
+                )
+            except Exception:
+                pass
+
+    if not arquivos:
+        arquivos = arquivos_locais_procurado(registro)
+
+    texto_arquivado = cortar_discord(
+        criar_texto_procurado(registro)
+        + "\n\n━━━━━━━━━━━━━━━━━━━━━━━"
+        + "\n📁 **STATUS:** ARQUIVADO / RETIRADO"
+        + f"\n📌 **Motivo:** {motivo}"
+        + f"\n👮 **Retirado por:** {retirado_por}"
+        + f"\n🕒 **Data da retirada:** {agora_br()}",
+        1900,
+    )
+
+    mensagem_arquivada = await canal_historico.send(
+        content=texto_arquivado,
+        files=arquivos,
+    )
+
+    if mensagem_original is not None:
+        try:
+            await mensagem_original.delete(
+                reason=(
+                    "Procurado retirado e arquivado no histórico"
+                )
+            )
+        except Exception as erro:
+            await enviar_log(
+                "⚠️ Procurado arquivado, mas não foi possível "
+                f"apagar a mensagem ativa "
+                f"`{registro.get('mensagem_id')}`: {erro}"
+            )
+
+    return mensagem_arquivada
 
 
 class NovoProcuradoModal(Modal, title="Cadastrar Novo Procurado"):
@@ -779,50 +1314,102 @@ class PainelProcuradosView(View):
         await sincronizar_catalogo_core(interaction)
 
 
-async def retirar_procurado(interaction: discord.Interaction, rg: str, motivo: str):
+async def retirar_procurado(
+    interaction: discord.Interaction,
+    rg: str,
+    motivo: str,
+):
+    if not interaction.response.is_done():
+        await interaction.response.defer(
+            ephemeral=True,
+            thinking=True,
+        )
+
     lista = carregar_procurados()
     alvo = limpar_rg(rg)
     encontrado = None
-    for p in lista:
-        if limpar_rg(p.get("rg", "")) == alvo:
-            encontrado = p
+
+    for registro in lista:
+        if limpar_rg(registro.get("rg", "")) == alvo:
+            encontrado = registro
             break
 
     if not encontrado:
-        await interaction.response.send_message("❌ Não encontrei procurado com esse RG no catálogo.", ephemeral=True)
+        await interaction.followup.send(
+            "❌ Não encontrei procurado com esse RG no catálogo.",
+            ephemeral=True,
+        )
+        return
+
+    if (
+        str(encontrado.get("status", "") or "").upper()
+        == "RETIRADO"
+        and encontrado.get("mensagem_arquivada_id")
+    ):
+        await interaction.followup.send(
+            "⚠️ Esse procurado já foi retirado e está arquivado.",
+            ephemeral=True,
+        )
+        return
+
+    try:
+        mensagem_arquivada = await arquivar_procurado_discord(
+            encontrado,
+            motivo,
+            interaction.user.mention,
+        )
+    except Exception as erro:
+        await enviar_log(
+            f"❌ Falha ao arquivar procurado "
+            f"{encontrado.get('nome')} "
+            f"(RG {encontrado.get('rg')}): {erro}"
+        )
+        await interaction.followup.send(
+            "❌ Não foi possível enviar o procurado para o "
+            "canal de arquivados. Nada foi removido. "
+            "Confira o ID e as permissões do canal "
+            f"`{HISTORICO_PROCURADOS_ID}`.",
+            ephemeral=True,
+        )
         return
 
     encontrado["status"] = "RETIRADO"
     encontrado["motivo_retirada"] = motivo
     encontrado["data_retirada"] = agora_br()
     encontrado["retirado_por"] = str(interaction.user)
+    encontrado["mensagem_original_id"] = encontrado.get(
+        "mensagem_id"
+    )
+    encontrado["mensagem_original_url"] = encontrado.get(
+        "mensagem_url"
+    )
+    encontrado["mensagem_arquivada_id"] = (
+        mensagem_arquivada.id
+    )
+    encontrado["mensagem_arquivada_url"] = (
+        mensagem_arquivada.jump_url
+    )
+    # No catálogo, o link passa a abrir o post arquivado.
+    encontrado["mensagem_url"] = mensagem_arquivada.jump_url
+
     salvar_procurados(lista)
     gerar_catalogo_html()
 
-    if encontrado.get("mensagem_id") and PROCURADOS_CHANNEL_ID:
-        canal = bot.get_channel(PROCURADOS_CHANNEL_ID)
-        if canal:
-            try:
-                msg = await canal.fetch_message(int(encontrado["mensagem_id"]))
-                texto_retirado = cortar_discord(
-                    criar_texto_procurado(encontrado) + f"\n\n❌ **STATUS:** RETIRADO\n📌 **Motivo:** {motivo}",
-                    1900,
-                )
-                await msg.edit(content=texto_retirado)
-            except Exception:
-                pass
+    await enviar_log(
+        f"📁 **Procurado retirado e arquivado**\n"
+        f"Nome: {encontrado.get('nome')}\n"
+        f"RG: {encontrado.get('rg')}\n"
+        f"Motivo: {motivo}\n"
+        f"Arquivo: {mensagem_arquivada.jump_url}"
+    )
 
-    if HISTORICO_PROCURADOS_ID:
-        historico = bot.get_channel(HISTORICO_PROCURADOS_ID)
-        if historico:
-            try:
-                await historico.send(f"❌ **Procurado Retirado**\n👤 Nome: {encontrado.get('nome')}\n🪪 RG: {encontrado.get('rg')}\n📌 Motivo: {motivo}\n👮 Retirado por: {interaction.user.mention}")
-            except Exception:
-                pass
-
-    await enviar_log(f"❌ Procurado retirado: {encontrado.get('nome')} | RG {encontrado.get('rg')} | Motivo: {motivo}")
-    await interaction.response.send_message(f"✅ Procurado retirado e catálogo atualizado.\n🔗 {CATALOG_PUBLIC_URL}", ephemeral=True)
-
+    await interaction.followup.send(
+        "✅ Procurado retirado, movido para o canal de "
+        "arquivados e catálogo atualizado.\n"
+        f"📁 {mensagem_arquivada.jump_url}\n"
+        f"🔗 {CATALOG_PUBLIC_URL}",
+        ephemeral=True,
+    )
 
 def limpar_markdown_extracao(texto: str) -> str:
     texto = str(texto or "").replace("**", "").replace("__", "")
@@ -3047,6 +3634,7 @@ async def on_ready():
 
 async def main():
     carregar_boletins_pendentes_memoria()
+    garantir_senha_catalogo()
     if not DISCORD_TOKEN or DISCORD_TOKEN == "COLE_O_TOKEN_DO_BOT_AQUI":
         print("ERRO: Coloque o token correto nas variáveis do Railway ou no arquivo .env.")
         return
