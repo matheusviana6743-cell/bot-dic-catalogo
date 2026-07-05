@@ -79,6 +79,8 @@ BOLETINS_PENDENTES_JSON = DATA_DIR / "boletins_pendentes.json"
 USUARIOS_RG_JSON = DATA_DIR / "usuarios_rg.json"
 BOLETINS_CONTADOR_JSON = DATA_DIR / "boletins_contador.json"
 CATALOG_ADMIN_JSON = DATA_DIR / "catalog_admin.json"
+ORGANIZACOES_JSON = DATA_DIR / "organizacoes.json"
+HISTORICO_ORGANIZACOES_JSON = DATA_DIR / "historico_organizacoes.json"
 
 for pasta in [DATA_DIR, PUBLIC_DIR, UPLOADS_DIR, BACKUP_DIR]:
     pasta.mkdir(exist_ok=True)
@@ -1880,6 +1882,8 @@ async def backup_core(interaction: discord.Interaction):
         "servidor": guild.name,
         "procurados": carregar_procurados(),
         "mesas": carregar_mesas(),
+        "organizacoes": carregar_organizacoes(),
+        "historico_organizacoes": carregar_historico_organizacoes(),
     }
     salvar_json(arquivo, dados)
     canal_backup = bot.get_channel(BACKUP_CHANNEL_ID) if BACKUP_CHANNEL_ID else None
@@ -1895,10 +1899,15 @@ async def backup_core(interaction: discord.Interaction):
 async def estatisticas_core(interaction: discord.Interaction):
     procurados = carregar_procurados()
     mesas = carregar_mesas()
+    organizacoes = carregar_organizacoes()
     ativos = len([p for p in procurados if p.get("status", "A PROCURAR") == "A PROCURAR"])
     retirados = len([p for p in procurados if p.get("status") == "RETIRADO"])
     abertas = len([m for m in mesas if m.get("status") == "ABERTA"])
     fechadas = len([m for m in mesas if m.get("status") == "FECHADA"])
+    organizacoes_editadas = len([
+        org for org in organizacoes
+        if int(org.get("versao", 1) or 1) > 1
+    ])
     await interaction.response.send_message(
         f"📊 **Estatísticas DIC**\n\n"
         f"🚨 Procurados totais: `{len(procurados)}`\n"
@@ -1907,6 +1916,8 @@ async def estatisticas_core(interaction: discord.Interaction):
         f"🕵️ Mesas totais: `{len(mesas)}`\n"
         f"🟢 Mesas abertas: `{abertas}`\n"
         f"🔒 Mesas fechadas: `{fechadas}`\n\n"
+        f"🏴 Organizações fixas: `{len(organizacoes)}`\n"
+        f"✏️ Organizações já editadas: `{organizacoes_editadas}`\n\n"
         f"📄 Catálogo: {CATALOG_PUBLIC_URL}",
         ephemeral=True,
     )
@@ -3224,6 +3235,641 @@ def embed_painel_boletim_padrao() -> discord.Embed:
     )
 
 
+
+# =====================================================
+# TABELA COMPARTILHADA DE 56 ORGANIZACOES
+# =====================================================
+
+TOTAL_ORGANIZACOES = 56
+ORGANIZACOES_POR_PAGINA = 8
+
+
+def modelo_organizacao(numero: int) -> Dict[str, Any]:
+    return {
+        "id": numero,
+        "nome": f"Organização {numero:02d}",
+        "zona_risco": "Não informado",
+        "status": "Não informado",
+        "produto": "Não informado",
+        "informante": "Não informado",
+        "lider": "Não informado",
+        "caracteristicas": "Não informado",
+        "historico": "Sem registros.",
+        "versao": 1,
+        "ultima_edicao": None,
+        "editado_por": None,
+        "editado_por_id": None,
+    }
+
+
+def normalizar_organizacao(registro: Dict[str, Any], numero: int) -> Dict[str, Any]:
+    base = modelo_organizacao(numero)
+    if isinstance(registro, dict):
+        for chave in base:
+            if chave in registro:
+                base[chave] = registro[chave]
+    base["id"] = numero
+    try:
+        base["versao"] = max(1, int(base.get("versao", 1) or 1))
+    except (TypeError, ValueError):
+        base["versao"] = 1
+    return base
+
+
+def garantir_56_organizacoes() -> List[Dict[str, Any]]:
+    dados = carregar_json(ORGANIZACOES_JSON, [])
+    existentes: Dict[int, Dict[str, Any]] = {}
+
+    if isinstance(dados, list):
+        for registro in dados:
+            if not isinstance(registro, dict):
+                continue
+            try:
+                numero = int(registro.get("id", 0) or 0)
+            except (TypeError, ValueError):
+                continue
+            if 1 <= numero <= TOTAL_ORGANIZACOES and numero not in existentes:
+                existentes[numero] = registro
+
+    organizacoes = [
+        normalizar_organizacao(existentes.get(numero, {}), numero)
+        for numero in range(1, TOTAL_ORGANIZACOES + 1)
+    ]
+    salvar_json(ORGANIZACOES_JSON, organizacoes)
+    return organizacoes
+
+
+def carregar_organizacoes() -> List[Dict[str, Any]]:
+    return garantir_56_organizacoes()
+
+
+def salvar_organizacoes(lista: List[Dict[str, Any]]) -> None:
+    por_id: Dict[int, Dict[str, Any]] = {}
+    for registro in lista:
+        if not isinstance(registro, dict):
+            continue
+        try:
+            numero = int(registro.get("id", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        if 1 <= numero <= TOTAL_ORGANIZACOES:
+            por_id[numero] = registro
+
+    organizacoes = [
+        normalizar_organizacao(por_id.get(numero, {}), numero)
+        for numero in range(1, TOTAL_ORGANIZACOES + 1)
+    ]
+    salvar_json(ORGANIZACOES_JSON, organizacoes)
+
+
+def carregar_historico_organizacoes() -> List[Dict[str, Any]]:
+    dados = carregar_json(HISTORICO_ORGANIZACOES_JSON, [])
+    return dados if isinstance(dados, list) else []
+
+
+def obter_organizacao_por_id(numero: int) -> Optional[Dict[str, Any]]:
+    for organizacao in carregar_organizacoes():
+        if int(organizacao.get("id", 0) or 0) == numero:
+            return organizacao
+    return None
+
+
+def texto_normalizado_busca(texto: str) -> str:
+    valor = unicodedata.normalize("NFKD", str(texto or ""))
+    valor = valor.encode("ascii", "ignore").decode("ascii").lower().strip()
+    return re.sub(r"\s+", " ", valor)
+
+
+def pesquisar_organizacoes(termo: str) -> List[Dict[str, Any]]:
+    termo_limpo = texto_normalizado_busca(termo)
+    if not termo_limpo:
+        return []
+
+    if termo_limpo.isdigit():
+        numero = int(termo_limpo)
+        organizacao = obter_organizacao_por_id(numero)
+        return [organizacao] if organizacao else []
+
+    organizacoes = carregar_organizacoes()
+    exatas = [
+        org for org in organizacoes
+        if texto_normalizado_busca(org.get("nome", "")) == termo_limpo
+    ]
+    if exatas:
+        return exatas
+
+    return [
+        org for org in organizacoes
+        if termo_limpo in texto_normalizado_busca(org.get("nome", ""))
+    ]
+
+
+def valor_org(registro: Dict[str, Any], chave: str, padrao: str = "Não informado") -> str:
+    valor = str(registro.get(chave, "") or "").strip()
+    return valor or padrao
+
+
+def cortar_campo_org(texto: str, limite: int) -> str:
+    valor = str(texto or "").strip()
+    if len(valor) <= limite:
+        return valor
+    return valor[: limite - 3].rstrip() + "..."
+
+
+def formatar_ficha_organizacao(organizacao: Dict[str, Any]) -> str:
+    numero = int(organizacao.get("id", 0) or 0)
+    ultima = valor_org(organizacao, "ultima_edicao", "Nunca editada")
+    editor = valor_org(organizacao, "editado_por", "Nenhum")
+
+    texto = (
+        f"🏴 **ORGANIZAÇÃO {numero:02d} — {valor_org(organizacao, 'nome')}**\n\n"
+        f"⚠️ **Zona de risco:** {valor_org(organizacao, 'zona_risco')}\n"
+        f"📊 **Status:** {valor_org(organizacao, 'status')}\n"
+        f"📦 **Produto:** {valor_org(organizacao, 'produto')}\n"
+        f"🕵️ **Possui informante:** {valor_org(organizacao, 'informante')}\n"
+        f"👑 **Líder:** {valor_org(organizacao, 'lider')}\n\n"
+        f"🔎 **Características:**\n"
+        f"{cortar_campo_org(valor_org(organizacao, 'caracteristicas'), 620)}\n\n"
+        f"📂 **Histórico operacional:**\n"
+        f"{cortar_campo_org(valor_org(organizacao, 'historico', 'Sem registros.'), 620)}\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"✏️ **Última edição:** {ultima}\n"
+        f"👤 **Editado por:** {editor}\n"
+        f"🔢 **Versão:** {int(organizacao.get('versao', 1) or 1)}"
+    )
+    return cortar_discord(texto, 1900)
+
+
+def formatar_lista_organizacoes(pagina: int = 0) -> str:
+    organizacoes = carregar_organizacoes()
+    total_paginas = max(
+        1,
+        (len(organizacoes) + ORGANIZACOES_POR_PAGINA - 1)
+        // ORGANIZACOES_POR_PAGINA,
+    )
+    pagina = max(0, min(pagina, total_paginas - 1))
+    inicio = pagina * ORGANIZACOES_POR_PAGINA
+    fim = inicio + ORGANIZACOES_POR_PAGINA
+
+    linhas = [
+        "📋 **TABELA DE ORGANIZAÇÕES — DIC**",
+        f"Página `{pagina + 1}/{total_paginas}` • Total: `{TOTAL_ORGANIZACOES}`",
+        "",
+    ]
+
+    for org in organizacoes[inicio:fim]:
+        linhas.append(
+            f"**{int(org.get('id', 0)):02d}. {cortar_campo_org(valor_org(org, 'nome'), 35)}**\n"
+            f"> ⚠️ {cortar_campo_org(valor_org(org, 'zona_risco'), 18)} | "
+            f"📊 {cortar_campo_org(valor_org(org, 'status'), 24)} | "
+            f"📦 {cortar_campo_org(valor_org(org, 'produto'), 22)}\n"
+            f"> 🕵️ Informante: {cortar_campo_org(valor_org(org, 'informante'), 12)} | "
+            f"👑 {cortar_campo_org(valor_org(org, 'lider'), 32)}"
+        )
+
+    return cortar_discord("\n".join(linhas), 1900)
+
+
+def formatar_resultados_organizacoes(resultados: List[Dict[str, Any]]) -> str:
+    linhas = ["🔎 **Resultados encontrados:**", ""]
+    for org in resultados[:15]:
+        linhas.append(
+            f"• `{int(org.get('id', 0)):02d}` — **{valor_org(org, 'nome')}** "
+            f"| {valor_org(org, 'status')}"
+        )
+    if len(resultados) > 15:
+        linhas.append(f"\n... e mais `{len(resultados) - 15}` resultado(s).")
+    linhas.append("\nUse o número exato no botão **Editar Organização**.")
+    return cortar_discord("\n".join(linhas), 1900)
+
+
+async def registrar_edicao_organizacao(
+    organizacao_antes: Dict[str, Any],
+    organizacao_depois: Dict[str, Any],
+    usuario: Any,
+    alteracoes: Dict[str, Dict[str, str]],
+) -> None:
+    historico = carregar_historico_organizacoes()
+    historico.append({
+        "organizacao_id": int(organizacao_depois.get("id", 0) or 0),
+        "nome": valor_org(organizacao_depois, "nome"),
+        "data": agora_br(),
+        "usuario_id": usuario.id,
+        "usuario": str(usuario),
+        "versao_anterior": int(organizacao_antes.get("versao", 1) or 1),
+        "versao_nova": int(organizacao_depois.get("versao", 1) or 1),
+        "alteracoes": alteracoes,
+    })
+    salvar_json(HISTORICO_ORGANIZACOES_JSON, historico)
+
+    campos = ", ".join(alteracoes.keys())
+    await enviar_log(
+        f"✏️ **Organização editada**\n"
+        f"Organização: `{int(organizacao_depois.get('id', 0)):02d}` — "
+        f"{valor_org(organizacao_depois, 'nome')}\n"
+        f"Editado por: <@{usuario.id}>\n"
+        f"Campos alterados: {campos}\n"
+        f"Versão: {int(organizacao_depois.get('versao', 1) or 1)}"
+    )
+
+
+async def aplicar_edicao_organizacao(
+    numero: int,
+    versao_esperada: int,
+    novos_valores: Dict[str, str],
+    usuario: Any,
+) -> tuple[bool, str, Optional[Dict[str, Any]]]:
+    organizacoes = carregar_organizacoes()
+    indice = next(
+        (
+            i for i, org in enumerate(organizacoes)
+            if int(org.get("id", 0) or 0) == numero
+        ),
+        None,
+    )
+    if indice is None:
+        return False, "❌ Organização não encontrada.", None
+
+    atual = organizacoes[indice]
+    versao_atual = int(atual.get("versao", 1) or 1)
+    if versao_atual != versao_esperada:
+        return (
+            False,
+            "⚠️ Essa organização foi editada por outra pessoa enquanto você preenchia. "
+            "Abra a edição novamente para não sobrescrever dados mais recentes.",
+            atual,
+        )
+
+    antes = dict(atual)
+    alteracoes: Dict[str, Dict[str, str]] = {}
+
+    for chave, valor in novos_valores.items():
+        if chave not in {
+            "nome",
+            "zona_risco",
+            "status",
+            "produto",
+            "informante",
+            "lider",
+            "caracteristicas",
+            "historico",
+        }:
+            continue
+
+        novo = str(valor or "").strip() or "Não informado"
+        antigo = str(atual.get(chave, "") or "").strip() or "Não informado"
+        if novo != antigo:
+            alteracoes[chave] = {"antes": antigo, "depois": novo}
+            atual[chave] = novo
+
+    if not alteracoes:
+        return False, "ℹ️ Nenhuma informação foi alterada.", atual
+
+    atual["versao"] = versao_atual + 1
+    atual["ultima_edicao"] = agora_br()
+    atual["editado_por"] = str(usuario)
+    atual["editado_por_id"] = usuario.id
+    organizacoes[indice] = atual
+    salvar_organizacoes(organizacoes)
+    await registrar_edicao_organizacao(antes, atual, usuario, alteracoes)
+    return True, "✅ Organização atualizada e alteração salva.", atual
+
+
+class PaginacaoOrganizacoesView(View):
+    def __init__(self, pagina: int = 0):
+        super().__init__(timeout=300)
+        total_paginas = max(
+            1,
+            (TOTAL_ORGANIZACOES + ORGANIZACOES_POR_PAGINA - 1)
+            // ORGANIZACOES_POR_PAGINA,
+        )
+        self.pagina = max(0, min(pagina, total_paginas - 1))
+        self.total_paginas = total_paginas
+        for item in self.children:
+            if isinstance(item, Button) and item.label == "Anterior":
+                item.disabled = self.pagina <= 0
+            elif isinstance(item, Button) and item.label == "Próxima":
+                item.disabled = self.pagina >= self.total_paginas - 1
+
+    @discord.ui.button(label="Anterior", emoji="⬅️", style=discord.ButtonStyle.gray)
+    async def anterior(self, interaction: discord.Interaction, button: Button):
+        nova_pagina = max(0, self.pagina - 1)
+        await interaction.response.edit_message(
+            content=formatar_lista_organizacoes(nova_pagina),
+            view=PaginacaoOrganizacoesView(nova_pagina),
+        )
+
+    @discord.ui.button(label="Próxima", emoji="➡️", style=discord.ButtonStyle.gray)
+    async def proxima(self, interaction: discord.Interaction, button: Button):
+        nova_pagina = min(self.total_paginas - 1, self.pagina + 1)
+        await interaction.response.edit_message(
+            content=formatar_lista_organizacoes(nova_pagina),
+            view=PaginacaoOrganizacoesView(nova_pagina),
+        )
+
+
+class EditarOrganizacaoBasicoModal(Modal):
+    def __init__(self, organizacao: Dict[str, Any]):
+        numero = int(organizacao.get("id", 0) or 0)
+        super().__init__(title=f"Editar organização {numero:02d}")
+        self.numero = numero
+        self.versao = int(organizacao.get("versao", 1) or 1)
+
+        self.nome = TextInput(
+            label="Nome",
+            default=valor_org(organizacao, "nome"),
+            max_length=100,
+        )
+        self.zona_risco = TextInput(
+            label="Zona de risco",
+            default=valor_org(organizacao, "zona_risco"),
+            placeholder="Ex: Baixa, Média, Alta ou Crítica",
+            max_length=80,
+        )
+        self.status = TextInput(
+            label="Status",
+            default=valor_org(organizacao, "status"),
+            placeholder="Ex: Ativa, Monitoramento, Em investigação",
+            max_length=100,
+        )
+        self.produto = TextInput(
+            label="Produto",
+            default=valor_org(organizacao, "produto"),
+            max_length=150,
+        )
+        self.informante = TextInput(
+            label="Possui informante?",
+            default=valor_org(organizacao, "informante"),
+            placeholder="Sim, Não ou Não identificado",
+            max_length=60,
+        )
+
+        for item in (
+            self.nome,
+            self.zona_risco,
+            self.status,
+            self.produto,
+            self.informante,
+        ):
+            self.add_item(item)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        sucesso, mensagem, organizacao = await aplicar_edicao_organizacao(
+            self.numero,
+            self.versao,
+            {
+                "nome": str(self.nome.value),
+                "zona_risco": str(self.zona_risco.value),
+                "status": str(self.status.value),
+                "produto": str(self.produto.value),
+                "informante": str(self.informante.value),
+            },
+            interaction.user,
+        )
+        conteudo = mensagem
+        view = None
+        if organizacao:
+            conteudo += "\n\n" + formatar_ficha_organizacao(organizacao)
+            view = OrganizacaoAcoesView(
+                int(organizacao.get("id", 0)),
+                int(organizacao.get("versao", 1) or 1),
+            )
+        await interaction.response.send_message(
+            cortar_discord(conteudo, 1900),
+            view=view,
+            ephemeral=True,
+        )
+
+
+class EditarOrganizacaoDetalhesModal(Modal):
+    def __init__(self, organizacao: Dict[str, Any]):
+        numero = int(organizacao.get("id", 0) or 0)
+        super().__init__(title=f"Detalhes da organização {numero:02d}")
+        self.numero = numero
+        self.versao = int(organizacao.get("versao", 1) or 1)
+
+        self.lider = TextInput(
+            label="Líder",
+            default=valor_org(organizacao, "lider"),
+            max_length=150,
+        )
+        self.caracteristicas = TextInput(
+            label="Características",
+            default=valor_org(organizacao, "caracteristicas"),
+            style=discord.TextStyle.paragraph,
+            max_length=1800,
+        )
+        self.historico = TextInput(
+            label="Histórico operacional",
+            default=valor_org(organizacao, "historico", "Sem registros."),
+            placeholder="Registre ocorrências, datas e informações relevantes.",
+            style=discord.TextStyle.paragraph,
+            max_length=3000,
+        )
+
+        self.add_item(self.lider)
+        self.add_item(self.caracteristicas)
+        self.add_item(self.historico)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        sucesso, mensagem, organizacao = await aplicar_edicao_organizacao(
+            self.numero,
+            self.versao,
+            {
+                "lider": str(self.lider.value),
+                "caracteristicas": str(self.caracteristicas.value),
+                "historico": str(self.historico.value),
+            },
+            interaction.user,
+        )
+        conteudo = mensagem
+        view = None
+        if organizacao:
+            conteudo += "\n\n" + formatar_ficha_organizacao(organizacao)
+            view = OrganizacaoAcoesView(
+                int(organizacao.get("id", 0)),
+                int(organizacao.get("versao", 1) or 1),
+            )
+        await interaction.response.send_message(
+            cortar_discord(conteudo, 1900),
+            view=view,
+            ephemeral=True,
+        )
+
+
+class OrganizacaoAcoesView(View):
+    def __init__(self, numero: int, versao: int):
+        super().__init__(timeout=300)
+        self.numero = numero
+        self.versao = versao
+
+    @discord.ui.button(label="Editar Dados", emoji="✏️", style=discord.ButtonStyle.blurple)
+    async def editar_dados(self, interaction: discord.Interaction, button: Button):
+        organizacao = obter_organizacao_por_id(self.numero)
+        if not organizacao:
+            await interaction.response.send_message("❌ Organização não encontrada.", ephemeral=True)
+            return
+        await interaction.response.send_modal(EditarOrganizacaoBasicoModal(organizacao))
+
+    @discord.ui.button(label="Editar Detalhes", emoji="📝", style=discord.ButtonStyle.green)
+    async def editar_detalhes(self, interaction: discord.Interaction, button: Button):
+        organizacao = obter_organizacao_por_id(self.numero)
+        if not organizacao:
+            await interaction.response.send_message("❌ Organização não encontrada.", ephemeral=True)
+            return
+        await interaction.response.send_modal(EditarOrganizacaoDetalhesModal(organizacao))
+
+    @discord.ui.button(label="Atualizar Ficha", emoji="🔄", style=discord.ButtonStyle.gray)
+    async def atualizar(self, interaction: discord.Interaction, button: Button):
+        organizacao = obter_organizacao_por_id(self.numero)
+        if not organizacao:
+            await interaction.response.send_message("❌ Organização não encontrada.", ephemeral=True)
+            return
+        await interaction.response.edit_message(
+            content=formatar_ficha_organizacao(organizacao),
+            view=OrganizacaoAcoesView(
+                self.numero,
+                int(organizacao.get("versao", 1) or 1),
+            ),
+        )
+
+
+class PesquisarOrganizacaoModal(Modal, title="Pesquisar Organização"):
+    termo = TextInput(
+        label="Nome ou número",
+        placeholder="Ex: 12 ou Medelim",
+        max_length=100,
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        resultados = pesquisar_organizacoes(str(self.termo.value))
+        if not resultados:
+            await interaction.response.send_message(
+                "❌ Nenhuma organização encontrada.",
+                ephemeral=True,
+            )
+            return
+
+        if len(resultados) == 1:
+            organizacao = resultados[0]
+            await interaction.response.send_message(
+                formatar_ficha_organizacao(organizacao),
+                view=OrganizacaoAcoesView(
+                    int(organizacao.get("id", 0)),
+                    int(organizacao.get("versao", 1) or 1),
+                ),
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.send_message(
+            formatar_resultados_organizacoes(resultados),
+            ephemeral=True,
+        )
+
+
+class SelecionarOrganizacaoEditarModal(Modal, title="Editar Organização"):
+    termo = TextInput(
+        label="Nome ou número",
+        placeholder="Ex: 12 ou Medelim",
+        max_length=100,
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        resultados = pesquisar_organizacoes(str(self.termo.value))
+        if not resultados:
+            await interaction.response.send_message(
+                "❌ Nenhuma organização encontrada.",
+                ephemeral=True,
+            )
+            return
+
+        if len(resultados) > 1:
+            await interaction.response.send_message(
+                formatar_resultados_organizacoes(resultados),
+                ephemeral=True,
+            )
+            return
+
+        organizacao = resultados[0]
+        await interaction.response.send_message(
+            formatar_ficha_organizacao(organizacao),
+            view=OrganizacaoAcoesView(
+                int(organizacao.get("id", 0)),
+                int(organizacao.get("versao", 1) or 1),
+            ),
+            ephemeral=True,
+        )
+
+
+class PainelOrganizacoesView(View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(
+        label="Ver Organizações",
+        emoji="📋",
+        style=discord.ButtonStyle.blurple,
+        custom_id="dic_org_ver_organizacoes",
+    )
+    async def ver_organizacoes(self, interaction: discord.Interaction, button: Button):
+        garantir_56_organizacoes()
+        await interaction.response.send_message(
+            formatar_lista_organizacoes(0),
+            view=PaginacaoOrganizacoesView(0),
+            ephemeral=True,
+        )
+
+    @discord.ui.button(
+        label="Pesquisar Organização",
+        emoji="🔎",
+        style=discord.ButtonStyle.gray,
+        custom_id="dic_org_pesquisar",
+    )
+    async def pesquisar(self, interaction: discord.Interaction, button: Button):
+        await interaction.response.send_modal(PesquisarOrganizacaoModal())
+
+    @discord.ui.button(
+        label="Editar Organização",
+        emoji="✏️",
+        style=discord.ButtonStyle.green,
+        custom_id="dic_org_editar",
+    )
+    async def editar(self, interaction: discord.Interaction, button: Button):
+        await interaction.response.send_modal(SelecionarOrganizacaoEditarModal())
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception, item) -> None:
+        await enviar_log(f"❌ Erro no painel de organizações: {error}")
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send(
+                    "❌ Ocorreu um erro no sistema de organizações.",
+                    ephemeral=True,
+                )
+            else:
+                await interaction.response.send_message(
+                    "❌ Ocorreu um erro no sistema de organizações.",
+                    ephemeral=True,
+                )
+        except Exception:
+            pass
+
+
+def embed_painel_organizacoes_padrao() -> discord.Embed:
+    return discord.Embed(
+        title="🏴 Tabela de Organizações - DIC",
+        description=(
+            "As **56 organizações** são fixas e compartilhadas. "
+            "Todos podem consultar e editar qualquer ficha.\n\n"
+            "📋 **Ver Organizações** — Abre a tabela completa por páginas.\n"
+            "🔎 **Pesquisar Organização** — Busca pelo nome ou número.\n"
+            "✏️ **Editar Organização** — Atualiza os dados da ficha.\n\n"
+            "🔒 Todas as alterações ficam salvas com usuário, data, "
+            "valores anteriores e valores novos. Nenhuma organização pode ser apagada."
+        ),
+        color=discord.Color.dark_blue(),
+    )
+
 # =====================================================
 # COMANDOS DE TEXTO (!) - PLANO B PARA QUANDO O DISCORD NÃO MOSTRAR SLASH
 # =====================================================
@@ -3351,6 +3997,16 @@ async def fechar_mesa_por_texto(ctx: commands.Context, motivo: str = "Fechada po
 
 
 
+@bot.command(name="painelorganizacoes")
+async def cmd_painelorganizacoes(ctx: commands.Context):
+    """Envia o painel compartilhado das 56 organizações."""
+    garantir_56_organizacoes()
+    await ctx.send(
+        embed=embed_painel_organizacoes_padrao(),
+        view=PainelOrganizacoesView(),
+    )
+
+
 @bot.command(name="painelboletim")
 async def cmd_painelboletim(ctx: commands.Context):
     """Abre o painel de boletins pelo comando !painelboletim."""
@@ -3416,8 +4072,8 @@ async def cmd_catalogo(ctx: commands.Context):
 async def cmd_comandos(ctx: commands.Context):
     await ctx.reply(
         "📌 **Comandos disponíveis:**\n\n"
-        "**Slash:** `/painelprocurados`, `/painelmesas`, `/painelboletim`, `/criarmesa`, `/fecharmesa`, `/backup`, `/estatisticas`, `/consultarboletim`\n"
-        "**Plano B por texto:** `!painelprocurados`, `!painelmesas`, `!painelboletim`, `!criarmesa Apelido | Família | Observação`, `!fecharmesa`, `!catalogo`, `!consultarboletim NUMERO`"
+        "**Slash:** `/painelprocurados`, `/painelmesas`, `/painelboletim`, `/painelorganizacoes`, `/criarmesa`, `/fecharmesa`, `/backup`, `/estatisticas`, `/consultarboletim`\n"
+        "**Plano B por texto:** `!painelprocurados`, `!painelmesas`, `!painelboletim`, `!painelorganizacoes`, `!criarmesa Apelido | Família | Observação`, `!fecharmesa`, `!catalogo`, `!consultarboletim NUMERO`"
     )
 
 
@@ -3440,6 +4096,15 @@ async def cmd_synccomandos(ctx: commands.Context):
 # =====================================================
 # SLASH COMMANDS - TODOS
 # =====================================================
+
+
+@bot.tree.command(name="painelorganizacoes", description="Envia a tabela compartilhada das 56 organizações.")
+async def painelorganizacoes(interaction: discord.Interaction):
+    garantir_56_organizacoes()
+    await interaction.response.send_message(
+        embed=embed_painel_organizacoes_padrao(),
+        view=PainelOrganizacoesView(),
+    )
 
 
 @bot.tree.command(name="painelboletim", description="Envia o painel de boletins de ocorrência.")
@@ -3590,6 +4255,7 @@ async def on_ready():
     bot.add_view(PainelMesasView())
     bot.add_view(FecharMesaView())
     bot.add_view(PainelBoletimView())
+    bot.add_view(PainelOrganizacoesView())
     bot.add_view(InformarRGBoletimView())
     bot.add_view(IniciarBoletimView())
     bot.add_view(TipoIdentificacaoBoletimView())
@@ -3625,7 +4291,7 @@ async def on_ready():
     except Exception as e:
         print(f"Erro ao sincronizar comandos: {e}")
 
-    print('VERSAO COMPLETA: mesas | procurados | catalogo | boletins')
+    print('VERSAO COMPLETA: mesas | procurados | catalogo | boletins | organizacoes')
     print(f"Bot online como {bot.user}")
 
 # =====================================================
@@ -3634,6 +4300,7 @@ async def on_ready():
 
 async def main():
     carregar_boletins_pendentes_memoria()
+    garantir_56_organizacoes()
     garantir_senha_catalogo()
     if not DISCORD_TOKEN or DISCORD_TOKEN == "COLE_O_TOKEN_DO_BOT_AQUI":
         print("ERRO: Coloque o token correto nas variáveis do Railway ou no arquivo .env.")
