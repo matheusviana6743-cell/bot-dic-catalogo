@@ -1,5 +1,5 @@
 # =====================================================
-# BOT DIC FINAL RESOLVIDO - MESAS + PROCURADOS + CATALOGO HTML
+# BOT DICOR FINAL RESOLVIDO - MESAS + PROCURADOS + CATALOGO HTML
 # Feito para GTA RP / personagens ficticios
 # =====================================================
 
@@ -168,7 +168,7 @@ def garantir_senha_catalogo() -> str:
             return CATALOG_ADMIN_PASSWORD
 
     alfabeto = string.ascii_letters + string.digits
-    CATALOG_ADMIN_PASSWORD = "DIC-" + "".join(
+    CATALOG_ADMIN_PASSWORD = "DICOR-" + "".join(
         secrets.choice(alfabeto) for _ in range(14)
     )
     salvar_json(CATALOG_ADMIN_JSON, {"senha": CATALOG_ADMIN_PASSWORD})
@@ -438,7 +438,7 @@ def gerar_catalogo_html() -> None:
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Catálogo de Procurados - DIC</title>
+    <title>Catálogo de Procurados - DICOR</title>
     <style>
         * {{ box-sizing: border-box; }}
         body {{
@@ -596,7 +596,7 @@ def gerar_catalogo_html() -> None:
 <body>
     <header>
         <h1>Catálogo de Procurados</h1>
-        <p>DIC • Atualizado automaticamente pelo bot • Clique nas fotos para abrir em tela cheia</p>
+        <p>DICOR • Atualizado automaticamente pelo bot • Clique nas fotos para abrir em tela cheia</p>
         <div class="stats">
             <div class="stat"><span>Registros totais</span><b>{len(visiveis)}</b></div>
             <div class="stat"><span>Ativos</span><b>{len(ativos)}</b></div>
@@ -970,7 +970,7 @@ def criar_texto_procurado(registro: Dict[str, Any]) -> str:
     return f"""
 🚨 **MANDADO DE PRISÃO E PROCURAÇÃO INVESTIGATIVA** 🚨
 
-A Polícia DENARC de Capital Morada, por intermédio da **Divisão de Investigações Criminais (DIC)**, informa que o indivíduo abaixo encontra-se oficialmente procurado pelas autoridades competentes.
+A Polícia Polícia Federal de Capital Morada, por intermédio da **Divisão de Investigações Criminais (DICOR)**, informa que o indivíduo abaixo encontra-se oficialmente procurado pelas autoridades competentes.
 
 As investigações apontam seu envolvimento em atividades criminosas, havendo mandado ativo para sua localização, abordagem e condução para os procedimentos cabíveis.
 
@@ -988,12 +988,12 @@ As investigações apontam seu envolvimento em atividades criminosas, havendo ma
 
 ━━━━━━━━━━━━━━━━━━━━━━━
 
-📞 Qualquer informação sobre o paradeiro deste indivíduo deverá ser repassada imediatamente a um agente da DENARC ou da DIC.
+📞 Qualquer informação sobre o paradeiro deste indivíduo deverá ser repassada imediatamente a um agente da Polícia Federal ou da DICOR.
 
 🔒 O sigilo do denunciante será integralmente preservado.
 
-🔹 Polícia DENARC de Capital Morada
-🔹 Divisão de Investigações Criminais (DIC)
+🔹 Polícia Polícia Federal de Capital Morada
+🔹 Divisão de Investigações Criminais (DICOR)
 """.strip()
 
 
@@ -1178,7 +1178,7 @@ class NovoProcuradoModal(Modal, title="Cadastrar Novo Procurado"):
         }
 
         await canal.send(
-            f"🚨 **Cadastro de Procurado — DIC**\n\n"
+            f"🚨 **Cadastro de Procurado — DICOR**\n\n"
             f"👤 **Nome:** {self.nome.value}\n"
             f"🪪 **RG:** {self.rg.value}\n\n"
             f"📸 Envie aqui **2 imagens obrigatórias**:\n"
@@ -1228,7 +1228,7 @@ class FinalizarProcuradoView(View):
 
         registro = {
             "id": data_caso(),
-            "caso": f"DIC-{data_caso()}",
+            "caso": f"DICOR-{data_caso()}",
             "data": agora_br(),
             "status": "A PROCURAR",
             "nome": dados["nome"],
@@ -1909,7 +1909,7 @@ async def estatisticas_core(interaction: discord.Interaction):
         if int(org.get("versao", 1) or 1) > 1
     ])
     await interaction.response.send_message(
-        f"📊 **Estatísticas DIC**\n\n"
+        f"📊 **Estatísticas DICOR**\n\n"
         f"🚨 Procurados totais: `{len(procurados)}`\n"
         f"🟢 Procurados ativos: `{ativos}`\n"
         f"🔴 Procurados retirados: `{retirados}`\n\n"
@@ -2024,7 +2024,7 @@ def gerar_numero_boletim() -> str:
         BOLETINS_CONTADOR_JSON,
         {"data": chave_data, "ultimo": ultimo},
     )
-    return f"BO-DIC-{chave_data}-{ultimo:03d}"
+    return f"BO-DICOR-{chave_data}-{ultimo:03d}"
 
 
 def numero_curto_boletim(numero: str) -> str:
@@ -2858,7 +2858,7 @@ class EditarConclusaoBoletimModal(Modal, title="Editar Conclusão"):
 class ConsultarBoletimModal(Modal, title="Consultar Boletim"):
     numero = TextInput(
         label="Número do boletim",
-        placeholder="BO-DIC-20260702-001",
+        placeholder="BO-DICOR-20260702-001",
         max_length=40,
     )
 
@@ -3223,7 +3223,7 @@ class PreviaBoletimView(View):
 
 def embed_painel_boletim_padrao() -> discord.Embed:
     return discord.Embed(
-        title="📋 Sistema de Boletins - DIC",
+        title="📋 Sistema de Boletins - DICOR",
         description=(
             "Utilize os botões abaixo para registrar e consultar boletins.\n\n"
             "📝 **Abrir Boletim** — Cria um canal provisório privado.\n"
@@ -3935,7 +3935,7 @@ def formatar_lista_organizacoes(pagina: int = 0) -> str:
     fim = inicio + ORGANIZACOES_POR_PAGINA
 
     linhas = [
-        "📋 **TABELA DE ORGANIZAÇÕES — DIC**",
+        "📋 **TABELA DE ORGANIZAÇÕES — DICOR**",
         f"Página `{pagina + 1}/{total_paginas}` • Total: `{TOTAL_ORGANIZACOES}`",
         "",
     ]
@@ -4380,7 +4380,7 @@ class PainelOrganizacoesView(View):
 
 def embed_painel_organizacoes_padrao() -> discord.Embed:
     return discord.Embed(
-        title="🏴 Tabela de Organizações - DIC",
+        title="🏴 Tabela de Organizações - DICOR",
         description=(
             "As **56 organizações** são fixas e compartilhadas. "
             "Todos podem consultar e editar qualquer ficha.\n\n"
@@ -4399,7 +4399,7 @@ def embed_painel_organizacoes_padrao() -> discord.Embed:
 
 def embed_painel_procurados_padrao() -> discord.Embed:
     return discord.Embed(
-        title="🚨 Sistema de Procurados - DIC",
+        title="🚨 Sistema de Procurados - DICOR",
         description=(
             "Utilize os botões abaixo para gerenciar procurados.\n\n"
             "➕ **Novo Procurado** — Cadastrar um novo procurado.\n"
@@ -4414,7 +4414,7 @@ def embed_painel_procurados_padrao() -> discord.Embed:
 
 def embed_painel_mesas_padrao() -> discord.Embed:
     return discord.Embed(
-        title="🕵️ Sistema de Mesas - DIC",
+        title="🕵️ Sistema de Mesas - DICOR",
         description=(
             "Utilize os botões abaixo para gerenciar as mesas.\n\n"
             "➕ **Criar Mesa** — Abre uma nova mesa de investigação.\n"
@@ -4543,7 +4543,7 @@ async def cmd_painelboletim(ctx: commands.Context):
 async def cmd_consultarboletim(ctx: commands.Context, *, numero: str = ""):
     """Consulta um boletim pelo número."""
     if not numero.strip():
-        await ctx.reply("❌ Use assim: `!consultarboletim BO-DIC-20260702-001`")
+        await ctx.reply("❌ Use assim: `!consultarboletim BO-DICOR-20260702-001`")
         return
     boletim = buscar_boletim_numero(numero)
     if not boletim:
@@ -4676,7 +4676,7 @@ async def removervinculorg(
 
 
 @bot.tree.command(name="consultarboletim", description="Consulta um boletim pelo número.")
-@app_commands.describe(numero="Ex: BO-DIC-20260702-001")
+@app_commands.describe(numero="Ex: BO-DICOR-20260702-001")
 async def consultarboletim(
     interaction: discord.Interaction,
     numero: str,
