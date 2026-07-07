@@ -5069,9 +5069,12 @@ async def painel_relatorios(interaction: discord.Interaction):
     embed.set_footer(text="DICOR • Sistema Operacional Seguro")
     await interaction.response.send_message(embed=embed, view=RelatoriosPainelView())
 
+
 # =====================================================
 # MAIN
-# =====================================================async def main():
+# =====================================================
+
+async def main():
     carregar_boletins_pendentes_memoria()
     garantir_56_organizacoes()
     garantir_senha_catalogo()
@@ -5081,9 +5084,5 @@ async def painel_relatorios(interaction: discord.Interaction):
     await start_web_server()
     await bot.start(DISCORD_TOKEN)
 
-
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        print("Bot desligado.")
+    asyncio.run(main())
