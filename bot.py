@@ -1526,9 +1526,11 @@ async def sincronizar_catalogo_core(interaction: discord.Interaction):
         await interaction.response.send_message("❌ Configure PROCURADOS_CHANNEL_ID.", ephemeral=True)
         return
 
-    canal = bot.get_channel(PROCURADOS_CHANNEL_ID)
-    if not isinstance(canal, discord.TextChannel):
-        await interaction.response.send_message("❌ Não encontrei o canal de procurados.", ephemeral=True)
+    canal_ativos = bot.get_channel(PROCURADOS_CHANNEL_ID)
+    canal_arquivados = bot.get_channel(HISTORICO_PROCURADOS_ID) if 'HISTORICO_PROCURADOS_ID' in globals() else None
+    
+    if not isinstance(canal_ativos, discord.TextChannel):
+        await interaction.response.send_message("❌ Não encontrei o canal de procurados ativos.", ephemeral=True)
         return
 
     await interaction.response.defer(ephemeral=True)
@@ -1537,58 +1539,78 @@ async def sincronizar_catalogo_core(interaction: discord.Interaction):
     analisados = 0
     lista = carregar_procurados()
 
-    async for msg in canal.history(limit=1000, oldest_first=True):
+    # 1. PROCESSA PRIMEIRO OS PROCURADOS ATIVOS
+    async for msg in canal_ativos.history(limit=1000, oldest_first=True):
         analisados += 1
         registro = await importar_mensagem_antiga(msg)
         if not registro:
             continue
 
+        # Garante que mensagens do canal ativo fiquem com status correto
+        registro["status"] = "A PROCURAR"
+
         alvo = limpar_rg(registro.get("rg", ""))
-        existente = next(
-            (p for p in lista if limpar_rg(p.get("rg", "")) == alvo),
-            None,
-        )
+        existente = next((p for p in lista if limpar_rg(p.get("rg", "")) == alvo), None)
 
         if existente is None:
-            registro["crimes"] = valor_crimes_registro(registro)
+            registro["crimes"] = valor_crimes_registro(registro) if 'valor_crimes_registro' in globals() else registro.get("crimes")
             lista.append(registro)
             importados += 1
             continue
 
+        # Se já existe na lista mas veio do canal ativo, mantém ativo
+        existente["status"] = "A PROCURAR"
         mudou = False
-        for campo in (
-            "nome",
-            "crimes",
-            "ultimo_avistamento",
-            "informacoes",
-            "foto_individuo",
-            "foto_rg",
-            "mensagem_id",
-            "mensagem_url",
-        ):
+        for campo in ("nome", "crimes", "ultimo_avistamento", "informacoes", "foto_individuo", "foto_rg", "mensagem_id", "mensagem_url"):
             novo_valor = registro.get(campo)
             valor_atual = existente.get(campo)
-            if registro_tem_valor_util(novo_valor) and not registro_tem_valor_util(valor_atual):
+            if 'registro_tem_valor_util' in globals() and registro_tem_valor_util(novo_valor) and not registro_tem_valor_util(valor_atual):
                 existente[campo] = novo_valor
                 mudou = True
-
-        crimes_novos = valor_crimes_registro(registro)
-        if registro_tem_valor_util(crimes_novos) and not registro_tem_valor_util(existente.get("crimes")):
-            existente["crimes"] = crimes_novos
-            mudou = True
+            elif novo_valor and not valor_atual:
+                existente[campo] = novo_valor
+                mudou = True
 
         if mudou:
             atualizados += 1
 
-    lista = remover_duplicados(lista)
+    # 2. PROCESSA OS PROCURADOS PEGOs/ARQUIVADOS (SE O CANAL EXISTIR)
+    if isinstance(canal_arquivados, discord.TextChannel):
+        async for msg in canal_arquivados.history(limit=1000, oldest_first=True):
+            analisados += 1
+            registro = await importar_mensagem_antiga(msg)
+            if not registro:
+                continue
+
+            # Registros vindos deste canal estão marcados como RETIRADO / PEGO
+            registro["status"] = "RETIRADO"
+
+            alvo = limpar_rg(registro.get("rg", ""))
+            existente = next((p for p in lista if limpar_rg(p.get("rg", "")) == alvo), None)
+
+            if existente is None:
+                registro["crimes"] = valor_crimes_registro(registro) if 'valor_crimes_registro' in globals() else registro.get("crimes")
+                lista.append(registro)
+                importados += 1
+                continue
+            
+            # Se já existia como ativo, o histórico do canal de arquivados tem prioridade (já foi pego)
+            existente["status"] = "RETIRADO"
+            existente["mensagem_arquivada_id"] = msg.id
+            existente["mensagem_url"] = msg.jump_url
+            atualizados += 1
+
+    if 'remover_duplicados' in globals():
+        lista = remover_duplicados(lista)
+        
     salvar_procurados(lista)
     gerar_catalogo_html()
 
     await interaction.followup.send(
-        f"✅ Sincronização finalizada.\n"
+        f"✅ Sincronização e separação finalizadas.\n"
         f"Mensagens analisadas: `{analisados}`\n"
         f"Procurados importados: `{importados}`\n"
-        f"Registros corrigidos/atualizados: `{atualizados}`\n"
+        f"Registros atualizados/separados: `{atualizados}`\n"
         f"Catálogo: {CATALOG_PUBLIC_URL}",
         ephemeral=True,
     )
