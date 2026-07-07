@@ -4773,22 +4773,38 @@ comandos_ja_sincronizados = False
 async def on_ready():
     global comandos_ja_sincronizados
     
-    # 1. ATIVA A PERSISTÊNCIA DOS BOTÕES DO PAINEL DE RELATÓRIOS
+    # 1. ATIVA A PERSISTÊNCIA DOS BOTÕES DE TODOS OS PAINÉIS
     try:
+        # Painel Novo de Relatórios
         bot.add_view(RelatoriosPainelView())
-        print("✅ Persistência do Painel de Relatórios Operacionais carregada com sucesso!")
+        
+        # Painel Antigo de Boletins (Para resolver o "Esta interação falhou")
+        bot.add_view(PainelBoletimView())
+        bot.add_view(IniciarBoletimView())
+        bot.add_view(InformarRGBoletimView())
+        bot.add_view(TipoIdentificacaoBoletimView())
+        bot.add_view(ContinuarVeiculoBoletimView())
+        bot.add_view(ProvasBoletimView())
+        bot.add_view(PreviaBoletimView())
+        
+        # Outros Painéis do Sistema
+        bot.add_view(PainelProcuradosView())
+        bot.add_view(FinalizarProcuradoView())
+        bot.add_view(PainelMesasView())
+        bot.add_view(FecharMesaView())
+        bot.add_view(PainelOrganizacoesView())
+        
+        print("✅ Todas as persistências de botões (Relatórios, Boletins e Sistemas) foram carregadas!")
     except Exception as e:
-        print(f"Aviso ao carregar persistência do painel: {e}")
+        print(f"Aviso ao carregar persistência dos painéis: {e}")
 
     # Lógica de sincronização do bot
     try:
         if GUILD_ID > 0:
             guild = discord.Object(id=GUILD_ID)
-            # Copia os comandos globais para o servidor para atualizar instantaneamente
             bot.tree.copy_global_to(guild=guild)
             comandos_servidor = await bot.tree.sync(guild=guild)
             
-            # Limpa comandos globais antigos para tirar duplicados do Discord
             bot.tree.clear_commands(guild=None)
             comandos_globais = await bot.tree.sync()
 
@@ -4798,7 +4814,6 @@ async def on_ready():
         else:
             comandos_globais = await bot.tree.sync()
             print(f"Comandos sincronizados globalmente: {len(comandos_globais)}")
-            print("AVISO: GUILD_ID está 0. Os comandos podem demorar para aparecer no Discord.")
 
         comandos_ja_sincronizados = True
     except Exception as e:
