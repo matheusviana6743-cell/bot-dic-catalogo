@@ -4821,22 +4821,6 @@ async def on_ready():
 # MAIN
 # =====================================================
 
-# =====================================================
-# SISTEMA DE PAINEL DE RELATÓRIOS OPERACIONAIS (NOVO)
-# =====================================================
-
-RELATORIOS_CONTADOR_JSON = DATA_DIR / "relatorios_contador.json"
-
-def obter_proximo_numero_relatorio(tipo_relatorio: str) -> str:
-    contadores = carregar_json(RELATORIOS_CONTADOR_JSON, {})
-    if not isinstance(contadores, dict):
-        contadores = {}
-    
-    proximo = contadores.get(tipo_relatorio, 0) + 1
-    contadores[tipo_relatorio] = proximo
-    salvar_json(RELATORIOS_CONTADOR_JSON, contadores)
-    return f"{proximo:03d}"
-
 class RelatoriosPainelView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
@@ -4846,27 +4830,45 @@ class RelatoriosPainelView(discord.ui.View):
         if not guild:
             return None
         
-        overwrites = cargos_equipe_permissoes(guild)
-        overwrites[interaction.user] = discord.PermissionOverwrite(
-            view_channel=True,
-            send_messages=True,
-            attach_files=True,
-            read_message_history=True
-        )
+        # Define as permissões básicas: fecha para o @everyone e abre para quem criou
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(view_channel=False),
+            interaction.user: discord.PermissionOverwrite(
+                view_channel=True,
+                send_messages=True,
+                attach_files=True,
+                read_message_history=True
+            )
+        }
         
-        categoria_id = PROCURADOS_TEMP_CATEGORY_ID or BOLETIM_TEMP_CATEGORY_ID or 0
-        categoria = guild.get_channel(categoria_id) if category_id else None
+        # Procura por cargos da DICOR ou Staff se houver uma função compatível, 
+        # caso contrário, mantém apenas o criador e administradores.
+        try:
+            if 'cargos_equipe_permissoes' in globals():
+                overwrites = cargos_equipe_permissoes(guild)
+                overwrites[interaction.user] = discord.PermissionOverwrite(
+                    view_channel=True, send_messages=True, attach_files=True, read_message_history=True
+                )
+        except Exception:
+            pass
+
+        # Pega a categoria correta usando as variáveis globais do seu bot
+        cat_id = globals().get("PROCURADOS_TEMP_CATEGORY_ID") or globals().get("BOLETIM_TEMP_CATEGORY_ID") or 0
+        categoria = guild.get_channel(cat_id) if cat_id else None
+        
+        # Simplifica o nome do canal sem depender da função slugify externa
+        nome_canal = f"relatorio-{nome}-{interaction.user.name}".lower().replace(" ", "-")
         
         try:
             canal = await guild.create_text_channel(
-                name=slugify(f"relatorio-{nome}-{interaction.user.display_name}"),
+                name=nome_canal,
                 category=categoria,
                 overwrites=overwrites,
                 reason="Painel de Relatório Operacional Temporário"
             )
             return canal
         except Exception as e:
-            print(f"Erro ao criar canal temporário de relatório: {e}")
+            print(f"Erro crítico ao criar canal de relatório: {e}")
             return None
 
     @discord.ui.button(label="👀 TOCAIA", style=discord.ButtonStyle.secondary, custom_id="rel_btn_tocaia")
@@ -4874,7 +4876,7 @@ class RelatoriosPainelView(discord.ui.View):
         await interaction.response.defer(ephemeral=True)
         canal = await self.criar_canal_temporario_operacional(interaction, "tocaia")
         if not canal:
-            return await interaction.followup.send("❌ Não foi possível criar o canal temporário.", ephemeral=True)
+            return await interaction.followup.send("❌ Não foi possível criar o canal temporário. Verifique os IDs de Categoria e Permissões do Bot.", ephemeral=True)
         
         await interaction.followup.send(f"✅ Canal temporário criado: {canal.mention}", ephemeral=True)
         await canal.send(f"👋 {interaction.user.mention}, clique no botão abaixo para preencher o formulário de Tocaia.", view=IniciarFormularioRelatorioView("tocaia"))
@@ -4908,166 +4910,6 @@ class RelatoriosPainelView(discord.ui.View):
         
         await interaction.followup.send(f"✅ Canal temporário criado: {canal.mention}", ephemeral=True)
         await canal.send(f"👋 {interaction.user.mention}, clique no botão abaixo para preencher o formulário de Relatório Diário.", view=IniciarFormularioRelatorioView("diario"))
-
-
-class IniciarFormularioRelatorioView(discord.ui.View):
-    def __init__(self, tipo: str):
-        super().__init__(timeout=None)
-        self.tipo = tipo
-
-    @discord.ui.button(label="✍️ Preencher Formulário", style=discord.ButtonStyle.primary, custom_id="rel_btn_preencher")
-    async def preencher(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if self.tipo == "tocaia":
-            await interaction.response.send_modal(TocaiaModal())
-        elif self.tipo == "olb":
-            await interaction.response.send_modal(OlbModal())
-        elif self.tipo == "pericia_externa":
-            await interaction.response.send_modal(PericiaExternaModal())
-        elif self.tipo == "diario":
-            await interaction.response.send_modal(RelatorioDiarioModal())
-
-
-async def finalizar_e_postar_relatorio(interaction: discord.Interaction, embed: discord.Embed):
-    canal_relatorios = interaction.guild.get_channel(BOLETINS_CHANNEL_ID) if interaction.guild else None
-    if canal_relatorios:
-        await canal_relatorios.send(embed=embed)
-    
-    canal_atual = interaction.channel
-    if isinstance(canal_atual, discord.TextChannel):
-        await canal_atual.send("✅ Relatório enviado com sucesso! Este canal será deletado em 5 segundos...")
-        await asyncio.sleep(5)
-        try:
-            await canal_atual.delete(reason="Relatório operacional concluído.")
-        except Exception:
-            pass
-
-
-class TocaiaModal(Modal, title="Relatório de Tocaia"):
-    local = TextInput(label="Local", placeholder="Local de interesse observado", max_length=150)
-    tempo = TextInput(label="Tempo de tocaia", placeholder="Duração da vigilância", max_length=100)
-    infos = TextInput(label="Informações obtidas", style=discord.TextStyle.paragraph, placeholder="Detalhes colhidos durante a tocaia", max_length=1000)
-
-    async def on_submit(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
-        num = obter_proximo_numero_relatorio("tocaia")
-        data_hora = agora_br()
-        
-        embed = discord.Embed(
-            title=f"RELATÓRIO DE TOCAIA Nº {num}",
-            color=discord.Color.dark_gold(),
-            description=f"**DATA:** {data_hora.split()[0]}\n**HORÁRIO:** {data_hora.split()[1]}"
-        )
-        embed.add_field(name="RESPONSÁVEL", value=interaction.user.mention, inline=False)
-        embed.add_field(name="LOCAL", value=self.local.value, inline=False)
-        embed.add_field(name="TEMPO DE TOCAIA", value=self.tempo.value, inline=False)
-        embed.add_field(name="INFORMAÇÕES OBTIDAS", value=self.infos.value, inline=False)
-        
-        await finalizar_e_postar_relatorio(interaction, embed)
-
-
-class OlbModal(Modal, title="Relatório de OLB"):
-    dicors = TextInput(label="DICORs envolvidos", placeholder="Agentes participantes da operação", max_length=200)
-    relato = TextInput(label="Relatório da emboscada", style=discord.TextStyle.paragraph, placeholder="Como ocorreu a operação", max_length=1000)
-    itens = TextInput(label="Itens ilegais apreendidos", style=discord.TextStyle.paragraph, placeholder="Lista de itens retidos", max_length=500)
-    pericia = TextInput(label="Houve perícia? Se sim, anexar", placeholder="Sim / Não (e observações)", max_length=150)
-    prejuizo = TextInput(label="Prejuízo estimado", placeholder="Valor aproximado do impacto", max_length=100)
-
-    async def on_submit(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
-        num = obter_proximo_numero_relatorio("olb")
-        data_hora = agora_br()
-        
-        embed = discord.Embed(
-            title=f"RELATÓRIO DE OLB Nº {num}",
-            color=discord.Color.red(),
-            description=f"**DATA:** {data_hora.split()[0]}\n**HORÁRIO:** {data_hora.split()[1]}"
-        )
-        embed.add_field(name="RESPONSÁVEL", value=interaction.user.mention, inline=False)
-        embed.add_field(name="DICORs ENVOLVIDOS", value=self.dicors.value, inline=False)
-        embed.add_field(name="RELATÓRIO DA EMBOSCADA", value=self.relato.value, inline=False)
-        embed.add_field(name="ITENS ILEGAIS APREENDIDOS", value=self.itens.value, inline=False)
-        embed.add_field(name="HOUVE PERÍCIA", value=self.pericia.value, inline=False)
-        embed.add_field(name="PREJUÍZO ESTIMADO", value=f"≈ {self.prejuizo.value}", inline=False)
-        
-        await finalizar_e_postar_relatorio(interaction, embed)
-
-
-class PericiaExternaModal(Modal, title="Perícia Externa"):
-    codigo = TextInput(label="Código da ocorrência", placeholder="Número de referência", max_length=100)
-    local = TextInput(label="Local", placeholder="Local da perícia", max_length=150)
-    suspeito = TextInput(label="Suspeito", placeholder="Nome ou descrição do suspeito", max_length=150, required=False)
-    conclusao = TextInput(label="Conclusão", style=discord.TextStyle.paragraph, placeholder="Resultados das análises", max_length=1000)
-    fotos = TextInput(label="Deseja anexar fotos?", placeholder="Sim (pode digitar links ou fazer upload no canal)", max_length=200, required=False)
-
-    async def on_submit(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
-        num = obter_proximo_numero_relatorio("pericia_externa")
-        data_hora = agora_br()
-        
-        embed = discord.Embed(
-            title=f"RELATÓRIO DE PERÍCIA EXTERNA Nº {num}",
-            color=discord.Color.blue(),
-            description=f"**DATA:** {data_hora.split()[0]}\n**HORÁRIO:** {data_hora.split()[1]}"
-        )
-        embed.add_field(name="RESPONSÁVEL", value=interaction.user.mention, inline=False)
-        embed.add_field(name="ANÁLISE DO LOCAL", value=f"Código da Ocorrência: {self.codigo.value}", inline=False)
-        embed.add_field(name="LOCAL", value=self.local.value, inline=False)
-        embed.add_field(name="REGISTRO FOTOGRÁFICO", value=self.fotos.value or "Nenhum link anexado via formulário.", inline=False)
-        embed.add_field(name="SUSPEITO", value=self.suspeito.value or "Não identificado", inline=False)
-        embed.add_field(name="CONCLUSÃO", value=self.conclusao.value, inline=False)
-        
-        await finalizar_e_postar_relatorio(interaction, embed)
-
-
-class RelatorioDiarioModal(Modal, title="Relatório Diário de Perícia"):
-    material = TextInput(label="Material apreendido", style=discord.TextStyle.paragraph, placeholder="Descrição detalhada", max_length=400)
-    local = TextInput(label="Local", placeholder="Local dos fatos", max_length=150)
-    proprietario = TextInput(label="Proprietário", placeholder="Nome completo", max_length=150, required=False)
-    telefone = TextInput(label="Telefone", placeholder="Contato", max_length=50, required=False)
-    rg_doc = TextInput(label="RG", placeholder="Documento", max_length=50, required=False)
-    placa = TextInput(label="Placa / Modelo", placeholder="Veículo (se houver)", max_length=150, required=False)
-    relato = TextInput(label="Relato dos fatos", style=discord.TextStyle.paragraph, placeholder="Resumo dos acontecimentos", max_length=1000)
-
-    async def on_submit(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
-        num = obter_proximo_numero_relatorio("diario")
-        data_hora = agora_br()
-        
-        embed = discord.Embed(
-            title=f"RELATÓRIO DE PERÍCIA INVESTIGATIVA Nº {num}",
-            color=discord.Color.dark_green(),
-            description=f"**DATA:** {data_hora.split()[0]}\n**HORÁRIO:** {data_hora.split()[1]}"
-        )
-        embed.add_field(name="PERITO RESPONSÁVEL", value=interaction.user.mention, inline=False)
-        embed.add_field(name="MATERIAL APREENDIDO", value=self.material.value, inline=False)
-        embed.add_field(name="LOCAL", value=self.local.value, inline=False)
-        embed.add_field(name="PROPRIETÁRIO", value=self.proprietario.value or "Não informado", inline=True)
-        embed.add_field(name="TELEFONE", value=self.telefone.value or "Não informado", inline=True)
-        embed.add_field(name="RG", value=self.rg_doc.value or "Não informado", inline=True)
-        embed.add_field(name="PLACA", value=self.placa.value or "Não informado", inline=True)
-        embed.add_field(name="RELATO DOS FATOS", value=self.relato.value, inline=False)
-        
-        await finalizar_e_postar_relatorio(interaction, embed)
-
-
-@bot.tree.command(name="painel-relatorios", description="Envia o painel com os Relatórios Operacionais.")
-async def painel_relatorios(interaction: discord.Interaction):
-    if not usuario_tem_admin(interaction.user):
-        return await interaction.response.send_message("❌ Apenas membros autorizados podem usar este comando.", ephemeral=True)
-        
-    embed = discord.Embed(
-        title="📑 PAINEL DE RELATÓRIOS OPERACIONAIS",
-        description=(
-            "Selecione uma das opções abaixo para iniciar um procedimento operacional.\n\n"
-            "👀 **TOCAIA:** Registrar vigilâncias em locais de interesse.\n"
-            "🚔 **OLB:** Registro de emboscadas e operações planejadas.\n"
-            "🔬 **PERÍCIA EXTERNA:** Análises e levantamentos periciais externos.\n"
-            "📑 **RELATÓRIO DIÁRIO:** Consolidação de perícias investigativas realizadas."
-        ),
-        color=discord.Color.blurple()
-    )
-    embed.set_footer(text="DICOR • Sistema Operacional Seguro")
-    await interaction.response.send_message(embed=embed, view=RelatoriosPainelView())
 async def main():
     carregar_boletins_pendentes_memoria()
     garantir_56_organizacoes()
