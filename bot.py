@@ -4885,7 +4885,7 @@ class RelatoriosPainelView(View):
             return await interaction.followup.send("❌ Não foi possível criar o canal temporário.", ephemeral=True)
         
         await interaction.followup.send(f"✅ Canal temporário criado: {canal.mention}", ephemeral=True)
-        await canal.send(f"👋 {interaction.user.mention}, clique no botão abaixo para abrir o formulário de Tocaia e use este canal para enviar links ou anexar fotos se necessário.", view=IniciarFormularioRelatorioView("tocaia"))
+        await canal.send(f"👋 {interaction.user.mention}, clica no botão abaixo para abrir o formulário de Tocaia e usa este canal para enviar links ou anexar fotos se necessário.", view=IniciarFormularioRelatorioView("tocaia"))
 
     @discord.ui.button(label="🚔 OLB", style=discord.ButtonStyle.secondary, custom_id="rel_btn_olb")
     async def btn_olb(self, interaction: discord.Interaction, button: Button):
@@ -4895,7 +4895,7 @@ class RelatoriosPainelView(View):
             return await interaction.followup.send("❌ Não foi possível criar o canal temporário.", ephemeral=True)
         
         await interaction.followup.send(f"✅ Canal temporário criado: {canal.mention}", ephemeral=True)
-        await canal.send(f"👋 {interaction.user.mention}, clique no botão abaixo para abrir o formulário de OLB e use este canal para enviar links ou anexar fotos se necessário.", view=IniciarFormularioRelatorioView("olb"))
+        await canal.send(f"👋 {interaction.user.mention}, clica no botão abaixo para abrir o formulário de OLB e usa este canal para enviar links ou anexar fotos se necessário.", view=IniciarFormularioRelatorioView("olb"))
 
     @discord.ui.button(label="🔬 PERÍCIA EXTERNA", style=discord.ButtonStyle.secondary, custom_id="rel_btn_pericia_ext")
     async def btn_pericia_ext(self, interaction: discord.Interaction, button: Button):
@@ -4905,7 +4905,7 @@ class RelatoriosPainelView(View):
             return await interaction.followup.send("❌ Não foi possível criar o canal temporário.", ephemeral=True)
         
         await interaction.followup.send(f"✅ Canal temporário criado: {canal.mention}", ephemeral=True)
-        await canal.send(f"👋 {interaction.user.mention}, clique no botão abaixo para abrir o formulário de Perícia Externa e use este canal para enviar links ou anexar fotos se necessário.", view=IniciarFormularioRelatorioView("pericia_externa"))
+        await canal.send(f"👋 {interaction.user.mention}, clica no botão abaixo para abrir o formulário de Perícia Externa e usa este canal para enviar links ou anexar fotos se necessário.", view=IniciarFormularioRelatorioView("pericia_externa"))
 
     @discord.ui.button(label="📑 RELATÓRIO DIÁRIO", style=discord.ButtonStyle.secondary, custom_id="rel_btn_diario")
     async def btn_diario(self, interaction: discord.Interaction, button: Button):
@@ -4915,7 +4915,7 @@ class RelatoriosPainelView(View):
             return await interaction.followup.send("❌ Não foi possível criar o canal temporário.", ephemeral=True)
         
         await interaction.followup.send(f"✅ Canal temporário criado: {canal.mention}", ephemeral=True)
-        await canal.send(f"👋 {interaction.user.mention}, clique no botão abaixo para abrir o formulário de Relatório Diário e use este canal para enviar links ou anexar fotos se necessário.", view=IniciarFormularioRelatorioView("diario"))
+        await canal.send(f"👋 {interaction.user.mention}, clica no botão abaixo para abrir o formulário de Relatório Diário e usa este canal para enviar links ou anexar fotos se necessário.", view=IniciarFormularioRelatorioView("diario"))
 
 
 class IniciarFormularioRelatorioView(View):
