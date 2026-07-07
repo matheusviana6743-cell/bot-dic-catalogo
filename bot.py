@@ -4771,34 +4771,26 @@ comandos_ja_sincronizados = False
 
 @bot.event
 async def on_ready():
+   @bot.event
+async def on_ready():
     global comandos_ja_sincronizados
-
-    bot.add_view(PainelProcuradosView())
-    bot.add_view(FinalizarProcuradoView())
-    bot.add_view(PainelMesasView())
-    bot.add_view(FecharMesaView())
-    bot.add_view(PainelBoletimView())
-    bot.add_view(PainelOrganizacoesView())
-    bot.add_view(InformarRGBoletimView())
-    bot.add_view(IniciarBoletimView())
-    bot.add_view(TipoIdentificacaoBoletimView())
-    bot.add_view(ContinuarVeiculoBoletimView())
-    bot.add_view(ProvasBoletimView())
-    bot.add_view(PreviaBoletimView())
-
-    if comandos_ja_sincronizados:
-        print(f"Bot online como {bot.user}")
-        return
-
+    
+    # 1. ATIVA A PERSISTÊNCIA DOS BOTÕES DO PAINEL DE RELATÓRIOS
     try:
-        if GUILD_ID:
-            guild_obj = discord.Object(id=GUILD_ID)
+        bot.add_view(RelatoriosPainelView())
+        print("✅ Persistência do Painel de Relatórios Operacionais carregada com sucesso!")
+    except Exception as e:
+        print(f"Aviso ao carregar persistência do painel: {e}")
 
-            # 1) Copia todos os comandos definidos no código para o servidor correto.
-            bot.tree.copy_global_to(guild=guild_obj)
-            comandos_servidor = await bot.tree.sync(guild=guild_obj)
-
-            # 2) Limpa comandos globais antigos para tirar duplicados do Discord.
+    # Lógica original de sincronização do seu bot
+    try:
+        if GUILD_ID > 0:
+            guild = discord.Object(id=GUILD_ID)
+            # Copia os comandos globais para o servidor para atualizar instantaneamente
+            bot.tree.copy_global_to(guild=guild)
+            comandos_servidor = await bot.tree.sync(guild=guild)
+            
+            # Limpa comandos globais antigos para tirar duplicados do Discord
             bot.tree.clear_commands(guild=None)
             comandos_globais = await bot.tree.sync()
 
@@ -4814,7 +4806,7 @@ async def on_ready():
     except Exception as e:
         print(f"Erro ao sincronizar comandos: {e}")
 
-    print('VERSAO COMPLETA: mesas | procurados | catalogo | boletins | organizacoes')
+    print('VERSAO COMPLETA: mesas | procurados | catalogo | boletins | organizacoes | relatorios')
     print(f"Bot online como {bot.user}")
 
 # =====================================================
