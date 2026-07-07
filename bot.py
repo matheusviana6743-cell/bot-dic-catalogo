@@ -4771,50 +4771,6 @@ comandos_ja_sincronizados = False
 
 @bot.event
 async def on_ready():
-   @bot.event
-async def on_ready():
-    global comandos_ja_sincronizados
-    
-    # 1. ATIVA A PERSISTÊNCIA DOS BOTÕES DO PAINEL DE RELATÓRIOS
-    try:
-        bot.add_view(RelatoriosPainelView())
-        print("✅ Persistência do Painel de Relatórios Operacionais carregada com sucesso!")
-    except Exception as e:
-        print(f"Aviso ao carregar persistência do painel: {e}")
-
-    # Lógica original de sincronização do seu bot
-    try:
-        if GUILD_ID > 0:
-            guild = discord.Object(id=GUILD_ID)
-            # Copia os comandos globais para o servidor para atualizar instantaneamente
-            bot.tree.copy_global_to(guild=guild)
-            comandos_servidor = await bot.tree.sync(guild=guild)
-            
-            # Limpa comandos globais antigos para tirar duplicados do Discord
-            bot.tree.clear_commands(guild=None)
-            comandos_globais = await bot.tree.sync()
-
-            print(f"Comandos sincronizados no servidor: {len(comandos_servidor)}")
-            print(f"Comandos globais antigos limpos: {len(comandos_globais)}")
-            print("Comandos ativos:", ", ".join(f"/{cmd.name}" for cmd in comandos_servidor))
-        else:
-            comandos_globais = await bot.tree.sync()
-            print(f"Comandos sincronizados globalmente: {len(comandos_globais)}")
-            print("AVISO: GUILD_ID está 0. Os comandos podem demorar para aparecer no Discord.")
-
-        comandos_ja_sincronizados = True
-    except Exception as e:
-        print(f"Erro ao sincronizar comandos: {e}")
-
-    print('VERSAO COMPLETA: mesas | procurados | catalogo | boletins | organizacoes | relatorios')
-    print(f"Bot online como {bot.user}")
-
-# =====================================================
-# MAIN
-# =====================================================
-
-@bot.event
-async def on_ready():
     global comandos_ja_sincronizados
     
     # 1. ATIVA A PERSISTÊNCIA DOS BOTÕES DO PAINEL DE RELATÓRIOS
@@ -4875,7 +4831,7 @@ def obter_proximo_numero_relatorio(tipo_relatorio: str) -> str:
     salvar_json(RELATORIOS_CONTADOR_JSON, contadores)
     return f"{proximo:03d}"
 
-class RelatoriosPainelView(discord.ui.View):
+class RelatoriosPainelView(View):
     def __init__(self):
         super().__init__(timeout=None)
 
@@ -4922,7 +4878,7 @@ class RelatoriosPainelView(discord.ui.View):
             return None
 
     @discord.ui.button(label="👀 TOCAIA", style=discord.ButtonStyle.secondary, custom_id="rel_btn_tocaia")
-    async def btn_tocaia(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def btn_tocaia(self, interaction: discord.Interaction, button: Button):
         await interaction.response.defer(ephemeral=True)
         canal = await self.criar_canal_temporario_operacional(interaction, "tocaia")
         if not canal:
@@ -4932,7 +4888,7 @@ class RelatoriosPainelView(discord.ui.View):
         await canal.send(f"👋 {interaction.user.mention}, clique no botão abaixo para abrir o formulário de Tocaia e use este canal para enviar links ou anexar fotos se necessário.", view=IniciarFormularioRelatorioView("tocaia"))
 
     @discord.ui.button(label="🚔 OLB", style=discord.ButtonStyle.secondary, custom_id="rel_btn_olb")
-    async def btn_olb(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def btn_olb(self, interaction: discord.Interaction, button: Button):
         await interaction.response.defer(ephemeral=True)
         canal = await self.criar_canal_temporario_operacional(interaction, "olb")
         if not canal:
@@ -4942,7 +4898,7 @@ class RelatoriosPainelView(discord.ui.View):
         await canal.send(f"👋 {interaction.user.mention}, clique no botão abaixo para abrir o formulário de OLB e use este canal para enviar links ou anexar fotos se necessário.", view=IniciarFormularioRelatorioView("olb"))
 
     @discord.ui.button(label="🔬 PERÍCIA EXTERNA", style=discord.ButtonStyle.secondary, custom_id="rel_btn_pericia_ext")
-    async def btn_pericia_ext(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def btn_pericia_ext(self, interaction: discord.Interaction, button: Button):
         await interaction.response.defer(ephemeral=True)
         canal = await self.criar_canal_temporario_operacional(interaction, "pericia_externa")
         if not canal:
@@ -4952,10 +4908,170 @@ class RelatoriosPainelView(discord.ui.View):
         await canal.send(f"👋 {interaction.user.mention}, clique no botão abaixo para abrir o formulário de Perícia Externa e use este canal para enviar links ou anexar fotos se necessário.", view=IniciarFormularioRelatorioView("pericia_externa"))
 
     @discord.ui.button(label="📑 RELATÓRIO DIÁRIO", style=discord.ButtonStyle.secondary, custom_id="rel_btn_diario")
-    async def btn_diario(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def btn_diario(self, interaction: discord.Interaction, button: Button):
         await interaction.response.defer(ephemeral=True)
-        canal = await self.criar_canal_temporario
-async def main():
+        canal = await self.criar_canal_temporario_operacional(interaction, "diario")
+        if not canal:
+            return await interaction.followup.send("❌ Não foi possível criar o canal temporário.", ephemeral=True)
+        
+        await interaction.followup.send(f"✅ Canal temporário criado: {canal.mention}", ephemeral=True)
+        await canal.send(f"👋 {interaction.user.mention}, clique no botão abaixo para abrir o formulário de Relatório Diário e use este canal para enviar links ou anexar fotos se necessário.", view=IniciarFormularioRelatorioView("diario"))
+
+
+class IniciarFormularioRelatorioView(View):
+    def __init__(self, tipo: str):
+        super().__init__(timeout=None)
+        self.tipo = tipo
+
+    @discord.ui.button(label="✍️ Preencher Formulário", style=discord.ButtonStyle.primary, custom_id="rel_btn_preencher")
+    async def preencher(self, interaction: discord.Interaction, button: Button):
+        if self.tipo == "tocaia":
+            await interaction.response.send_modal(TocaiaModal())
+        elif self.tipo == "olb":
+            await interaction.response.send_modal(OlbModal())
+        elif self.tipo == "pericia_externa":
+            await interaction.response.send_modal(PericiaExternaModal())
+        elif self.tipo == "diario":
+            await interaction.response.send_modal(RelatorioDiarioModal())
+
+
+async def finalizar_e_postar_relatorio(interaction: discord.Interaction, tipo: str, texto_conteudo: str):
+    canal_id = CANAIS_RELATORIOS.get(tipo)
+    canal_destino = interaction.guild.get_channel(canal_id) if interaction.guild and canal_id else None
+    
+    if canal_destino:
+        await canal_destino.send(texto_conteudo)
+    
+    canal_atual = interaction.channel
+    if isinstance(canal_atual, discord.TextChannel):
+        await canal_atual.send("✅ Relatório enviado com sucesso! Este canal será apagado em 5 segundos...")
+        await asyncio.sleep(5)
+        try:
+            await canal_atual.delete(reason="Relatório operacional concluído.")
+        except Exception:
+            pass
+
+
+class TocaiaModal(Modal, title="Relatório de Tocaia"):
+    local = TextInput(label="Local", placeholder="Local de interesse observado", max_length=150)
+    tempo = TextInput(label="Tempo de tocaia", placeholder="Duração da vigilância", max_length=100)
+    infos = TextInput(label="Informações obtidas", style=discord.TextStyle.paragraph, placeholder="Detalhes colhidos durante a tocaia", max_length=1000)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        num = obter_proximo_numero_relatorio("tocaia")
+        data_hora = agora_br()
+        
+        texto = (
+            f"**RELATÓRIO DE TOCAIA Nº {num}**\n\n"
+            f"**RESPONSÁVEL:**\n{interaction.user.mention}\n\n"
+            f"**LOCAL:**\n{self.local.value}\n\n"
+            f"**TEMPO DE TOCAIA:**\n{self.tempo.value}\n\n"
+            f"**INFORMAÇÕES OBTIDAS:**\n{self.infos.value}\n\n"
+            f"**DATA:** {data_hora.split()[0]} | **HORÁRIO:** {data_hora.split()[1]}"
+        )
+        await finalizar_e_postar_relatorio(interaction, "tocaia", texto)
+
+
+class OlbModal(Modal, title="Relatório de OLB"):
+    dicors = TextInput(label="DICORs envolvidos", placeholder="Agentes participantes da operação", max_length=200)
+    relato = TextInput(label="Relatório da emboscada", style=discord.TextStyle.paragraph, placeholder="Como ocorreu a operação", max_length=1000)
+    itens = TextInput(label="Itens ilegais apreendidos", style=discord.TextStyle.paragraph, placeholder="Lista de itens retidos", max_length=500)
+    pericia = TextInput(label="Houve perícia?", placeholder="Sim / Não", max_length=150)
+    prejuizo = TextInput(label="Prejuízo estimado", placeholder="Valor aproximado do impacto", max_length=100)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        num = obter_proximo_numero_relatorio("olb")
+        data_hora = agora_br()
+        
+        texto = (
+            f"**RELATÓRIO DE OLB Nº {num}**\n\n"
+            f"**RESPONSÁVEL:**\n{interaction.user.mention}\n\n"
+            f"**DICORs ENVOLVIDOS:**\n{self.dicors.value}\n\n"
+            f"**RELATÓRIO DA EMBOSCADA:**\n{self.relato.value}\n\n"
+            f"**ITENS ILEGAIS APREENDIDOS:**\n{self.itens.value}\n\n"
+            f"**HOUVE PERÍCIA:**\n{self.pericia.value}\n\n"
+            f"**PREJUÍZO ESTIMADO:**\n≈ {self.prejuizo.value}\n\n"
+            f"**DATA:** {data_hora.split()[0]} | **HORÁRIO:** {data_hora.split()[1]}"
+        )
+        await finalizar_e_postar_relatorio(interaction, "olb", texto)
+
+
+class PericiaExternaModal(Modal, title="Perícia Externa"):
+    codigo = TextInput(label="Código da ocorrência", placeholder="Número de referência", max_length=100)
+    local = TextInput(label="Local", placeholder="Local da perícia", max_length=150)
+    suspeito = TextInput(label="Suspeito", placeholder="Nome ou descrição", max_length=150, required=False)
+    conclusao = TextInput(label="Conclusão", style=discord.TextStyle.paragraph, placeholder="Resultados das análises", max_length=1000)
+    fotos = TextInput(label="Deseja anexar fotos?", placeholder="Sim / Não", max_length=200, required=False)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        num = obter_proximo_numero_relatorio("pericia_externa")
+        data_hora = agora_br()
+        
+        texto = (
+            f"**RELATÓRIO DE PERÍCIA EXTERNA Nº {num}**\n\n"
+            f"**RESPONSÁVEL:**\n{interaction.user.mention}\n\n"
+            f"**ANÁLISE DO LOCAL:**\nCódigo da Ocorrência: {self.codigo.value}\n\n"
+            f"**LOCAL:**\n{self.local.value}\n\n"
+            f"**REGISTRO FOTOGRÁFICO:**\n{self.fotos.value or 'Em anexo'}\n\n"
+            f"**SUSPEITO:**\n{self.suspeito.value or 'Não identificado'}\n\n"
+            f"**CONCLUSÃO:**\n{self.conclusao.value}\n\n"
+            f"**DATA:** {data_hora.split()[0]} | **HORÁRIO:** {data_hora.split()[1]}"
+        )
+        await finalizar_e_postar_relatorio(interaction, "pericia_externa", texto)
+
+
+class RelatorioDiarioModal(Modal, title="Relatório Diário de Perícia"):
+    material = TextInput(label="Material apreendido", style=discord.TextStyle.paragraph, placeholder="Descrição detalhada", max_length=400)
+    local = TextInput(label="Local", placeholder="Local dos fatos", max_length=150)
+    proprietario = TextInput(label="Proprietário", placeholder="Nome completo", max_length=150, required=False)
+    telefone = TextInput(label="Telefone", placeholder="Contato", max_length=50, required=False)
+    rg_doc = TextInput(label="RG / Placa / Modelo", placeholder="Documentos e Veículo", max_length=150, required=False)
+    relato = TextInput(label="Relato dos fatos", style=discord.TextStyle.paragraph, placeholder="Resumo dos acontecimentos", max_length=1000)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        num = obter_proximo_numero_relatorio("diario")
+        data_hora = agora_br()
+        
+        texto = (
+            f"**RELATÓRIO DE PERÍCIA INVESTIGATIVA Nº {num}**\n\n"
+            f"**PERITO RESPONSÁVEL:**\n{interaction.user.mention}\n\n"
+            f"**MATERIAL APREENDIDO:**\n{self.material.value}\n\n"
+            f"**LOCAL:**\n{self.local.value}\n\n"
+            f"**PROPRIETÁRIO:**\n{self.proprietario.value or 'Não informado'}\n\n"
+            f"**TELEFONE:**\n{self.telefone.value or 'Não informado'}\n\n"
+            f"**RG / PLACA / MODELO:**\n{self.rg_doc.value or 'Não informado'}\n\n"
+            f"**RELATO DOS FATOS:**\n{self.relato.value}\n\n"
+            f"**DATA:** {data_hora.split()[0]} | **HORÁRIO:** {data_hora.split()[1]}"
+        )
+        await finalizar_e_postar_relatorio(interaction, "diario", texto)
+
+
+@bot.tree.command(name="painel-relatorios", description="Envia o painel com os Relatórios Operacionais.")
+async def painel_relatorios(interaction: discord.Interaction):
+    if not usuario_tem_admin(interaction.user):
+        return await interaction.response.send_message("❌ Apenas membros autorizados podem usar este comando.", ephemeral=True)
+        
+    embed = discord.Embed(
+        title="📑 PAINEL DE RELATÓRIOS OPERACIONAIS",
+        description=(
+            "Selecione uma das opções abaixo para iniciar um procedimento operacional.\n\n"
+            "👀 **TOCAIA:** Registrar vigilâncias em locais de interesse.\n"
+            "🚔 **OLB:** Registro de emboscadas e operações planejadas.\n"
+            "🔬 **PERÍCIA EXTERNA:** Análises e levantamentos periciais externos.\n"
+            "📑 **RELATÓRIO DIÁRIO:** Consolidação de perícias investigativas realizadas."
+        ),
+        color=discord.Color.blurple()
+    )
+    embed.set_footer(text="DICOR • Sistema Operacional Seguro")
+    await interaction.response.send_message(embed=embed, view=RelatoriosPainelView())
+
+# =====================================================
+# MAIN
+# =====================================================async def main():
     carregar_boletins_pendentes_memoria()
     garantir_56_organizacoes()
     garantir_senha_catalogo()
