@@ -4813,13 +4813,51 @@ async def on_ready():
 # MAIN
 # =====================================================
 
+@bot.event
+async def on_ready():
+    global comandos_ja_sincronizados
+    
+    # 1. ATIVA A PERSISTÊNCIA DOS BOTÕES DO PAINEL DE RELATÓRIOS
+    try:
+        bot.add_view(RelatoriosPainelView())
+        print("✅ Persistência do Painel de Relatórios Operacionais carregada com sucesso!")
+    except Exception as e:
+        print(f"Aviso ao carregar persistência do painel: {e}")
+
+    # Lógica de sincronização do bot
+    try:
+        if GUILD_ID > 0:
+            guild = discord.Object(id=GUILD_ID)
+            # Copia os comandos globais para o servidor para atualizar instantaneamente
+            bot.tree.copy_global_to(guild=guild)
+            comandos_servidor = await bot.tree.sync(guild=guild)
+            
+            # Limpa comandos globais antigos para tirar duplicados do Discord
+            bot.tree.clear_commands(guild=None)
+            comandos_globais = await bot.tree.sync()
+
+            print(f"Comandos sincronizados no servidor: {len(comandos_servidor)}")
+            print(f"Comandos globais antigos limpos: {len(comandos_globais)}")
+            print("Comandos ativos:", ", ".join(f"/{cmd.name}" for cmd in comandos_servidor))
+        else:
+            comandos_globais = await bot.tree.sync()
+            print(f"Comandos sincronizados globalmente: {len(comandos_globais)}")
+            print("AVISO: GUILD_ID está 0. Os comandos podem demorar para aparecer no Discord.")
+
+        comandos_ja_sincronizados = True
+    except Exception as e:
+        print(f"Erro ao sincronizar comandos: {e}")
+
+    print('VERSAO COMPLETA: mesas | procurados | catalogo | boletins | organizacoes | relatorios')
+    print(f"Bot online como {bot.user}")
+
 # =====================================================
 # SISTEMA DE PAINEL DE RELATÓRIOS OPERACIONAIS (COMPLETO)
 # =====================================================
 
 RELATORIOS_CONTADOR_JSON = DATA_DIR / "relatorios_contador.json"
 
-# Definição dos canais específicos informados por você
+# Canais informados para publicação automática
 CANAIS_RELATORIOS = {
     "tocaia": 1490200477248520333,
     "olb": 1490200479995789374,
@@ -4846,7 +4884,6 @@ class RelatoriosPainelView(discord.ui.View):
         if not guild:
             return None
         
-        # Define as permissões: fecha para @everyone e abre totalmente para quem criou mandar mensagens, fotos e links
         overwrites = {
             guild.default_role: discord.PermissionOverwrite(view_channel=False),
             interaction.user: discord.PermissionOverwrite(
@@ -4862,11 +4899,7 @@ class RelatoriosPainelView(discord.ui.View):
             if 'cargos_equipe_permissoes' in globals():
                 overwrites = cargos_equipe_permissoes(guild)
                 overwrites[interaction.user] = discord.PermissionOverwrite(
-                    view_channel=True, 
-                    send_messages=True, 
-                    attach_files=True, 
-                    embed_links=True, 
-                    read_message_history=True
+                    view_channel=True, send_messages=True, attach_files=True, embed_links=True, read_message_history=True
                 )
         except Exception:
             pass
@@ -4921,7 +4954,7 @@ class RelatoriosPainelView(discord.ui.View):
     @discord.ui.button(label="📑 RELATÓRIO DIÁRIO", style=discord.ButtonStyle.secondary, custom_id="rel_btn_diario")
     async def btn_diario(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(ephemeral=True)
-        canal = await self.criar_canal_tempor
+        canal = await self.criar_canal_temporario
 async def main():
     carregar_boletins_pendentes_memoria()
     garantir_56_organizacoes()
