@@ -4853,13 +4853,12 @@ async def on_ready():
     print(f"Bot online como {bot.user}")
 
 # =====================================================
-# SISTEMA DE PAINEL DE RELATÓRIOS OPERACIONAIS (ATUALIZADO)
+# SISTEMA DE PAINEL DE RELATÓRIOS OPERACIONAIS (CORRIGIDO)
 # =====================================================
 
 RELATORIOS_CONTADOR_JSON = DATA_DIR / "relatorios_contador.json"
 CATEGORIA_RELATORIOS_TEMPORARIOS = 1490200421661147187
 
-# Canais informados para publicação automática definitiva
 CANAIS_RELATORIOS = {
     "tocaia": 1490200477248520333,
     "olb": 1490200479995789374,
@@ -4871,7 +4870,6 @@ def obter_proximo_numero_relatorio(tipo_relatorio: str) -> str:
     contadores = carregar_json(RELATORIOS_CONTADOR_JSON, {})
     if not isinstance(contadores, dict):
         contadores = {}
-    
     proximo = contadores.get(tipo_relatorio, 0) + 1
     contadores[tipo_relatorio] = proximo
     salvar_json(RELATORIOS_CONTADOR_JSON, contadores)
@@ -4886,18 +4884,12 @@ class RelatoriosPainelView(View):
         if not guild:
             return None
         
-        # Permissões: apenas o autor e os cargos administrativos/equipe podem ver o canal
         overwrites = {
             guild.default_role: discord.PermissionOverwrite(view_channel=False),
             interaction.user: discord.PermissionOverwrite(
-                view_channel=True,
-                send_messages=True,
-                attach_files=True,
-                embed_links=True,
-                read_message_history=True
+                view_channel=True, send_messages=True, attach_files=True, embed_links=True, read_message_history=True
             )
         }
-        
         try:
             if 'cargos_equipe_permissoes' in globals():
                 overwrites = cargos_equipe_permissoes(guild)
@@ -4911,12 +4903,7 @@ class RelatoriosPainelView(View):
         nome_canal = f"relatorio-{tipo_nome}-{interaction.user.name}".lower().replace(" ", "-")
         
         try:
-            canal = await guild.create_text_channel(
-                name=nome_canal,
-                category=categoria,
-                overwrites=overwrites,
-                reason="Abertura de canal temporário de relatório."
-            )
+            canal = await guild.create_text_channel(name=nome_canal, category=categoria, overwrites=overwrites, reason="Abertura de canal temporário de relatório.")
             return canal
         except Exception as e:
             print(f"Erro crítico ao criar canal de relatório: {e}")
@@ -4928,21 +4915,19 @@ class RelatoriosPainelView(View):
         if not canal:
             return await interaction.followup.send("❌ Não foi possível criar o canal temporário. Verifique as permissões da categoria.", ephemeral=True)
         
-        await interaction.followup.send(f"✅ Canal de relatório criado com sucesso: {canal.mention}", ephemeral=True)
+        await interaction.followup.send(f"✅ Canal de relatório criado: {canal.mention}", ephemeral=True)
         
-        # Mensagem inicial dentro do canal temporário bem estruturada
         embed = discord.Embed(
             title=f"📝 Formulário — {titulo_bonito}",
             description=(
                 f"Bem-vindo ao seu canal temporário de relatório, {interaction.user.mention}.\n\n"
                 "**Instruções:**\n"
                 "1. Clique no botão abaixo para abrir o formulário e preencher as informações.\n"
-                "2. Após enviar o formulário, utilize este canal para enviar imagens, prints, links ou provas adicionais relevantes antes do encerramento."
+                "2. Após enviar o formulário, utilize este canal para enviar imagens, prints ou provas adicionais desejadas antes do encerramento."
             ),
             color=discord.Color.blue()
         )
         embed.set_footer(text="DICOR • Sistema de Relatórios")
-        
         await canal.send(content=interaction.user.mention, embed=embed, view=IniciarFormularioRelatorioView(tipo))
 
     @discord.ui.button(label="👀 TOCAIA", style=discord.ButtonStyle.secondary, custom_id="rel_btn_tocaia")
@@ -4961,29 +4946,38 @@ class RelatoriosPainelView(View):
     async def btn_diario(self, interaction: discord.Interaction, button: Button):
         await self.gerenciar_abertura_ticket(interaction, "diario", "Relatório Diário de Perícia")
 
-
 class IniciarFormularioRelatorioView(View):
-    def __init__(self, tipo: str):
+    def __init__(self, tipo: str = "tocaia"):
         super().__init__(timeout=None)
         self.tipo = tipo
 
     @discord.ui.button(label="✍️ Preencher Formulário", style=discord.ButtonStyle.primary, custom_id="rel_btn_preencher")
     async def preencher(self, interaction: discord.Interaction, button: Button):
-        if self.tipo == "tocaia":
-            await interaction.response.send_modal(TocaiaModal())
-        elif self.tipo == "olb":
-            await interaction.response.send_modal(OlbModal())
-        elif self.tipo == "pericia_externa":
-            await interaction.response.send_modal(PericiaExternaModal())
-        elif self.tipo == "diario":
-            await interaction.response.send_modal(RelatorioDiarioModal())
+        # Detecta dinamicamente o tipo baseado no nome do canal se o estado da view for resetado
+        tipo_atual = self.tipo
+        nome_canal = interaction.channel.name if interaction.channel else ""
+        if "olb" in nome_canal:
+            tipo_atual = "olb"
+        elif "pericia" in nome_canal or "externa" in nome_canal:
+            tipo_atual = "pericia_externa"
+        elif "diario" in nome_canal:
+            tipo_atual = "diario"
+        elif "tocaia" in nome_canal:
+            tipo_atual = "tocaia"
 
+        if tipo_atual == "tocaia":
+            await interaction.response.send_modal(TocaiaModal())
+        elif tipo_atual == "olb":
+            await interaction.response.send_modal(OlbModal())
+        elif tipo_atual == "pericia_externa":
+            await interaction.response.send_modal(PericiaExternaModal())
+        elif tipo_atual == "diario":
+            await interaction.response.send_modal(RelatorioDiarioModal())
 
 async def finalizar_e_postar_relatorio(interaction: discord.Interaction, tipo: str, texto_conteudo: str):
     canal_id = CANAIS_RELATORIOS.get(tipo)
     canal_destino = interaction.guild.get_channel(canal_id) if interaction.guild and canal_id else None
     
-    # Coleta anexos/provas que a pessoa mandou no canal temporário antes de fechar
     anexos_encontrados = []
     canal_atual = interaction.channel
     if isinstance(canal_atual, discord.TextChannel):
@@ -4991,7 +4985,6 @@ async def finalizar_e_postar_relatorio(interaction: discord.Interaction, tipo: s
             for anexo in msg.attachments:
                 anexos_encontrados.append(anexo.url)
     
-    # Adiciona a lista de provas encontradas no texto final do relatório
     if anexos_encontrados:
         texto_conteudo += "\n\n**🔗 REGISTROS FOTOGRÁFICOS / PROVAS EM ANEXO:**\n" + "\n".join([f"• {url}" for url in anexos_encontrados])
     
@@ -5005,6 +4998,114 @@ async def finalizar_e_postar_relatorio(interaction: discord.Interaction, tipo: s
             await canal_atual.delete(reason="Relatório operacional concluído e armazenado.")
         except Exception:
             pass
+
+class TocaiaModal(Modal, title="Relatório de Tocaia"):
+    local = TextInput(label="Local", placeholder="Local de interesse observado", max_length=150)
+    tempo = TextInput(label="Tempo de tocaia", placeholder="Duração da vigilância", max_length=100)
+    infos = TextInput(label="Informações obtidas", style=discord.TextStyle.paragraph, placeholder="Detalhes colhidos durante a tocaia", max_length=1000)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        num = obter_proximo_numero_relatorio("tocaia")
+        data_hora = agora_br()
+        texto = (
+            f"━" * 15 + f"\n**👀 RELATÓRIO DE TOCAIA Nº {num}**\n" + f"━" * 15 + "\n"
+            f"**👤 RESPONSÁVEL:** {interaction.user.mention}\n"
+            f"**📍 LOCAL OBSERVADO:** {self.local.value}\n"
+            f"**⏱️ TEMPO DE VIGILÂNCIA:** {self.tempo.value}\n\n"
+            f"**📝 INFORMAÇÕES OBTIDAS:**\n{self.infos.value}\n\n"
+            f"📅 *Enviado em {data_hora.split()[0]} às {data_hora.split()[1]}*"
+        )
+        await finalizar_e_postar_relatorio(interaction, "tocaia", texto)
+
+class OlbModal(Modal, title="Relatório de OLB"):
+    dicors = TextInput(label="DICORs envolvidos", placeholder="Agentes participantes da operação", max_length=200)
+    relato = TextInput(label="Relatório da emboscada", style=discord.TextStyle.paragraph, placeholder="Como ocorreu a operação", max_length=1000)
+    itens = TextInput(label="Itens ilegais apreendidos", style=discord.TextStyle.paragraph, placeholder="Lista de itens retidos", max_length=500)
+    pericia = TextInput(label="Houve perícia?", placeholder="Sim / Não", max_length=150)
+    prejuizo = TextInput(label="Prejuízo estimado", placeholder="Valor aproximado do impacto", max_length=100)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        num = obter_proximo_numero_relatorio("olb")
+        data_hora = agora_br()
+        texto = (
+            f"━" * 15 + f"\n**🚔 RELATÓRIO DE OLB Nº {num}**\n" + f"━" * 15 + "\n"
+            f"**👤 RESPONSÁVEL:** {interaction.user.mention}\n"
+            f"**👥 AGENTES ENVOLVIDOS:** {self.dicors.value}\n\n"
+            f"**💥 RELATO DA OPERAÇÃO:**\n{self.relato.value}\n\n"
+            f"**📦 APREENSÕES:**\n{self.itens.value}\n\n"
+            f"**🔬 REALIZADA PERÍCIA:** {self.pericia.value}\n"
+            f"**💰 PREJUÍZO ESTIMADO:** ≈ {self.prejuizo.value}\n\n"
+            f"📅 *Enviado em {data_hora.split()[0]} às {data_hora.split()[1]}*"
+        )
+        await finalizar_e_postar_relatorio(interaction, "olb", texto)
+
+class PericiaExternaModal(Modal, title="Perícia Externa"):
+    codigo = TextInput(label="Código da ocorrência", placeholder="Número de referência", max_length=100)
+    local = TextInput(label="Local", placeholder="Local da perícia", max_length=150)
+    suspeito = TextInput(label="Suspeito", placeholder="Nome ou descrição", max_length=150, required=False)
+    conclusao = TextInput(label="Conclusão", style=discord.TextStyle.paragraph, placeholder="Resultados das análises", max_length=1000)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        num = obter_proximo_numero_relatorio("pericia_externa")
+        data_hora = agora_br()
+        texto = (
+            f"━" * 15 + f"\n**🔬 RELATÓRIO DE PERÍCIA EXTERNA Nº {num}**\n" + f"━" * 15 + "\n"
+            f"**👤 PERITO:** {interaction.user.mention}\n"
+            f"**🔢 CÓD. OCORRÊNCIA:** {self.codigo.value}\n"
+            f"**📍 LOCALIZAÇÃO:** {self.local.value}\n"
+            f"**👤 SUSPEITO ALVO:** {self.suspeito.value or 'Não identificado'}\n\n"
+            f"**📋 CONCLUSÃO DO LAUDO:**\n{self.conclusao.value}\n\n"
+            f"📅 *Enviado em {data_hora.split()[0]} às {data_hora.split()[1]}*"
+        )
+        await finalizar_e_postar_relatorio(interaction, "pericia_externa", texto)
+
+class RelatorioDiarioModal(Modal, title="Relatório Diário de Perícia"):
+    material = TextInput(label="Material apreendido", style=discord.TextStyle.paragraph, placeholder="Descrição detalhada", max_length=400)
+    local = TextInput(label="Local", placeholder="Local dos fatos", max_length=150)
+    proprietario = TextInput(label="Proprietário", placeholder="Nome completo", max_length=150, required=False)
+    telefone = TextInput(label="Telefone", placeholder="Contato", max_length=50, required=False)
+    rg_doc = TextInput(label="RG / Placa / Modelo", placeholder="Documentos e Veículo", max_length=150, required=False)
+    relato = TextInput(label="Relato dos fatos", style=discord.TextStyle.paragraph, placeholder="Resumo dos acontecimentos", max_length=1000)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        num = obter_proximo_numero_relatorio("diario")
+        data_hora = agora_br()
+        texto = (
+            f"━" * 15 + f"\n**📑 RELATÓRIO DE PERÍCIA INVESTIGATIVA Nº {num}**\n" + f"━" * 15 + "\n"
+            f"**👤 PERITO RESPONSÁVEL:** {interaction.user.mention}\n"
+            f"**📍 LOCAL DOS FATOS:** {self.local.value}\n\n"
+            f"**📦 MATERIAL ANALISADO:**\n{self.material.value}\n\n"
+            f"**🪪 DADOS COMPLEMENTARES:**\n"
+            f"• Proprietário: {self.proprietario.value or 'Não informado'}\n"
+            f"• Contato: {self.telefone.value or 'Não informado'}\n"
+            f"• Doc/Veículo: {self.rg_doc.value or 'Não informado'}\n\n"
+            f"**📖 RELATO DOS FATOS:**\n{self.relato.value}\n\n"
+            f"📅 *Enviado em {data_hora.split()[0]} às {data_hora.split()[1]}*"
+        )
+        await finalizar_e_postar_relatorio(interaction, "diario", texto)
+
+@bot.tree.command(name="painel-relatorios", description="Envia o painel com os Relatórios Operacionais.")
+async def painel_relatorios(interaction: discord.Interaction):
+    if not usuario_tem_admin(interaction.user):
+        return await interaction.response.send_message("❌ Apenas membros autorizados podem usar este comando.", ephemeral=True)
+        
+    embed = discord.Embed(
+        title="📑 PAINEL DE RELATÓRIOS OPERACIONAIS",
+        description=(
+            "Selecione uma das opções abaixo para iniciar um procedimento operacional.\n\n"
+            "👀 **TOCAIA:** Registrar vigilâncias em locais de interesse.\n"
+            "🚔 **OLB:** Registro de emboscadas e operações planejadas.\n"
+            "🔬 **PERÍCIA EXTERNA:** Análises e levantamentos periciais externos.\n"
+            "📑 **RELATÓRIO DIÁRIO:** Consolidação de perícias investigativas realizadas."
+        ),
+        color=discord.Color.blurple()
+    )
+    embed.set_footer(text="DICOR • Sistema Operacional Seguro")
+    await interaction.response.send_message(embed=embed, view=RelatoriosPainelView())
 
 # =====================================================
 # MAIN
