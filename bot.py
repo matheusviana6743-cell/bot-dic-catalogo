@@ -4797,10 +4797,14 @@ async def on_ready():
     
     # 1. ATIVA A PERSISTÊNCIA DOS BOTÕES DE TODOS OS PAINÉIS
     try:
-        # Painel Novo de Relatórios
+        # Painel de Relatórios e Sub-botões dos canais temporários
         bot.add_view(RelatoriosPainelView())
+        bot.add_view(IniciarFormularioRelatorioView(tipo="tocaia"))
+        bot.add_view(IniciarFormularioRelatorioView(tipo="olb"))
+        bot.add_view(IniciarFormularioRelatorioView(tipo="pericia_externa"))
+        bot.add_view(IniciarFormularioRelatorioView(tipo="diario"))
         
-        # Painel Antigo de Boletins (Para resolver o "Esta interação falhou")
+        # Painel de Boletins
         bot.add_view(PainelBoletimView())
         bot.add_view(IniciarBoletimView())
         bot.add_view(InformarRGBoletimView())
@@ -4815,6 +4819,10 @@ async def on_ready():
         bot.add_view(PainelMesasView())
         bot.add_view(FecharMesaView())
         bot.add_view(PainelOrganizacoesView())
+        
+        print("✅ Todas as persistências de botões (Relatórios com Tickets, Boletins e Sistemas) foram carregadas!")
+    except Exception as e:
+        print(f"Aviso ao carregar persistência dos painéis: {e}")
         
         print("✅ Todas as persistências de botões (Relatórios, Boletins e Sistemas) foram carregadas!")
     except Exception as e:
