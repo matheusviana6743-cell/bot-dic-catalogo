@@ -1957,7 +1957,20 @@ async def fechar_mesa_core(interaction: discord.Interaction, motivo: str = "Fech
     except Exception:
         pass
 
-    await canal.send("Mesa encerrada com sucesso e Dossie Oficial arquivado.")
+    # Altera a mensagem do painel para substituir o botao vermelho pelo verde de reabrir
+    embed_sucesso = discord.Embed(
+        title="DIRETORIA DE INVESTIGACAO E COMBATE AO CRIME ORGANIZADO",
+        description="Esta mesa foi encerrada e o Dossie foi consolidado com sucesso no arquivo central.",
+        color=discord.Color.red()
+    )
+    
+    try:
+        if interaction.message:
+            await interaction.message.edit(content="Esta mesa encontra-se arquivada.", embed=embed_sucesso, view=ReabrirMesaView())
+        else:
+            await canal.send(content="Esta mesa encontra-se arquivada.", embed=embed_sucesso, view=ReabrirMesaView())
+    except Exception:
+        await canal.send(content="Esta mesa encontra-se arquivada.", embed=embed_sucesso, view=ReabrirMesaView())
 
 async def reabrir_mesa_core(interaction: discord.Interaction, canal: discord.TextChannel):
     mesa = buscar_mesa_por_canal(canal.id)
