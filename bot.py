@@ -4949,6 +4949,19 @@ async def estatisticas(interaction: discord.Interaction):
 
 comandos_ja_sincronizados = False
 
+class ReabrirMesaView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(
+        label="Reabrir Mesa", 
+        emoji="🔓", 
+        style=discord.ButtonStyle.green, 
+        custom_id="dic_reabrir_mesa_botao"
+    )
+    async def reabrir(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await reabrir_mesa_core(interaction, interaction.channel)
+
 @bot.event
 async def on_ready():
     global comandos_ja_sincronizados
@@ -4976,6 +4989,7 @@ async def on_ready():
         bot.add_view(FinalizarProcuradoView())
         bot.add_view(PainelMesasView())
         bot.add_view(FecharMesaView())
+        bot.add_view(ReabrirMesaView())
         bot.add_view(PainelOrganizacoesView())
         
         print("✅ Todas as persistências de botões (Relatórios com Tickets, Boletins e Sistemas) foram carregadas!")
