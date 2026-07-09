@@ -4967,14 +4967,14 @@ class ReabrirMesaView(discord.ui.View):
         super().__init__(timeout=None)
 
     @discord.ui.button(
-        label="Reabrir Mesa", 
-        emoji="🔓", 
-        style=discord.ButtonStyle.green, 
+        label="Reabrir Mesa",
+        emoji="🔓",
+        style=discord.ButtonStyle.green,
         custom_id="dic_reabrir_mesa_botao"
     )
     async def reabrir(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Garante que a função interna recebe a interação e o canal de texto corretamente
         await reabrir_mesa_core(interaction, interaction.channel)
-
 @bot.event
 async def on_ready():
     global comandos_ja_sincronizados
