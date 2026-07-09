@@ -1714,12 +1714,42 @@ class CriarMesaModal(Modal, title="Criar Mesa de Investigação"):
 
 
 class FecharMesaView(View):
-    def __init__(self):
+    def __init__(self, dados_mesa=None):
         super().__init__(timeout=None)
+        self.dados_mesa = dados_mesa or {}
 
     @discord.ui.button(label="Fechar Mesa", emoji="🔒", style=discord.ButtonStyle.red, custom_id="dic_fechar_mesa_botao")
     async def fechar(self, interaction: discord.Interaction, button: Button):
-        await fechar_mesa_core(interaction, motivo="Fechada pelo botão")
+        # Fallback para recuperar os dados se a memória do bot limpar
+        if not self.dados_mesa:
+            try:
+                mesa_banco = buscar_mesa_por_canal(interaction.channel.id)
+                if mesa_banco:
+                    self.dados_mesa = {
+                        "nome": f"OPERAÇÃO {mesa_banco.get('familia', 'PADRÃO').upper()}",
+                        "comunidade": mesa_banco.get('familia', 'Mapeada em logs'),
+                        "delegado": mesa_banco.get('autor_name', 'Superintendência'),
+                        "data_abertura": mesa_banco.get('criada_em', datetime.now().strftime('%d/%m/%Y')),
+                        "processo": str(interaction.channel.id)[-6:]
+                    }
+            except Exception:
+                pass
+
+        if not self.dados_mesa:
+            self.dados_mesa = {
+                "nome": interaction.channel.name.upper(),
+                "comunidade": "Setor Mapeado em Campo",
+                "delegado": interaction.user.display_name,
+                "data_abertura": datetime.now().strftime('%d/%m/%Y'),
+                "processo": str(interaction.channel.id)[-6:]
+            }
+
+        # Abre a confirmação e impede o fechamento direto por acidente
+        await interaction.response.send_message(
+            content="⚠️ **Confirmação DICOR:** Você tem certeza que deseja encerrar esta mesa tática e consolidar o Dossiê Operacional?",
+            view=ConfirmacaoFecharMesaView(self.dados_mesa),
+            ephemeral=True
+        )
 
 
 class PainelMesasView(View):
