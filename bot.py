@@ -24,6 +24,52 @@ from discord.ui import View, Button, Modal, TextInput
 from dotenv import load_dotenv
 from aiohttp import web
 
+# Dependências do Dossiê Operacional Automático DICOR
+# Railway/Render: adicione no requirements.txt:
+# reportlab
+# python-docx
+# qrcode
+# pillow
+import io
+import math
+from collections import defaultdict
+
+try:
+    import qrcode
+    from PIL import Image as PILImage
+    from reportlab.lib import colors
+    from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY, TA_LEFT, TA_RIGHT
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.units import cm, mm
+    from reportlab.pdfgen import canvas
+    from reportlab.platypus import (
+        SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle,
+        PageBreak, Image as RLImage, KeepTogether
+    )
+except Exception:
+    qrcode = None
+    PILImage = None
+    colors = None
+    TA_CENTER = TA_JUSTIFY = TA_LEFT = TA_RIGHT = 0
+    A4 = None
+    cm = mm = 1
+    canvas = None
+    SimpleDocTemplate = Paragraph = Spacer = Table = TableStyle = PageBreak = RLImage = KeepTogether = None
+    getSampleStyleSheet = ParagraphStyle = None
+
+try:
+    from docx import Document
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from docx.enum.table import WD_TABLE_ALIGNMENT, WD_CELL_VERTICAL_ALIGNMENT
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
+    from docx.shared import Inches, Pt, RGBColor
+except Exception:
+    Document = None
+    WD_ALIGN_PARAGRAPH = WD_TABLE_ALIGNMENT = WD_CELL_VERTICAL_ALIGNMENT = None
+    OxmlElement = qn = Inches = Pt = RGBColor = None
+
 # =====================================================
 # CONFIGURACAO
 # =====================================================
@@ -47,6 +93,12 @@ BOLETIM_TEMP_CATEGORY_ID = int(os.getenv("BOLETIM_TEMP_CATEGORY_ID", "0") or 0)
 CATEGORIA_MESAS_ABERTAS_ID = int(os.getenv("CATEGORIA_MESAS_ABERTAS_ID", "1490200456855552192") or 1490200456855552192)
 CATEGORIA_MESAS_FECHADAS_ID = int(os.getenv("CATEGORIA_MESAS_FECHADAS_ID", "1515165416815722586") or 1515165416815722586)
 BACKUP_CHANNEL_ID = int(os.getenv("BACKUP_CHANNEL_ID", "1515165673276440677") or 1515165673276440677)
+
+# Dossiê Operacional Automático DICOR
+# Coloque no .env/Railway para escolher o canal que receberá PDF + DOCX:
+# DOSSIE_CHANNEL_ID=ID_DO_CANAL_DOS_DOSSIES
+DOSSIE_CHANNEL_ID = int(os.getenv("DOSSIE_CHANNEL_ID", str(BACKUP_CHANNEL_ID)) or BACKUP_CHANNEL_ID)
+DOSSIE_HISTORY_LIMIT = int(os.getenv("DOSSIE_HISTORY_LIMIT", "0") or 0)  # 0 = varrer todo o histórico disponível
 
 # Catalogo
 CATALOG_PUBLIC_URL = os.getenv("CATALOG_PUBLIC_URL", "http://127.0.0.1:8000/").strip()
@@ -81,8 +133,10 @@ BOLETINS_CONTADOR_JSON = DATA_DIR / "boletins_contador.json"
 CATALOG_ADMIN_JSON = DATA_DIR / "catalog_admin.json"
 ORGANIZACOES_JSON = DATA_DIR / "organizacoes.json"
 HISTORICO_ORGANIZACOES_JSON = DATA_DIR / "historico_organizacoes.json"
+DOSSIES_JSON = DATA_DIR / "dossies_operacionais.json"
+DOSSIES_DIR = DATA_DIR / "dossies"
 
-for pasta in [DATA_DIR, PUBLIC_DIR, UPLOADS_DIR, BACKUP_DIR]:
+for pasta in [DATA_DIR, PUBLIC_DIR, UPLOADS_DIR, BACKUP_DIR, DOSSIES_DIR]:
     pasta.mkdir(exist_ok=True)
 
 # =====================================================
@@ -1729,7 +1783,7 @@ class FecharMesaView(View):
                         "nome": f"OPERAÇÃO {mesa_banco.get('familia', 'PADRÃO').upper()}",
                         "comunidade": mesa_banco.get('familia', 'Mapeada em logs'),
                         "delegado": mesa_banco.get('autor_name', 'Superintendência'),
-                        "data_abertura": mesa_banco.get('criada_em', datetime.now().strftime('%d/%m/%Y')),
+                        "data_abertura": mesa_banco.get('criada_em', datetime.datetime.now().strftime('%d/%m/%Y')),
                         "processo": str(interaction.channel.id)[-6:]
                     }
             except Exception:
@@ -1740,7 +1794,7 @@ class FecharMesaView(View):
                 "nome": interaction.channel.name.upper(),
                 "comunidade": "Setor Mapeado em Campo",
                 "delegado": interaction.user.display_name,
-                "data_abertura": datetime.now().strftime('%d/%m/%Y'),
+                "data_abertura": datetime.datetime.now().strftime('%d/%m/%Y'),
                 "processo": str(interaction.channel.id)[-6:]
             }
 
@@ -1752,6 +1806,49 @@ class FecharMesaView(View):
         )
 
 
+class ConfirmacaoFecharMesaView(View):
+    def __init__(self, dados_mesa=None):
+        super().__init__(timeout=120)
+        self.dados_mesa = dados_mesa or {}
+
+    @discord.ui.button(
+        label="Confirmar Encerramento",
+        emoji="✅",
+        style=discord.ButtonStyle.danger,
+        custom_id="dic_confirmar_fechamento_mesa"
+    )
+    async def confirmar(self, interaction: discord.Interaction, button: Button):
+        try:
+            for item in self.children:
+                item.disabled = True
+            if interaction.message:
+                await interaction.message.edit(
+                    content="⏳ Encerramento confirmado. Coletando dados e gerando o Dossiê Operacional...",
+                    view=self,
+                )
+        except Exception:
+            pass
+
+        await fechar_mesa_core(
+            interaction,
+            motivo="Fechada por botão",
+            dados_confirmacao=self.dados_mesa,
+        )
+
+    @discord.ui.button(
+        label="Cancelar",
+        emoji="❌",
+        style=discord.ButtonStyle.secondary,
+        custom_id="dic_cancelar_fechamento_mesa"
+    )
+    async def cancelar(self, interaction: discord.Interaction, button: Button):
+        await interaction.response.edit_message(
+            content="❌ Encerramento cancelado. A mesa continua aberta.",
+            view=None,
+        )
+
+
+
 class PainelMesasView(View):
     def __init__(self):
         super().__init__(timeout=None)
@@ -1760,9 +1857,28 @@ class PainelMesasView(View):
     async def criar(self, interaction: discord.Interaction, button: Button):
         await interaction.response.send_modal(CriarMesaModal())
 
-    @discord.ui.button(label="🔒 Fechar Mesa",emoji="🔒",style=discord.ButtonStyle.red,custom_id="dic_fechar_mesa")
+    @discord.ui.button(label="🔒 Fechar Mesa", emoji="🔒", style=discord.ButtonStyle.red, custom_id="dic_fechar_mesa")
     async def fechar_mesa(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message("⚠️ Confirme o encerramento da mesa.",ephemeral=True)
+        mesa = buscar_mesa_por_canal(interaction.channel.id) if interaction.channel else None
+        if not mesa:
+            await interaction.response.send_message(
+                "⚠️ Para fechar uma mesa, use este botão dentro do canal da mesa de investigação ou use `/fecharmesa` no canal correto.",
+                ephemeral=True,
+            )
+            return
+        dados = {
+            "nome": f"OPERAÇÃO {mesa.get('familia', 'PADRÃO').upper()}",
+            "comunidade": mesa.get('familia', 'Mapeada em logs'),
+            "delegado": mesa.get('autor_nome', 'Superintendência'),
+            "data_abertura": mesa.get('criada_em', agora_br()),
+            "processo": f"PF-DICOR-{interaction.channel.id}",
+            "numero": f"INV-{str(interaction.channel.id)[-6:]}",
+        }
+        await interaction.response.send_message(
+            "⚠️ **Confirmação DICOR:** deseja encerrar esta mesa e gerar o Dossiê Operacional?",
+            view=ConfirmacaoFecharMesaView(dados),
+            ephemeral=True,
+        )
 
     @discord.ui.button(label="Reabrir Mesa", emoji="🔓", style=discord.ButtonStyle.blurple, custom_id="dic_reabrir_mesa")
     async def reabrir(self, interaction: discord.Interaction, button: Button):
@@ -1860,120 +1976,708 @@ async def criar_mesa_core(interaction: discord.Interaction, apelido: str, famili
     )
     await responder_interacao(interaction, f"✅ Mesa criada: {canal.mention}", ephemeral=True)
 
-async def fechar_mesa_core(interaction: discord.Interaction, motivo: str = "Fechada"):
+# =====================================================
+# DOSSIÊ OPERACIONAL AUTOMÁTICO DICOR
+# =====================================================
+
+URL_REGEX = re.compile(r"https?://[^\s<>()]+", flags=re.I)
+
+
+def carregar_dossies() -> List[Dict[str, Any]]:
+    dados = carregar_json(DOSSIES_JSON, [])
+    return dados if isinstance(dados, list) else []
+
+
+def salvar_dossies(lista: List[Dict[str, Any]]) -> None:
+    salvar_json(DOSSIES_JSON, lista)
+
+
+def registrar_dossie_operacional(registro: Dict[str, Any]) -> None:
+    lista = carregar_dossies()
+    lista.append(registro)
+    salvar_dossies(lista[-500:])
+
+
+def formatar_data_discord(dt: Optional[datetime.datetime]) -> str:
+    try:
+        if dt is None:
+            return agora_br()
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=datetime.timezone.utc)
+        tz = datetime.timezone(datetime.timedelta(hours=-3))
+        return dt.astimezone(tz).strftime("%d/%m/%Y %H:%M")
+    except Exception:
+        return agora_br()
+
+
+def texto_limpo_dossie(texto: Any, limite: int = 2500) -> str:
+    valor = str(texto or "").replace("\x00", " ").strip()
+    valor = re.sub(r"[ \t]+", " ", valor)
+    valor = re.sub(r"\n{4,}", "\n\n", valor)
+    if limite and len(valor) > limite:
+        valor = valor[:limite - 20].rstrip() + "..."
+    return valor
+
+
+def normalizar_busca(texto: Any) -> str:
+    valor = str(texto or "").lower()
+    valor = unicodedata.normalize("NFKD", valor).encode("ascii", "ignore").decode("ascii")
+    return valor
+
+
+def nome_arquivo_seguro(nome: str, limite: int = 90) -> str:
+    base = slugify(Path(nome or "arquivo").stem)[:limite] or "arquivo"
+    ext = Path(nome or "").suffix.lower()
+    if not ext or len(ext) > 10:
+        ext = ".bin"
+    return base + ext
+
+
+def tipo_anexo_dossie(anexo: discord.Attachment) -> str:
+    content_type = (anexo.content_type or "").lower()
+    ext = Path(anexo.filename or "").suffix.lower()
+    if content_type.startswith("image/") or ext in [".png", ".jpg", ".jpeg", ".webp", ".gif"]:
+        return "imagem"
+    if content_type.startswith("video/") or ext in [".mp4", ".mov", ".avi", ".mkv", ".webm"]:
+        return "video"
+    return "arquivo"
+
+
+def topico_dossie_por_nome(nome: str) -> str:
+    n = normalizar_busca(nome)
+    if "lider" in n:
+        return "liderancas"
+    if "membro" in n or "integrante" in n:
+        return "integrantes"
+    if "painel" in n:
+        return "painel"
+    if "local" in n or "base" in n or "mapa" in n:
+        return "localizacao"
+    if "farm" in n or "produc" in n or "fabric" in n or "ingrediente" in n:
+        return "producao"
+    if "bau" in n or "armazen" in n:
+        return "baus"
+    if "informante" in n:
+        return "informantes"
+    if "crime" in n:
+        return "crimes"
+    if "radio" in n:
+        return "radio"
+    if "chat" in n:
+        return "chat"
+    return "geral"
+
+
+def coletar_texto_embed(msg: discord.Message) -> str:
+    partes = [msg.content or ""]
+    for embed in msg.embeds:
+        if embed.title:
+            partes.append(embed.title)
+        if embed.description:
+            partes.append(embed.description)
+        for field in embed.fields:
+            partes.append(f"{field.name}: {field.value}")
+    return texto_limpo_dossie("\n".join([p for p in partes if p]), 5000)
+
+
+async def bloquear_mesa_para_novas_mensagens(canal: discord.TextChannel) -> None:
+    guild = canal.guild
+    try:
+        overwrite_default = canal.overwrites_for(guild.default_role)
+        overwrite_default.send_messages = False
+        overwrite_default.create_public_threads = False
+        overwrite_default.create_private_threads = False
+        overwrite_default.send_messages_in_threads = False
+        await canal.set_permissions(guild.default_role, overwrite=overwrite_default)
+    except Exception as erro:
+        await enviar_log(f"⚠️ Não consegui bloquear @everyone na mesa {canal.id}: {erro}")
+
+    # Remove envio dos usuários/cargos que já tinham overwrite no canal, mantendo o bot liberado.
+    try:
+        for alvo, overwrite in list(canal.overwrites.items()):
+            if guild.me and alvo == guild.me:
+                continue
+            overwrite.send_messages = False
+            overwrite.create_public_threads = False
+            overwrite.create_private_threads = False
+            overwrite.send_messages_in_threads = False
+            await canal.set_permissions(alvo, overwrite=overwrite)
+            await asyncio.sleep(0.05)
+    except Exception as erro:
+        await enviar_log(f"⚠️ Bloqueio parcial de permissões na mesa {canal.id}: {erro}")
+
+    if guild.me:
+        try:
+            await canal.set_permissions(
+                guild.me,
+                view_channel=True,
+                send_messages=True,
+                manage_channels=True,
+                manage_threads=True,
+                attach_files=True,
+                read_message_history=True,
+            )
+        except Exception:
+            pass
+
+
+async def listar_threads_da_mesa(canal: discord.TextChannel, mesa: Optional[Dict[str, Any]]) -> List[discord.Thread]:
+    threads: Dict[int, discord.Thread] = {}
+
+    for thread in getattr(canal, "threads", []):
+        threads[thread.id] = thread
+
+    if mesa and isinstance(mesa, dict):
+        for tid in mesa.get("topicos_ids", []) or []:
+            try:
+                tid_int = int(tid)
+            except Exception:
+                continue
+            thread = canal.guild.get_thread(tid_int) or bot.get_channel(tid_int)
+            if thread is None:
+                try:
+                    thread = await bot.fetch_channel(tid_int)
+                except Exception:
+                    thread = None
+            if isinstance(thread, discord.Thread):
+                threads[thread.id] = thread
+
+    try:
+        async for thread in canal.archived_threads(limit=100, private=False):
+            threads[thread.id] = thread
+    except Exception:
+        pass
+
+    try:
+        async for thread in canal.archived_threads(limit=100, private=True):
+            threads[thread.id] = thread
+    except Exception:
+        pass
+
+    return list(threads.values())
+
+
+async def travar_threads_mesa(threads: List[discord.Thread]) -> None:
+    for thread in threads:
+        try:
+            if thread.archived:
+                await thread.edit(archived=False)
+            await thread.edit(locked=True, reason="Mesa encerrada e dossiê operacional gerado")
+        except Exception:
+            pass
+
+
+async def salvar_anexo_dossie(anexo: discord.Attachment, pasta_evidencias: Path, indice: int) -> Optional[Path]:
+    try:
+        pasta_evidencias.mkdir(parents=True, exist_ok=True)
+        nome = f"{indice:03d}-{nome_arquivo_seguro(anexo.filename)}"
+        caminho = pasta_evidencias / nome
+        contador = 2
+        while caminho.exists():
+            caminho = pasta_evidencias / f"{indice:03d}-{contador}-{nome_arquivo_seguro(anexo.filename)}"
+            contador += 1
+        await anexo.save(str(caminho))
+        return caminho
+    except Exception as erro:
+        await enviar_log(f"⚠️ Falha ao salvar anexo `{getattr(anexo, 'filename', 'arquivo')}` no dossiê: {erro}")
+        return None
+
+
+def extrair_valor_por_rotulos(textos: List[str], rotulos: List[str], limite: int = 600) -> str:
+    for texto in textos:
+        if not texto:
+            continue
+        for rotulo in rotulos:
+            padrao = rf"(?:^|\n)\s*(?:[*_`>\-•\s]*)(?:{re.escape(rotulo)})\s*[:\-–]\s*(.+)"
+            m = re.search(padrao, texto, flags=re.I)
+            if m:
+                valor = texto_limpo_dossie(m.group(1), limite)
+                if valor:
+                    return valor
+    return "Não informado"
+
+
+def extrair_blocos_pessoas(textos: List[str], funcao_padrao: str = "Integrante") -> List[Dict[str, str]]:
+    pessoas: List[Dict[str, str]] = []
+    vistos = set()
+    for texto in textos:
+        linhas = [linha.strip(" •-*_") for linha in str(texto or "").splitlines() if linha.strip()]
+        for i, linha in enumerate(linhas):
+            m_nome = re.search(r"(?:nome|indiv[ií]duo)\s*[:\-–]\s*(.+)", linha, flags=re.I)
+            if not m_nome:
+                continue
+            janela = "\n".join(linhas[i:i + 8])
+            nome = texto_limpo_dossie(m_nome.group(1), 120)
+            rg = extrair_valor_por_rotulos([janela], ["RG", "Passaporte"], 80)
+            cargo = extrair_valor_por_rotulos([janela], ["Função", "Funcao", "Cargo", "Posição", "Posicao"], 120)
+            periculosidade = extrair_valor_por_rotulos([janela], ["Grau de periculosidade", "Periculosidade"], 80)
+            observacoes = extrair_valor_por_rotulos([janela], ["Observações", "Observacoes", "Obs"], 250)
+            chave = (normalizar_busca(nome), normalizar_busca(rg))
+            if not nome or chave in vistos:
+                continue
+            vistos.add(chave)
+            pessoas.append({
+                "nome": nome,
+                "rg": rg,
+                "cargo": cargo if cargo != "Não informado" else funcao_padrao,
+                "funcao": cargo if cargo != "Não informado" else funcao_padrao,
+                "periculosidade": periculosidade,
+                "observacoes": observacoes,
+                "foto": "",
+            })
+    return pessoas[:80]
+
+
+def filtrar_evidencias_por_topico(evidencias: List[Dict[str, Any]], topicos: List[str], limite: int = 12) -> List[Dict[str, Any]]:
+    topicos_norm = {normalizar_busca(t) for t in topicos}
+    saida = []
+    for ev in evidencias:
+        chave = normalizar_busca(ev.get("topico", ""))
+        titulo = normalizar_busca(ev.get("origem", ""))
+        if chave in topicos_norm or any(t in titulo for t in topicos_norm):
+            saida.append(ev)
+    return saida[:limite]
+
+
+def resumir_textos_topico(textos: List[str], limite: int = 1200) -> str:
+    relevantes = []
+    for texto in textos:
+        t = texto_limpo_dossie(texto, 500)
+        if not t:
+            continue
+        if "Tópicos da investigação" in t or "Envie aqui" in t or "Para encerrar esta mesa" in t:
+            continue
+        relevantes.append(t)
+    if not relevantes:
+        return "Nenhum registro textual específico foi encontrado neste tópico."
+    return texto_limpo_dossie("\n\n".join(relevantes[:8]), limite)
+
+
+def gerar_qr_code_dossie(valor: str, pasta: Path, nome: str = "qr_reabertura.png") -> Optional[Path]:
+    if qrcode is None:
+        return None
+    try:
+        qr = qrcode.QRCode(version=1, box_size=8, border=2)
+        qr.add_data(valor)
+        qr.make(fit=True)
+        img = qr.make_image(fill_color="black", back_color="white")
+        caminho = pasta / nome
+        img.save(caminho)
+        return caminho
+    except Exception:
+        return None
+
+
+async def coletar_dados_operacionais_mesa(
+    canal: discord.TextChannel,
+    mesa: Optional[Dict[str, Any]],
+    interaction: discord.Interaction,
+    pasta_dossie: Path,
+    dados_confirmacao: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    pasta_evidencias = pasta_dossie / "evidencias"
+    pasta_evidencias.mkdir(parents=True, exist_ok=True)
+
+    limite = DOSSIE_HISTORY_LIMIT if DOSSIE_HISTORY_LIMIT > 0 else None
+    threads = await listar_threads_da_mesa(canal, mesa)
+
+    mensagens: List[Dict[str, Any]] = []
+    textos_por_topico: Dict[str, List[str]] = defaultdict(list)
+    evidencias: List[Dict[str, Any]] = []
+    links: List[Dict[str, str]] = []
+    autores: Dict[int, str] = {}
+    contador_anexo = 1
+
+    async def processar_historico(entidade, origem: str):
+        nonlocal contador_anexo
+        topico = topico_dossie_por_nome(origem)
+        try:
+            async for msg in entidade.history(limit=limite, oldest_first=True):
+                if msg.author and not getattr(msg.author, "bot", False):
+                    autores[msg.author.id] = str(msg.author)
+
+                texto_msg = coletar_texto_embed(msg)
+                if texto_msg:
+                    textos_por_topico[topico].append(texto_msg)
+                    mensagens.append({
+                        "id": msg.id,
+                        "autor": str(msg.author),
+                        "autor_id": getattr(msg.author, "id", None),
+                        "data": formatar_data_discord(msg.created_at),
+                        "origem": origem,
+                        "topico": topico,
+                        "conteudo": texto_msg,
+                        "url": getattr(msg, "jump_url", ""),
+                    })
+                    for link in URL_REGEX.findall(texto_msg):
+                        links.append({
+                            "url": link.rstrip(".,)];"),
+                            "data": formatar_data_discord(msg.created_at),
+                            "autor": str(msg.author),
+                            "origem": origem,
+                        })
+
+                for anexo in msg.attachments:
+                    tipo = tipo_anexo_dossie(anexo)
+                    caminho_local = await salvar_anexo_dossie(anexo, pasta_evidencias, contador_anexo)
+                    contador_anexo += 1
+                    evidencias.append({
+                        "tipo": tipo,
+                        "arquivo": anexo.filename,
+                        "content_type": anexo.content_type or "",
+                        "url": anexo.url,
+                        "local": str(caminho_local) if caminho_local else "",
+                        "data": formatar_data_discord(msg.created_at),
+                        "autor": str(msg.author),
+                        "origem": origem,
+                        "topico": topico,
+                        "mensagem_url": getattr(msg, "jump_url", ""),
+                    })
+        except Exception as erro:
+            await enviar_log(f"⚠️ Erro ao coletar histórico de `{origem}` na mesa {canal.id}: {erro}")
+
+    await processar_historico(canal, "Canal principal")
+    for thread in threads:
+        await processar_historico(thread, thread.name)
+
+    todos_textos = [m["conteudo"] for m in mensagens]
+    dados_base = dados_confirmacao or {}
+
+    processo = str(dados_base.get("processo") or f"PF-DICOR-{canal.id}").replace(" ", "-")
+    investigacao = str(dados_base.get("numero") or f"INV-{str(canal.id)[-6:]}")
+    nome_operacao = texto_limpo_dossie(
+        dados_base.get("nome")
+        or (f"OPERAÇÃO {str(mesa.get('familia', canal.name)).upper()}" if mesa else f"OPERAÇÃO {canal.name.upper()}"),
+        150,
+    )
+
+    comunidade = extrair_valor_por_rotulos(
+        todos_textos,
+        ["Comunidade investigada", "Comunidade", "Local", "Localização", "Localizacao"],
+        150,
+    )
+    if comunidade == "Não informado":
+        comunidade = dados_base.get("comunidade") or (mesa.get("familia") if mesa else "Não informado")
+
+    faccao = extrair_valor_por_rotulos(
+        todos_textos,
+        ["Facção investigada", "Faccao investigada", "Facção", "Faccao", "Organização", "Organizacao", "Família", "Familia"],
+        150,
+    )
+    if faccao == "Não informado":
+        faccao = mesa.get("familia", "Não informado") if mesa else "Não informado"
+
+    objetivo = extrair_valor_por_rotulos(
+        todos_textos,
+        ["Objetivo da investigação", "Objetivo", "Finalidade"],
+        700,
+    )
+    if objetivo == "Não informado":
+        objetivo = "Consolidar informações de inteligência, identificar a estrutura criminosa investigada e registrar evidências coletadas na mesa operacional."
+
+    prioridade = extrair_valor_por_rotulos(todos_textos, ["Prioridade", "Prioridade da investigação"], 80)
+    if prioridade == "Não informado":
+        prioridade = "ALTA"
+
+    status = extrair_valor_por_rotulos(todos_textos, ["Status", "Status da investigação"], 80)
+    if status == "Não informado":
+        status = "ENCERRADA / ARQUIVADA"
+
+    liderancas = extrair_blocos_pessoas(textos_por_topico.get("liderancas", []) + textos_por_topico.get("painel", []), "Liderança")
+    integrantes = extrair_blocos_pessoas(textos_por_topico.get("integrantes", []) + textos_por_topico.get("chat", []), "Integrante")
+    informantes = extrair_blocos_pessoas(textos_por_topico.get("informantes", []), "Informante")
+
+    # Tenta vincular imagens às pessoas pela ordem em cada tópico.
+    imgs_lideres = [ev for ev in evidencias if ev.get("tipo") == "imagem" and ev.get("topico") == "liderancas"]
+    imgs_integrantes = [ev for ev in evidencias if ev.get("tipo") == "imagem" and ev.get("topico") == "integrantes"]
+    imgs_informantes = [ev for ev in evidencias if ev.get("tipo") == "imagem" and ev.get("topico") == "informantes"]
+    for pessoa, ev in zip(liderancas, imgs_lideres):
+        pessoa["foto"] = ev.get("local", "")
+    for pessoa, ev in zip(integrantes, imgs_integrantes):
+        pessoa["foto"] = ev.get("local", "")
+    for pessoa, ev in zip(informantes, imgs_informantes):
+        pessoa["foto"] = ev.get("local", "")
+
+    def extrair_resultado(rotulos: List[str]) -> str:
+        return extrair_valor_por_rotulos(todos_textos, rotulos, 300)
+
+    resultados = {
+        "prisoes": extrair_resultado(["Prisões efetuadas", "Prisoes efetuadas", "Presos", "Prisões", "Prisoes"]),
+        "procurados_capturados": extrair_resultado(["Procurados capturados", "Capturados"]),
+        "veiculos": extrair_resultado(["Veículos apreendidos", "Veiculos apreendidos", "Veículos", "Veiculos"]),
+        "materiais": extrair_resultado(["Materiais apreendidos", "Materiais"]),
+        "dinheiro": extrair_resultado(["Dinheiro apreendido", "Dinheiro", "Valores"]),
+        "armas": extrair_resultado(["Armas apreendidas", "Armas", "Armamentos"]),
+        "drogas": extrair_resultado(["Drogas apreendidas", "Drogas", "Entorpecentes"]),
+        "municoes": extrair_resultado(["Munições", "Municoes", "Munição", "Municao"]),
+        "outros": extrair_resultado(["Outros itens", "Outros"]),
+    }
+
+    reabrir_url = f"https://discord.com/channels/{canal.guild.id}/{canal.id}"
+    qr_path = gerar_qr_code_dossie(reabrir_url, pasta_dossie)
+
+    return {
+        "processo": processo,
+        "numero_investigacao": investigacao,
+        "nome_operacao": nome_operacao,
+        "nome": nome_operacao,
+        "canal_id": canal.id,
+        "canal_nome": canal.name,
+        "guild_id": canal.guild.id,
+        "guild_nome": canal.guild.name,
+        "data_abertura": (mesa or {}).get("criada_em") or dados_base.get("data_abertura") or "Não informado",
+        "data_encerramento": agora_br(),
+        "delegado_responsavel": dados_base.get("delegado") or (mesa or {}).get("autor_nome") or "Superintendência DICOR",
+        "agente_encerramento": str(interaction.user),
+        "agente_encerramento_id": interaction.user.id,
+        "integrantes_investigacao": list(autores.values()) or [str(interaction.user)],
+        "comunidade": comunidade,
+        "faccao": faccao,
+        "objetivo": objetivo,
+        "status": status,
+        "prioridade": prioridade,
+        "mensagens": mensagens,
+        "textos_por_topico": dict(textos_por_topico),
+        "evidencias": evidencias,
+        "links": links,
+        "liderancas": liderancas,
+        "integrantes": integrantes,
+        "informantes": informantes,
+        "resultados": resultados,
+        "resumos": {
+            "painel": resumir_textos_topico(textos_por_topico.get("painel", [])),
+            "localizacao": resumir_textos_topico(textos_por_topico.get("localizacao", [])),
+            "producao": resumir_textos_topico(textos_por_topico.get("producao", [])),
+            "baus": resumir_textos_topico(textos_por_topico.get("baus", [])),
+            "informantes": resumir_textos_topico(textos_por_topico.get("informantes", [])),
+            "crimes": resumir_textos_topico(textos_por_topico.get("crimes", [])),
+            "radio": resumir_textos_topico(textos_por_topico.get("radio", [])),
+            "chat": resumir_textos_topico(textos_por_topico.get("chat", []), 900),
+        },
+        "qr_reabertura": str(qr_path) if qr_path else "",
+        "reabrir_url": reabrir_url,
+        "estatisticas": {
+            "mensagens_analisadas": len(mensagens),
+            "evidencias": len(evidencias),
+            "imagens": len([e for e in evidencias if e.get("tipo") == "imagem"]),
+            "videos": len([e for e in evidencias if e.get("tipo") == "video"]),
+            "links": len(links),
+            "threads": len(threads),
+        },
+    }
+
+
+async def atualizar_status_mesa_fechada(canal_id: int, dados_dossie: Dict[str, Any], arquivos: Dict[str, str]) -> None:
+    try:
+        mesas = carregar_mesas()
+        for m in mesas:
+            if int(m.get("canal_id", 0)) == int(canal_id):
+                m["status"] = "FECHADA"
+                m["fechada_em"] = dados_dossie.get("data_encerramento", agora_br())
+                m["dossie"] = {
+                    "processo": dados_dossie.get("processo"),
+                    "numero_investigacao": dados_dossie.get("numero_investigacao"),
+                    "pdf": arquivos.get("pdf"),
+                    "docx": arquivos.get("docx"),
+                    "gerado_em": agora_br(),
+                }
+        salvar_mesas(mesas)
+    except Exception as erro:
+        await enviar_log(f"⚠️ Erro ao atualizar status da mesa {canal_id}: {erro}")
+
+
+async def fechar_mesa_core(
+    interaction: discord.Interaction,
+    motivo: str = "Fechada",
+    dados_confirmacao: Optional[Dict[str, Any]] = None,
+):
     canal = interaction.channel
     if not isinstance(canal, discord.TextChannel):
         return
 
-    # 1. Responde imediatamente para sumir o erro de "Interação falhou"
     try:
         if not interaction.response.is_done():
-            await interaction.response.defer(ephemeral=True)
+            await interaction.response.defer(ephemeral=True, thinking=True)
     except Exception:
         pass
 
-    msg_aviso = await canal.send("⏳ **[DICOR] Iniciando arquivamento e gerando Dossiê Oficial...**")
+    guild = interaction.guild
+    if guild is None:
+        await responder_interacao(interaction, "❌ Use dentro de um servidor.", ephemeral=True)
+        return
 
-    # 2. Busca no banco sem deixar o bot travar se não encontrar
+    msg_aviso = None
+    try:
+        msg_aviso = await canal.send("⏳ **[DICOR] Encerramento confirmado. Bloqueando mesa e iniciando coleta de dados...**")
+    except Exception:
+        pass
+
     mesa = None
     try:
         mesa = buscar_mesa_por_canal(canal.id)
-    except Exception as e:
-        print(f"[DICOR LOG] Aviso: Mesa não localizada: {e}")
-
-    # 3. Move o canal de categoria
-    guild = interaction.guild
-    categoria_fechada = guild.get_channel(CATEGORIA_MESAS_FECHADAS_ID) if 'CATEGORIA_MESAS_FECHADAS_ID' in globals() else None
-    try:
-        novo_nome = canal.name if canal.name.startswith("🔒") else f"🔒-{canal.name}"
-        if categoria_fechada:
-            await canal.edit(category=categoria_fechada, name=novo_nome)
-        else:
-            await canal.edit(name=novo_nome)
-    except Exception as e:
-        print(f"[DICOR LOG] Erro ao mover categoria: {e}")
-
-    # 4. Salva status no histórico local
-    try:
-        mesas = carregar_mesas()
-        for m in mesas:
-            if int(m.get("canal_id", 0)) == canal.id:
-                m["status"] = "FECHADA"
-                m["fechada_em"] = agora_br() if 'agora_br' in globals() else "Agora"
-        salvar_mesas(mesas)
-    except Exception as e:
-        print(f"[DICOR LOG] Erro ao salvar banco local: {e}")
-
-    # 5. Monta os dados do dossiê com segurança
-    dados_relatorio = {
-        "nome": f"OPERACAO {mesa.get('familia', 'PADRAO').upper()}" if (mesa and isinstance(mesa, dict)) else f"OPERACAO {canal.name.upper()}",
-        "comunidade": mesa.get('familia', 'Setor Operacional') if (mesa and isinstance(mesa, dict)) else "Mapeamento Geral",
-        "delegado": mesa.get('autor_name', str(interaction.user.display_name)) if (mesa and isinstance(mesa, dict)) else str(interaction.user.display_name),
-        "data_abertura": mesa.get('criada_em', 'Nao Informada') if (mesa and isinstance(mesa, dict)) else "Recente",
-        "processo": str(canal.id)[-6:]
-    }
-
-    # 6. Varredura de evidências
-    mensagens_provas = []
-    try:
-        async for msg in canal.history(limit=100, oldest_first=True):
-            if "http" in msg.content:
-                mensagens_provas.append(msg.content)
-            for attachment in msg.attachments:
-                mensagens_provas.append(attachment.url)
-    except Exception as e:
-        print(f"[DICOR LOG] Erro histórico: {e}")
-
-    # 7. Geração dos arquivos físicos (PDF/DOCX)
-    import asyncio
-    from pathlib import Path
-    nome_pdf = f"DOSSIE_{dados_relatorio['processo']}.pdf"
-    nome_docx = f"DOSSIE_{dados_relatorio['processo']}.docx"
-    pasta_saida = Path("data/dossies")
-    pasta_saida.mkdir(parents=True, exist_ok=True)
-    
-    try:
-        if 'gerar_pdf_dossie' in globals():
-            await asyncio.to_thread(gerar_pdf_dossie, dados_relatorio, mensagens_provas, pasta_saida / nome_pdf)
-        if 'gerar_docx_dossie' in globals():
-            await asyncio.to_thread(gerar_docx_dossie, dados_relatorio, mensagens_provas, pasta_saida / nome_docx)
-    except Exception as e:
-        print(f"[DICOR LOG] Erro gerador: {e}")
-
-    # 8. Envia para os logs oficiais da PF
-    try:
-        CANAL_DOSSIES_OFICIAL = 1490200477248520333
-        canal_dest = guild.get_channel(CANAL_DOSSIES_OFICIAL)
-        if canal_dest:
-            embed_oficial = discord.Embed(
-                title="🏛️ DIRETORIA DE INVESTIGAÇÃO E COMBATE AO CRIME ORGANIZADO",
-                description=f"Dossiê Operacional consolidado com sucesso a partir de {canal.name}.",
-                color=discord.Color.from_rgb(0, 43, 91)
-            )
-            files_to_send = []
-            if (pasta_saida / nome_pdf).exists(): files_to_send.append(discord.File(str(pasta_saida / nome_pdf), filename=nome_pdf))
-            if (pasta_saida / nome_docx).exists(): files_to_send.append(discord.File(str(pasta_saida / nome_docx), filename=nome_docx))
-            if files_to_send:
-                await canal_dest.send(embed=embed_oficial, files=files_to_send)
-    except Exception as e:
-        print(f"[DICOR LOG] Erro logs: {e}")
+    except Exception as erro:
+        await enviar_log(f"⚠️ Mesa não localizada no banco local durante fechamento: {erro}")
 
     try:
-        await msg_aviso.delete()
+        await bloquear_mesa_para_novas_mensagens(canal)
+    except Exception as erro:
+        await enviar_log(f"⚠️ Falha parcial ao bloquear mesa {canal.id}: {erro}")
+
+    processo_base = str((dados_confirmacao or {}).get("processo") or f"PF-DICOR-{canal.id}").replace(" ", "-")
+    processo_limpo = slugify(processo_base).upper().replace("-", "_") or str(canal.id)
+    pasta_dossie = DOSSIES_DIR / processo_limpo
+    pasta_dossie.mkdir(parents=True, exist_ok=True)
+
+    try:
+        if msg_aviso:
+            await msg_aviso.edit(content="🔎 **[DICOR] Coletando mensagens, tópicos, anexos, links e evidências da investigação...**")
     except Exception:
         pass
 
-    # 9. Troca os botões na interface do canal arquivado
-    embed_sucesso = discord.Embed(
-        title="🏛️ DIRETORIA DE INVESTIGAÇÃO E COMBATE AO CRIME ORGANIZADO",
-        description="Esta mesa foi encerrada e o Dossiê foi movido para o arquivo central.",
-        color=discord.Color.red()
+    dados_dossie = await coletar_dados_operacionais_mesa(
+        canal,
+        mesa,
+        interaction,
+        pasta_dossie,
+        dados_confirmacao=dados_confirmacao,
     )
-    
+
     try:
-        await canal.send(content="🔒 **Mesa Arquivada.**", embed=embed_sucesso, view=ReabrirMesaView())
+        threads = await listar_threads_da_mesa(canal, mesa)
+        await travar_threads_mesa(threads)
+    except Exception:
+        pass
+
+    nome_pdf = f"DOSSIE_OPERACIONAL_{processo_limpo}.pdf"
+    nome_docx = f"DOSSIE_OPERACIONAL_{processo_limpo}.docx"
+    caminho_pdf = pasta_dossie / nome_pdf
+    caminho_docx = pasta_dossie / nome_docx
+    arquivos: Dict[str, str] = {}
+
+    try:
+        if msg_aviso:
+            await msg_aviso.edit(content="📄 **[DICOR] Gerando PDF profissional e DOCX editável...**")
+    except Exception:
+        pass
+
+    erros_geracao: List[str] = []
+    try:
+        await asyncio.to_thread(gerar_pdf_dossie, dados_dossie, caminho_pdf)
+        if caminho_pdf.exists():
+            arquivos["pdf"] = str(caminho_pdf)
+    except Exception as erro:
+        erros_geracao.append(f"PDF: {erro}")
+        await enviar_log(f"❌ Erro ao gerar PDF do dossiê da mesa {canal.id}: {erro}")
+
+    try:
+        await asyncio.to_thread(gerar_docx_dossie, dados_dossie, caminho_docx)
+        if caminho_docx.exists():
+            arquivos["docx"] = str(caminho_docx)
+    except Exception as erro:
+        erros_geracao.append(f"DOCX: {erro}")
+        await enviar_log(f"❌ Erro ao gerar DOCX do dossiê da mesa {canal.id}: {erro}")
+
+    canal_dest = guild.get_channel(DOSSIE_CHANNEL_ID) or guild.get_channel(BACKUP_CHANNEL_ID)
+    mensagem_dossie_url = ""
+    try:
+        if canal_dest and arquivos:
+            embed_oficial = discord.Embed(
+                title="🏛️ DOSSIÊ OPERACIONAL AUTOMÁTICO DICOR",
+                description=(
+                    f"**Processo:** `{dados_dossie.get('processo')}`\n"
+                    f"**Investigação:** `{dados_dossie.get('numero_investigacao')}`\n"
+                    f"**Operação:** {dados_dossie.get('nome_operacao')}\n"
+                    f"**Mesa:** {canal.mention}\n"
+                    f"**Encerrada por:** {interaction.user.mention}"
+                ),
+                color=discord.Color.from_rgb(0, 43, 91),
+            )
+            embed_oficial.set_footer(text="Polícia Federal - DICOR • Dossiê gerado automaticamente")
+            files_to_send: List[discord.File] = []
+            if "pdf" in arquivos:
+                files_to_send.append(discord.File(arquivos["pdf"], filename=nome_pdf))
+            if "docx" in arquivos:
+                files_to_send.append(discord.File(arquivos["docx"], filename=nome_docx))
+            msg_dossie = await canal_dest.send(embed=embed_oficial, files=files_to_send)
+            mensagem_dossie_url = msg_dossie.jump_url
+    except Exception as erro:
+        await enviar_log(f"❌ Não foi possível enviar dossiê no canal configurado `{DOSSIE_CHANNEL_ID}`: {erro}")
+
+    await atualizar_status_mesa_fechada(canal.id, dados_dossie, arquivos)
+
+    registrar_dossie_operacional({
+        "processo": dados_dossie.get("processo"),
+        "numero_investigacao": dados_dossie.get("numero_investigacao"),
+        "nome_operacao": dados_dossie.get("nome_operacao"),
+        "canal_id": canal.id,
+        "canal_nome": canal.name,
+        "guild_id": guild.id,
+        "gerado_em": agora_br(),
+        "encerrado_por": str(interaction.user),
+        "pdf": arquivos.get("pdf"),
+        "docx": arquivos.get("docx"),
+        "mensagem_dossie_url": mensagem_dossie_url,
+        "estatisticas": dados_dossie.get("estatisticas", {}),
+    })
+
+    try:
+        categoria_fechada = guild.get_channel(CATEGORIA_MESAS_FECHADAS_ID) if CATEGORIA_MESAS_FECHADAS_ID else None
+        novo_nome = canal.name if canal.name.startswith("🔒") else f"🔒-{canal.name}"
+        if categoria_fechada:
+            await canal.edit(category=categoria_fechada, name=novo_nome, reason="Mesa encerrada e arquivada pela DICOR")
+        else:
+            await canal.edit(name=novo_nome, reason="Mesa encerrada e arquivada pela DICOR")
+    except Exception as erro:
+        await enviar_log(f"⚠️ Não foi possível mover/renomear a mesa arquivada {canal.id}: {erro}")
+
+    try:
+        if msg_aviso:
+            await msg_aviso.delete()
+    except Exception:
+        pass
+
+    embed_sucesso = discord.Embed(
+        title="🏛️ Polícia Federal - DICOR",
+        description=(
+            "✅ **Mesa encerrada com sucesso.**\n\n"
+            "📄 **Dossiê Operacional gerado.**\n"
+            "📁 **Arquivos salvos com sucesso.**\n"
+            "📚 **Investigação arquivada.**\n"
+            "🏛️ **Polícia Federal - DICOR.**"
+        ),
+        color=discord.Color.from_rgb(0, 43, 91),
+    )
+    embed_sucesso.add_field(name="Processo", value=f"`{dados_dossie.get('processo')}`", inline=True)
+    embed_sucesso.add_field(name="Investigação", value=f"`{dados_dossie.get('numero_investigacao')}`", inline=True)
+    embed_sucesso.add_field(name="Evidências coletadas", value=f"`{dados_dossie.get('estatisticas', {}).get('evidencias', 0)}`", inline=True)
+    if mensagem_dossie_url:
+        embed_sucesso.add_field(name="Arquivo oficial", value=f"[Abrir envio do dossiê]({mensagem_dossie_url})", inline=False)
+    if erros_geracao:
+        embed_sucesso.add_field(name="Avisos", value="\n".join(erros_geracao)[:900], inline=False)
+
+    try:
+        await canal.send(embed=embed_sucesso, view=ReabrirMesaView())
         if interaction.message:
-            await interaction.message.delete()
+            try:
+                await interaction.message.delete()
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    try:
+        await enviar_log(
+            f"✅ **Mesa encerrada e dossiê gerado**\n"
+            f"Mesa: {canal.mention}\n"
+            f"Processo: `{dados_dossie.get('processo')}`\n"
+            f"Arquivos: PDF={'sim' if 'pdf' in arquivos else 'não'} | DOCX={'sim' if 'docx' in arquivos else 'não'}\n"
+            f"Canal dos dossiês: <#{DOSSIE_CHANNEL_ID}>"
+        )
+    except Exception:
+        pass
+
+    try:
+        await interaction.followup.send("✅ Mesa encerrada e Dossiê Operacional gerado com sucesso.", ephemeral=True)
     except Exception:
         pass
 
@@ -5178,198 +5882,667 @@ async def painel_relatorios(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed, view=RelatoriosPainelView())
 
 # =====================================================
-# FUNÇÃO REFEITA: GERADOR DE PDF COM BRASÕES OFICIAIS
+# GERADORES DO DOSSIÊ: PDF PROFISSIONAL + DOCX EDITÁVEL
 # =====================================================
 
-async def gerar_pdf_dossie(dados_mesa, mensagens_provas, caminho_pdf):
-    """Gera o arquivo PDF altamente estruturado com base nas diretrizes da DICOR."""
+DICOR_AZUL = "002B5B"
+DICOR_DOURADO = "D4AF37"
+DICOR_CINZA = "F4F6F8"
+
+
+def caminho_brasao_pf() -> Optional[Path]:
+    for nome in ["brasao_pf.png", "brasao_pf.jpg", "pf.png", "pf.jpg"]:
+        caminho = BASE_DIR / nome
+        if caminho.exists():
+            return caminho
+    return None
+
+
+def caminho_brasao_dicor() -> Optional[Path]:
+    for nome in ["brasao_dicor.png", "brasao_dicor.jpg", "dicor.png", "dicor.jpg"]:
+        caminho = BASE_DIR / nome
+        if caminho.exists():
+            return caminho
+    return None
+
+
+def linhas_tabela_conteudo() -> List[List[str]]:
+    return [
+        ["Página", "Seção"],
+        ["1", "Capa"],
+        ["2", "Resumo Executivo e Índice"],
+        ["3", "Lideranças Identificadas"],
+        ["4", "Integrantes Identificados"],
+        ["5", "Painel da Organização"],
+        ["6", "Localização"],
+        ["7", "Produção e Fabricação"],
+        ["8", "Baús e Armazenamento"],
+        ["9", "Informantes"],
+        ["10", "Materiais Apreendidos"],
+        ["11", "Resultado Operacional"],
+        ["12", "Conclusão"],
+    ]
+
+
+def montar_conclusao_dossie(dados: Dict[str, Any]) -> str:
+    est = dados.get("estatisticas", {}) or {}
+    res = dados.get("resultados", {}) or {}
+    return (
+        f"A mesa de investigação referente ao processo {dados.get('processo')} foi encerrada após a consolidação "
+        f"dos registros operacionais vinculados à operação {dados.get('nome_operacao')}. Durante a análise, foram "
+        f"verificadas {est.get('mensagens_analisadas', 0)} mensagens, {est.get('evidencias', 0)} evidências anexadas, "
+        f"{est.get('imagens', 0)} imagens, {est.get('videos', 0)} vídeos e {est.get('links', 0)} links registrados. "
+        f"Os elementos reunidos indicam a necessidade de preservação integral do material para consulta posterior, "
+        f"subsidiando ações de inteligência, diligências futuras, cruzamento de dados e eventual reabertura da investigação. "
+        f"Resultados operacionais informados: prisões ({res.get('prisoes', 'Não informado')}), drogas ({res.get('drogas', 'Não informado')}), "
+        f"armas ({res.get('armas', 'Não informado')}), veículos ({res.get('veiculos', 'Não informado')}) e materiais diversos "
+        f"({res.get('materiais', 'Não informado')}). O dossiê é arquivado com autenticação digital e QR Code de reabertura."
+    )
+
+
+def resumo_contexto_operacional(dados: Dict[str, Any]) -> str:
+    return (
+        f"A investigação teve como alvo a comunidade/organização {dados.get('comunidade', 'Não informado')}, "
+        f"com possível vínculo à facção ou estrutura {dados.get('faccao', 'Não informado')}. O objetivo operacional foi: "
+        f"{dados.get('objetivo', 'Não informado')} O material abaixo foi extraído automaticamente da mesa de investigação, "
+        f"incluindo tópicos, anexos, links, registros textuais e dados enviados pelos integrantes autorizados."
+    )
+
+
+def pdf_paragrafo(texto: Any, estilo) -> Any:
+    seguro = escape(texto).replace("\n", "<br/>")
+    return Paragraph(seguro or "Não informado", estilo)
+
+
+def pdf_img_fit(caminho: str, max_w: float, max_h: float) -> Optional[Any]:
+    if not caminho or not Path(caminho).exists() or RLImage is None:
+        return None
+    try:
+        w, h = max_w, max_h
+        if PILImage is not None:
+            with PILImage.open(caminho) as img:
+                iw, ih = img.size
+                if iw > 0 and ih > 0:
+                    escala = min(max_w / iw, max_h / ih)
+                    w, h = iw * escala, ih * escala
+        return RLImage(caminho, width=w, height=h)
+    except Exception:
+        return None
+
+
+def pdf_tabela_metadados(dados: List[List[Any]], col_widths: List[float], estilo_body) -> Any:
+    linhas = []
+    for row in dados:
+        linhas.append([pdf_paragrafo(c, estilo_body) if not hasattr(c, "wrap") else c for c in row])
+    tabela = Table(linhas, colWidths=col_widths, hAlign="LEFT")
+    tabela.setStyle(TableStyle([
+        ("GRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#C7CCD4")),
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor(f"#{DICOR_AZUL}")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("PADDING", (0, 0), (-1, -1), 6),
+    ]))
+    return tabela
+
+
+def pdf_add_header_footer(c, doc, dados: Dict[str, Any]):
+    c.saveState()
+    largura, altura = A4
+    pagina = c.getPageNumber()
+
+    # Marca d'água discreta
+    c.setFont("Helvetica-Bold", 54)
+    c.setFillColor(colors.Color(0.85, 0.88, 0.92, alpha=0.18))
+    c.translate(largura / 2, altura / 2)
+    c.rotate(35)
+    c.drawCentredString(0, 0, "DICOR")
+    c.rotate(-35)
+    c.translate(-largura / 2, -altura / 2)
+
+    # Cabeçalho
+    c.setStrokeColor(colors.HexColor(f"#{DICOR_DOURADO}"))
+    c.setLineWidth(1)
+    c.line(1.5 * cm, altura - 1.35 * cm, largura - 1.5 * cm, altura - 1.35 * cm)
+    c.setFillColor(colors.HexColor(f"#{DICOR_AZUL}"))
+    c.setFont("Helvetica-Bold", 8.5)
+    c.drawString(1.5 * cm, altura - 1.1 * cm, "POLÍCIA FEDERAL • DICOR")
+    c.setFont("Helvetica", 8)
+    c.drawRightString(largura - 1.5 * cm, altura - 1.1 * cm, f"Processo: {dados.get('processo', 'N/I')}")
+
+    # Rodapé
+    c.setStrokeColor(colors.HexColor("#C7CCD4"))
+    c.line(1.5 * cm, 1.25 * cm, largura - 1.5 * cm, 1.25 * cm)
+    c.setFont("Helvetica", 8)
+    c.setFillColor(colors.HexColor("#555555"))
+    c.drawString(1.5 * cm, 0.85 * cm, "Documento gerado automaticamente pelo Sistema DICOR • Uso interno GTA RP")
+    c.drawRightString(largura - 1.5 * cm, 0.85 * cm, f"Página {pagina}")
+    c.restoreState()
+
+
+def pdf_add_secao_titulo(story: List[Any], titulo: str, estilo_h1) -> None:
+    story.append(Paragraph(titulo, estilo_h1))
+    story.append(Spacer(1, 8))
+
+
+def pdf_add_imagens_evidencias(story: List[Any], evidencias: List[Dict[str, Any]], estilo_body, limite: int = 6) -> None:
+    imagens = [ev for ev in evidencias if ev.get("tipo") == "imagem" and ev.get("local")][:limite]
+    if not imagens:
+        story.append(pdf_paragrafo("Nenhuma imagem anexada nesta seção.", estilo_body))
+        return
+    for idx, ev in enumerate(imagens, start=1):
+        img = pdf_img_fit(ev.get("local", ""), 8.5 * cm, 5.5 * cm)
+        legenda = pdf_paragrafo(
+            f"Imagem {idx} • {ev.get('arquivo')} • {ev.get('data')} • Agente: {ev.get('autor')} • Origem: {ev.get('origem')}",
+            estilo_body,
+        )
+        if img:
+            t = Table([[img, legenda]], colWidths=[9 * cm, 7 * cm], hAlign="LEFT")
+            t.setStyle(TableStyle([
+                ("BOX", (0, 0), (-1, -1), 0.45, colors.HexColor("#C7CCD4")),
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                ("PADDING", (0, 0), (-1, -1), 6),
+            ]))
+            story.append(t)
+            story.append(Spacer(1, 6))
+
+
+def pdf_add_pessoas(story: List[Any], pessoas: List[Dict[str, str]], titulo_vazio: str, estilo_body) -> None:
+    if not pessoas:
+        story.append(pdf_paragrafo(titulo_vazio, estilo_body))
+        return
+    cab = ["Foto", "Nome", "RG", "Função/Cargo", "Periculosidade/Obs."]
+    rows = [cab]
+    for p in pessoas[:30]:
+        foto = pdf_img_fit(p.get("foto", ""), 2.2 * cm, 2.2 * cm) or pdf_paragrafo("Sem foto", estilo_body)
+        rows.append([
+            foto,
+            pdf_paragrafo(p.get("nome", "Não informado"), estilo_body),
+            pdf_paragrafo(p.get("rg", "Não informado"), estilo_body),
+            pdf_paragrafo(p.get("funcao") or p.get("cargo") or "Não informado", estilo_body),
+            pdf_paragrafo(f"{p.get('periculosidade', 'Não informado')}\n{p.get('observacoes', '')}", estilo_body),
+        ])
+    tabela = Table(rows, colWidths=[2.7 * cm, 4.1 * cm, 2.7 * cm, 3.4 * cm, 4 * cm], repeatRows=1, hAlign="LEFT")
+    tabela.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor(f"#{DICOR_AZUL}")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("GRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#C7CCD4")),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("PADDING", (0, 0), (-1, -1), 5),
+    ]))
+    story.append(tabela)
+
+
+def gerar_pdf_dossie(dados: Dict[str, Any], caminho_pdf: Path) -> None:
+    if SimpleDocTemplate is None:
+        raise RuntimeError("Dependência ausente: instale reportlab, qrcode e pillow.")
+
+    caminho_pdf = Path(caminho_pdf)
+    caminho_pdf.parent.mkdir(parents=True, exist_ok=True)
+
     doc = SimpleDocTemplate(
         str(caminho_pdf),
-        pagesize=letter,
-        leftMargin=54, rightMargin=54,
-        topMargin=72, bottomMargin=72
+        pagesize=A4,
+        rightMargin=1.6 * cm,
+        leftMargin=1.6 * cm,
+        topMargin=1.8 * cm,
+        bottomMargin=1.8 * cm,
+        title=f"Dossiê Operacional {dados.get('processo')}",
+        author="Polícia Federal - DICOR",
     )
-    
-    styles = getSampleStyleSheet()
-    
-    # Estilos customizados
-    style_titulo_capa = ParagraphStyle('CapaTitulo', parent=styles['Normal'], fontName='Helvetica-Bold', fontSize=24, leading=28, textColor=colors.HexColor("#002B5B"), alignment=1)
-    style_sub_capa = ParagraphStyle('CapaSub', parent=styles['Normal'], fontName='Helvetica-Bold', fontSize=12, leading=16, textColor=colors.HexColor("#D4AF37"), alignment=1)
-    style_h1 = ParagraphStyle('DossieH1', parent=styles['Heading1'], fontName='Helvetica-Bold', fontSize=16, leading=20, textColor=colors.HexColor("#002B5B"), spaceBefore=15, spaceAfter=10)
-    style_body = ParagraphStyle('DossieBody', parent=styles['Normal'], fontName='Helvetica', fontSize=10, leading=14, textColor=colors.HexColor("#222222"), spaceAfter=8)
-    style_meta_label = ParagraphStyle('MetaLabel', parent=styles['Normal'], fontName='Helvetica-Bold', fontSize=10, textColor=colors.HexColor("#002B5B"))
-    
-    story = []
 
-    # =====================================================
-    # PÁGINA 1: CAPA OFICIAL COM BRASÕES DO USUÁRIO
-    # =====================================================
-    story.append(Spacer(1, 10))
-    
-    # Bloco de Alinhamento dos Brasões (Lado a Lado no topo da Capa)
-    caminho_pf = "brasao_pf.jpg"       # Certifique-se de salvar a image_d50316 com este nome
-    caminho_dicor = "brasao_dicor.jpg" # Certifique-se de salvar a image_d5063b com este nome
-    
-    img_pf_element = ""
-    img_dicor_element = ""
-    
-    # Verifica se os arquivos de imagem existem no servidor para não quebrar a compilação do ReportLab
-    if os.path.exists(caminho_pf):
-        img_pf_element = Image(caminho_pf, width=65, height=65)
-    if os.path.exists(caminho_dicor):
-        img_dicor_element = Image(caminho_dicor, width=60, height=70)
-        
-    # Tabela Invisível para alinhar Brasão PF (Esquerda), Textos de Estado (Centro) e DICOR (Direita)
-    texto_republica = (
-        "<para align=center><b>REPÚBLICA FEDERATIVA DO BRASIL</b><br/>"
-        "<font size=9>MINISTÉRIO DA JUSTIÇA E SEGURANÇA PÚBLICA</font><br/>"
-        "<font size=9 color='#002B5B'><b>POLÍCIA FEDERAL</b></font></para>"
-    )
-    p_rep = Paragraph(texto_republica, ParagraphStyle('TxtRep', fontName='Helvetica', fontSize=10, leading=13, alignment=1))
-    
-    t_cabecalho_capa = Table([[img_pf_element, p_rep, img_dicor_element]], colWidths=[80, 290, 80])
-    t_cabecalho_capa.setStyle(TableStyle([
-        ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
-        ('ALIGN', (0,0), (0,0), 'LEFT'),
-        ('ALIGN', (1,0), (1,0), 'CENTER'),
-        ('ALIGN', (2,0), (2,0), 'RIGHT'),
-    ]))
-    story.append(t_cabecalho_capa)
-    story.append(Spacer(1, 30))
-    
-    story.append(Paragraph("POLÍCIA FEDERAL", style_titulo_capa))
-    story.append(Paragraph("DIRETORIA DE INVESTIGAÇÃO E COMBATE AO CRIME ORGANIZADO - DICOR", style_sub_capa))
-    story.append(Spacer(1, 35))
-    
-    # Box Informativo Centralizado na Capa
-    proc_num = dados_mesa.get('processo', 'PROC-' + datetime.now().strftime('%Y/%M%S'))
-    inv_num = dados_mesa.get('numero', 'INV-' + datetime.now().strftime('%d%m%Y'))
-    op_nome = dados_mesa.get('nome', 'OPERAÇÃO PADRÃO').upper()
-    
-    capa_dados = [
-        [Paragraph("<b>DOSSIÊ DE INTELIGÊNCIA OPERACIONAL</b>", ParagraphStyle('CI', alignment=1, fontSize=14, textColor=colors.white))],
-        [Paragraph(f"<b>OPERAÇÃO:</b> {op_nome}", ParagraphStyle('CI2', fontSize=11, spaceBefore=10))],
-        [Paragraph(f"<b>PROCESSO Nº:</b> {proc_num} | <b>INVESTIGAÇÃO Nº:</b> {inv_num}", ParagraphStyle('CI3', fontSize=10))],
-        [Paragraph(f"<b>ALVO / COMUNIDADE:</b> {dados_mesa.get('comunidade', 'Em levantamento')}", ParagraphStyle('CI4', fontSize=10))],
-        [Paragraph(f"<b>DELEGADO RESPONSÁVEL:</b> {dados_mesa.get('delegado', 'Superintendência DICOR')}", ParagraphStyle('CI5', fontSize=10, spaceAfter=10))]
+    styles = getSampleStyleSheet()
+    style_title = ParagraphStyle("DICORTitle", parent=styles["Title"], fontName="Helvetica-Bold", fontSize=22, leading=27, alignment=TA_CENTER, textColor=colors.HexColor(f"#{DICOR_AZUL}"), spaceAfter=8)
+    style_subtitle = ParagraphStyle("DICORSub", parent=styles["Normal"], fontName="Helvetica-Bold", fontSize=10.5, leading=14, alignment=TA_CENTER, textColor=colors.HexColor(f"#{DICOR_DOURADO}"), spaceAfter=10)
+    style_h1 = ParagraphStyle("DICORH1", parent=styles["Heading1"], fontName="Helvetica-Bold", fontSize=15, leading=18, textColor=colors.HexColor(f"#{DICOR_AZUL}"), spaceBefore=8, spaceAfter=6)
+    style_h2 = ParagraphStyle("DICORH2", parent=styles["Heading2"], fontName="Helvetica-Bold", fontSize=11.5, leading=14, textColor=colors.HexColor("#333333"), spaceBefore=6, spaceAfter=4)
+    style_body = ParagraphStyle("DICORBody", parent=styles["Normal"], fontName="Helvetica", fontSize=9.4, leading=13.2, alignment=TA_JUSTIFY, textColor=colors.HexColor("#222222"), spaceAfter=6)
+    style_center = ParagraphStyle("DICORCenter", parent=style_body, alignment=TA_CENTER)
+
+    story: List[Any] = []
+
+    # Página 1 — Capa
+    brasao_pf = caminho_brasao_pf()
+    brasao_dicor = caminho_brasao_dicor()
+    img_pf = pdf_img_fit(str(brasao_pf), 2.2 * cm, 2.2 * cm) if brasao_pf else pdf_paragrafo("PF", style_center)
+    img_dicor = pdf_img_fit(str(brasao_dicor), 2.2 * cm, 2.2 * cm) if brasao_dicor else pdf_paragrafo("DICOR", style_center)
+    cab = Table([[img_pf, pdf_paragrafo("REPÚBLICA FEDERATIVA DO BRASIL\nMINISTÉRIO DA JUSTIÇA E SEGURANÇA PÚBLICA\nPOLÍCIA FEDERAL", style_center), img_dicor]], colWidths=[3 * cm, 10.5 * cm, 3 * cm])
+    cab.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "MIDDLE"), ("ALIGN", (0, 0), (-1, -1), "CENTER")]))
+    story.append(cab)
+    story.append(Spacer(1, 1.2 * cm))
+    story.append(Paragraph("POLÍCIA FEDERAL", style_title))
+    story.append(Paragraph("DIRETORIA DE INVESTIGAÇÃO E COMBATE AO CRIME ORGANIZADO - DICOR", style_subtitle))
+    story.append(Spacer(1, 1.0 * cm))
+    capa_rows = [
+        ["DOSSIÊ DE INTELIGÊNCIA OPERACIONAL", ""],
+        ["Processo Nº", dados.get("processo")],
+        ["Investigação Nº", dados.get("numero_investigacao")],
+        ["Nome da Operação", dados.get("nome_operacao")],
+        ["Comunidade Investigada", dados.get("comunidade")],
+        ["Data de Abertura", dados.get("data_abertura")],
+        ["Data de Encerramento", dados.get("data_encerramento")],
+        ["Delegado Responsável", dados.get("delegado_responsavel")],
     ]
-    t_capa = Table(capa_dados, colWidths=[450])
+    capa = []
+    for i, row in enumerate(capa_rows):
+        if i == 0:
+            capa.append([Paragraph(f"<b>{escape(row[0])}</b>", style_center), ""])
+        else:
+            capa.append([pdf_paragrafo(row[0], style_body), pdf_paragrafo(row[1], style_body)])
+    t_capa = Table(capa, colWidths=[5.2 * cm, 10.8 * cm])
     t_capa.setStyle(TableStyle([
-        ('BACKGROUND', (0,0), (-1,0), colors.HexColor("#002B5B")),
-        ('BOX', (0,0), (-1,-1), 1.5, colors.HexColor("#D4AF37")),
-        ('PADDING', (0,0), (-1,-1), 12),
-        ('ALIGN', (0,0), (-1,-1), 'CENTER'),
+        ("SPAN", (0, 0), (1, 0)),
+        ("BACKGROUND", (0, 0), (1, 0), colors.HexColor(f"#{DICOR_AZUL}")),
+        ("TEXTCOLOR", (0, 0), (1, 0), colors.white),
+        ("BACKGROUND", (0, 1), (0, -1), colors.HexColor(f"#{DICOR_CINZA}")),
+        ("BOX", (0, 0), (-1, -1), 1.2, colors.HexColor(f"#{DICOR_DOURADO}")),
+        ("GRID", (0, 1), (-1, -1), 0.35, colors.HexColor("#C7CCD4")),
+        ("PADDING", (0, 0), (-1, -1), 8),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
     ]))
     story.append(t_capa)
-    
-    story.append(Spacer(1, 130))
-    story.append(Paragraph(f"<b>Data de Abertura:</b> {dados_mesa.get('data_abertura', datetime.now().strftime('%d/%m/%Y'))}", ParagraphStyle('R', alignment=2)))
-    story.append(Paragraph(f"<b>Data de Encerramento:</b> {datetime.now().strftime('%d/%m/%Y às %H:%M')}", ParagraphStyle('R2', alignment=2)))
+    story.append(Spacer(1, 2.0 * cm))
+    story.append(pdf_paragrafo("Documento gerado automaticamente a partir do encerramento da mesa de investigação.", style_center))
     story.append(PageBreak())
 
-    # =====================================================
-    # PÁGINA 2: RESUMO EXECUTIVO & ÍNDICE
-    # =====================================================
-    story.append(Paragraph("1. RESUMO EXECUTIVO", style_h1))
-    story.append(Paragraph(f"<b>Objetivo Geral:</b> {dados_mesa.get('objetivo', 'Desarticulação de infraestruturas criminosas e identificação de lideranças estruturadas na região.')}", style_body))
-    story.append(Paragraph("O presente relatório técnico-operacional consolida o levantamento de inteligência computacional, monitoramento de campo e análise de dados realizado pelos agentes designados a esta mesa tática. Os dados coletados servem como base probatória material para o prosseguimento das ações penais de competência desta diretoria.", style_body))
-    story.append(Spacer(1, 15))
-    
-    # Tabela com Metadados da Investigação
-    meta_dados = [
-        [Paragraph("Status Final", style_meta_label), Paragraph("CONCLUÍDO / ARQUIVADO", style_body)],
-        [Paragraph("Prioridade Tática", style_meta_label), Paragraph(dados_mesa.get('prioridade', 'ALTA'), style_body)],
-        [Paragraph("Organização Alvo", style_meta_label), Paragraph(dados_mesa.get('faccao', 'Facção Não Especificada'), style_body)],
+    # Página 2 — Resumo Executivo + índice
+    pdf_add_secao_titulo(story, "2. RESUMO EXECUTIVO", style_h1)
+    story.append(pdf_paragrafo(dados.get("objetivo"), style_body))
+    story.append(pdf_paragrafo(resumo_contexto_operacional(dados), style_body))
+    meta = [
+        ["Campo", "Informação"],
+        ["Status da Investigação", dados.get("status")],
+        ["Prioridade", dados.get("prioridade")],
+        ["Facção Investigada", dados.get("faccao")],
+        ["Agente Responsável pelo Encerramento", dados.get("agente_encerramento")],
+        ["Integrantes da Investigação", ", ".join(dados.get("integrantes_investigacao", []))],
     ]
-    t_meta = Table(meta_dados, colWidths=[150, 300])
-    t_meta.setStyle(TableStyle([
-        ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor("#CCCCCC")),
-        ('BACKGROUND', (0,0), (0,-1), colors.HexColor("#F5F7FA")),
-        ('PADDING', (0,0), (-1,-1), 6),
-    ]))
-    story.append(t_meta)
+    story.append(pdf_tabela_metadados(meta, [5.3 * cm, 11.2 * cm], style_body))
+    story.append(Spacer(1, 12))
+    story.append(Paragraph("Tabela de Conteúdo", style_h2))
+    story.append(pdf_tabela_metadados(linhas_tabela_conteudo(), [2.8 * cm, 13.7 * cm], style_body))
     story.append(PageBreak())
 
-    # =====================================================
-    # PÁGINAS 3 A 9: SEÇÕES CONSOLIDADAS DE INTELIGÊNCIA
-    # =====================================================
-    secoes = [
-        ("2. LIDERANÇAS E INTEGRANTES IDENTIFICADOS", "Mapeamento tático dos indivíduos que exercem comando, gerência ou atividades logísticas ativas na organização investigada."),
-        ("3. PAINEL DA ORGANIZAÇÃO E INFRAESTRUTURA", "Análise estrutural da facção, incluindo organogramas, símbolos utilizados e divisão interna de responsabilidades financeiras."),
-        ("4. LOCALIZAÇÃO E MAPEAMENTO DE BASES", "Geolocalização estratégica, pontos de observação qualificados, foto aérea de satélite e coordenadas táticas de aproximação."),
-        ("5. PRODUÇÃO, FABRICAÇÃO E ARMAZENAMENTO", "Mapeamento das rotas de suprimentos, laboratórios de refino, locais de estocagem de armamento pesado e baús de reabastecimento logístico."),
-        ("6. INFORMANTES E DADOS DE INTELIGÊNCIA VINCULADOS", "Compilado de relatórios de informantes infiltrados, denúncias anônimas triadas e procurados capturados associados.")
-    ]
-    
-    for titulo, desc in secoes:
-        story.append(Paragraph(titulo, style_h1))
-        story.append(Paragraph(desc, style_body))
-        story.append(Spacer(1, 10))
-        story.append(Paragraph("<i>Nenhum registro fotográfico ou dado nominal estático prévio catalogado nesta seção. Toda a base factual encontra-se anexada na seção de evidências cronológicas.</i>", ParagraphStyle('Italic', fontName='Helvetica-Oblique', fontSize=9, textColor=colors.gray)))
-        story.append(PageBreak())
+    # Página 3 — Lideranças
+    pdf_add_secao_titulo(story, "3. LIDERANÇAS IDENTIFICADAS", style_h1)
+    pdf_add_pessoas(story, dados.get("liderancas", []), "Nenhuma liderança foi identificada automaticamente nos tópicos da mesa.", style_body)
+    story.append(PageBreak())
 
-    # =====================================================
-    # PÁGINA 10 E 11: EVIDÊNCIAS & MATERIAIS APREENDIDOS
-    # =====================================================
-    story.append(Paragraph("7. LOG DE EVIDÊNCIAS E REGISTROS COLETADOS", style_h1))
-    story.append(Paragraph("Abaixo constam de forma cronológica as evidências materiais recolhidas do canal de texto durante a vigência desta mesa de investigação:", style_body))
+    # Página 4 — Integrantes
+    pdf_add_secao_titulo(story, "4. INTEGRANTES IDENTIFICADOS", style_h1)
+    pdf_add_pessoas(story, dados.get("integrantes", []), "Nenhum integrante foi identificado automaticamente nos tópicos da mesa.", style_body)
+    story.append(PageBreak())
+
+    # Página 5 — Painel
+    pdf_add_secao_titulo(story, "5. PAINEL DA ORGANIZAÇÃO", style_h1)
+    story.append(pdf_paragrafo(dados.get("resumos", {}).get("painel"), style_body))
+    pdf_add_imagens_evidencias(story, filtrar_evidencias_por_topico(dados.get("evidencias", []), ["painel"]), style_body, 6)
+    story.append(PageBreak())
+
+    # Página 6 — Localização
+    pdf_add_secao_titulo(story, "6. LOCALIZAÇÃO", style_h1)
+    story.append(pdf_paragrafo(dados.get("resumos", {}).get("localizacao"), style_body))
+    story.append(pdf_paragrafo(f"Comunidade/Base: {dados.get('comunidade')}\nCanal de reabertura: {dados.get('reabrir_url')}", style_body))
+    pdf_add_imagens_evidencias(story, filtrar_evidencias_por_topico(dados.get("evidencias", []), ["localizacao"]), style_body, 6)
+    story.append(PageBreak())
+
+    # Página 7 — Produção
+    pdf_add_secao_titulo(story, "7. PRODUÇÃO E FABRICAÇÃO", style_h1)
+    story.append(pdf_paragrafo(dados.get("resumos", {}).get("producao"), style_body))
+    pdf_add_imagens_evidencias(story, filtrar_evidencias_por_topico(dados.get("evidencias", []), ["producao"]), style_body, 6)
+    story.append(PageBreak())
+
+    # Página 8 — Baús
+    pdf_add_secao_titulo(story, "8. BAÚS E ARMAZENAMENTO", style_h1)
+    story.append(pdf_paragrafo(dados.get("resumos", {}).get("baus"), style_body))
+    pdf_add_imagens_evidencias(story, filtrar_evidencias_por_topico(dados.get("evidencias", []), ["baus"]), style_body, 6)
+    story.append(PageBreak())
+
+    # Página 9 — Informantes
+    pdf_add_secao_titulo(story, "9. INFORMANTES", style_h1)
+    pdf_add_pessoas(story, dados.get("informantes", []), "Nenhum informante foi identificado automaticamente nos tópicos da mesa.", style_body)
     story.append(Spacer(1, 10))
-
-    if mensagens_provas:
-        for idx, link in enumerate(mensagens_provas[:10], start=1):
-            story.append(Paragraph(f"• <b>Evidência Material #{idx:02d}:</b> <font color='#002B5B'><u>{link}</u></font>", ParagraphStyle('LinkS', fontSize=9, leading=12)))
-    else:
-        story.append(Paragraph("Nenhuma imagem ou link externo foi anexado ao histórico de registros desta mesa.", style_body))
-        
-    story.append(Spacer(1, 20))
-    story.append(Paragraph("8. RESULTADOS OPERACIONAIS E ESTATÍSTICAS", style_h1))
-    
-    res_dados = [
-        ["Categoria", "Indicador Operacional", "Métricas Estimadas"],
-        ["Prisões", "Indivíduos Capturados", "Conforme catálogo ativo"],
-        ["Apreensões", "Armamentos e Entorpecentes", "Registrado em auto próprio"],
-        ["Patrimônio", "Veículos e Valores Retidos", "Bloqueio preventivo efetuado"]
-    ]
-    t_res = Table(res_dados, colWidths=[120, 200, 130])
-    t_res.setStyle(TableStyle([
-        ('BACKGROUND', (0,0), (-1,0), colors.HexColor("#002B5B")),
-        ('TEXTCOLOR', (0,0), (-1,0), colors.white),
-        ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor("#CCCCCC")),
-        ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
-        ('PADDING', (0,0), (-1,-1), 6),
-    ]))
-    story.append(t_res)
+    story.append(pdf_paragrafo(dados.get("resumos", {}).get("informantes"), style_body))
     story.append(PageBreak())
 
-    # =====================================================
-    # PÁGINA 12: CONCLUSÃO & AUTENTICAÇÃO DIGITAL
-    # =====================================================
-    story.append(Paragraph("9. CONCLUSÃO E ENCERRAMENTO DO INQUÉRITO", style_h1))
-    story.append(Paragraph("Com a reunião dos elementos informativos descritos neste relatório, dá-se por encerrada a fase de inteligência tática nesta mesa setorial. Os dados aqui expostos guardam total integridade jurídica e lógica, sendo recomendada a remessa imediata ao Ministério Público e às equipes de operações táticas especiais para cumprimento dos mandados expedidos.", style_body))
-    story.append(Spacer(1, 40))
-    
-    # Assinaturas
-    story.append(Paragraph("____________________________________________________________", ParagraphStyle('Line', alignment=1)))
-    story.append(Paragraph("<b>DIRETORIA DE INVESTIGAÇÃO E COMBATE AO CRIME ORGANIZADO</b>", ParagraphStyle('Ass1', alignment=1, fontSize=9)))
-    story.append(Paragraph("POLÍCIA FEDERAL - ASSINATURA DIGITAL SISTÊMICA", ParagraphStyle('Ass2', alignment=1, fontSize=8, textColor=colors.gray)))
-    
-    story.append(Spacer(1, 40))
-    
-    # Geração de QR Code de validação do arquivo
-    qr = qrcode.QRCode(version=1, box_size=3, border=1)
-    qr.add_data(f"DICOR-PF-VALIDATION-{inv_num}")
-    qr.make(fit=True)
-    img_qr = qr.make_image(fill_color="black", back_color="white")
-    
-    buf_qr = io.BytesIO()
-    img_qr.save(buf_qr, format='PNG')
-    buf_qr.seek(0)
-    
-    story.append(Paragraph("<b>AUTENTICIDADE DO DOSSIÊ:</b>", ParagraphStyle('QRT', fontName='Helvetica-Bold', fontSize=9, alignment=1)))
-    story.append(Spacer(1, 5))
-    story.append(Image(buf_qr, width=80, height=80, hAlign='CENTER'))
-    
-    doc.build(story, canvasmaker=NumberedCanvas)
+    # Página 10 — Materiais apreendidos
+    pdf_add_secao_titulo(story, "10. MATERIAIS APREENDIDOS", style_h1)
+    res = dados.get("resultados", {}) or {}
+    materiais = [
+        ["Categoria", "Registro"],
+        ["Drogas", res.get("drogas", "Não informado")],
+        ["Armas", res.get("armas", "Não informado")],
+        ["Munições", res.get("municoes", "Não informado")],
+        ["Dinheiro", res.get("dinheiro", "Não informado")],
+        ["Veículos", res.get("veiculos", "Não informado")],
+        ["Outros Itens", res.get("outros", "Não informado")],
+    ]
+    story.append(pdf_tabela_metadados(materiais, [4.2 * cm, 12.3 * cm], style_body))
+    story.append(Spacer(1, 10))
+    anexos = [["Tipo", "Arquivo", "Data", "Origem"]]
+    for ev in dados.get("evidencias", [])[:30]:
+        anexos.append([ev.get("tipo"), ev.get("arquivo"), ev.get("data"), ev.get("origem")])
+    story.append(Paragraph("Provas e anexos registrados", style_h2))
+    story.append(pdf_tabela_metadados(anexos or [["Sem anexos", "", "", ""]], [2.2 * cm, 6.2 * cm, 3.2 * cm, 4.9 * cm], style_body))
+    story.append(PageBreak())
+
+    # Página 11 — Resultado
+    pdf_add_secao_titulo(story, "11. RESULTADO OPERACIONAL", style_h1)
+    est = dados.get("estatisticas", {}) or {}
+    tabela_resultado = [
+        ["Indicador", "Quantidade/Status"],
+        ["Quantidade de presos", res.get("prisoes", "Não informado")],
+        ["Procurados capturados", res.get("procurados_capturados", "Não informado")],
+        ["Mensagens analisadas", est.get("mensagens_analisadas", 0)],
+        ["Evidências coletadas", est.get("evidencias", 0)],
+        ["Imagens anexadas", est.get("imagens", 0)],
+        ["Vídeos anexados", est.get("videos", 0)],
+        ["Links registrados", est.get("links", 0)],
+        ["Tópicos analisados", est.get("threads", 0)],
+    ]
+    story.append(pdf_tabela_metadados(tabela_resultado, [5.5 * cm, 11 * cm], style_body))
+    story.append(PageBreak())
+
+    # Página 12 — Conclusão
+    pdf_add_secao_titulo(story, "12. CONCLUSÃO", style_h1)
+    story.append(pdf_paragrafo(montar_conclusao_dossie(dados), style_body))
+    story.append(Spacer(1, 1.2 * cm))
+    assinatura = Table([
+        ["", ""],
+        [pdf_paragrafo("Delegado Responsável", style_center), pdf_paragrafo("Agente Responsável pelo Encerramento", style_center)],
+        [pdf_paragrafo(dados.get("delegado_responsavel"), style_center), pdf_paragrafo(dados.get("agente_encerramento"), style_center)],
+    ], colWidths=[8 * cm, 8 * cm])
+    assinatura.setStyle(TableStyle([
+        ("LINEABOVE", (0, 1), (0, 1), 0.8, colors.HexColor("#333333")),
+        ("LINEABOVE", (1, 1), (1, 1), 0.8, colors.HexColor("#333333")),
+        ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+        ("PADDING", (0, 0), (-1, -1), 6),
+    ]))
+    story.append(assinatura)
+    story.append(Spacer(1, 0.6 * cm))
+    qr_path = dados.get("qr_reabertura")
+    qr_img = pdf_img_fit(qr_path, 2.5 * cm, 2.5 * cm) if qr_path else None
+    if qr_img:
+        story.append(Paragraph("QR Code para reabrir a investigação arquivada", style_h2))
+        story.append(qr_img)
+
+    doc.build(story, onFirstPage=lambda c, d: pdf_add_header_footer(c, d, dados), onLaterPages=lambda c, d: pdf_add_header_footer(c, d, dados))
+
+
+def docx_set_cell_shading(cell, fill: str) -> None:
+    if OxmlElement is None:
+        return
+    tc_pr = cell._tc.get_or_add_tcPr()
+    shd = OxmlElement("w:shd")
+    shd.set(qn("w:fill"), fill)
+    tc_pr.append(shd)
+
+
+def docx_set_cell_text(cell, texto: Any, bold: bool = False, color: Optional[str] = None) -> None:
+    cell.text = ""
+    p = cell.paragraphs[0]
+    run = p.add_run(str(texto or "Não informado"))
+    run.bold = bold
+    if color and RGBColor is not None:
+        run.font.color.rgb = RGBColor.from_string(color)
+    if Pt is not None:
+        run.font.size = Pt(9)
+
+
+def docx_add_heading(doc, texto: str, level: int = 1):
+    p = doc.add_heading(texto, level=level)
+    try:
+        p.runs[0].font.color.rgb = RGBColor.from_string(DICOR_AZUL)
+        p.runs[0].font.name = "Arial"
+    except Exception:
+        pass
+    return p
+
+
+def docx_add_paragraph(doc, texto: Any, bold: bool = False, align=None):
+    p = doc.add_paragraph()
+    run = p.add_run(str(texto or "Não informado"))
+    run.bold = bold
+    try:
+        run.font.name = "Arial"
+        run.font.size = Pt(10)
+    except Exception:
+        pass
+    if align is not None:
+        p.alignment = align
+    return p
+
+
+def docx_add_info_table(doc, rows: List[List[Any]], widths: Optional[List[float]] = None):
+    table = doc.add_table(rows=len(rows), cols=len(rows[0]))
+    table.style = "Table Grid"
+    try:
+        table.alignment = WD_TABLE_ALIGNMENT.CENTER
+    except Exception:
+        pass
+    for r, row in enumerate(rows):
+        for c, value in enumerate(row):
+            cell = table.cell(r, c)
+            if r == 0:
+                docx_set_cell_shading(cell, DICOR_AZUL)
+                docx_set_cell_text(cell, value, bold=True, color="FFFFFF")
+            else:
+                if c == 0:
+                    docx_set_cell_shading(cell, DICOR_CINZA)
+                    docx_set_cell_text(cell, value, bold=True)
+                else:
+                    docx_set_cell_text(cell, value)
+            try:
+                cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.TOP
+            except Exception:
+                pass
+    doc.add_paragraph()
+    return table
+
+
+def docx_add_picture_safe(paragraph, caminho: str, width_inches: float = 2.2) -> bool:
+    try:
+        if caminho and Path(caminho).exists():
+            paragraph.add_run().add_picture(str(caminho), width=Inches(width_inches))
+            return True
+    except Exception:
+        return False
+    return False
+
+
+def docx_add_pessoas(doc, pessoas: List[Dict[str, str]], vazio: str):
+    if not pessoas:
+        docx_add_paragraph(doc, vazio)
+        return
+    table = doc.add_table(rows=1, cols=5)
+    table.style = "Table Grid"
+    headers = ["Foto", "Nome", "RG", "Função/Cargo", "Periculosidade/Obs."]
+    for idx, h in enumerate(headers):
+        cell = table.cell(0, idx)
+        docx_set_cell_shading(cell, DICOR_AZUL)
+        docx_set_cell_text(cell, h, bold=True, color="FFFFFF")
+    for p in pessoas[:40]:
+        row = table.add_row().cells
+        row[0].text = ""
+        par = row[0].paragraphs[0]
+        if not docx_add_picture_safe(par, p.get("foto", ""), 0.9):
+            docx_set_cell_text(row[0], "Sem foto")
+        docx_set_cell_text(row[1], p.get("nome", "Não informado"))
+        docx_set_cell_text(row[2], p.get("rg", "Não informado"))
+        docx_set_cell_text(row[3], p.get("funcao") or p.get("cargo") or "Não informado")
+        docx_set_cell_text(row[4], f"{p.get('periculosidade', 'Não informado')}\n{p.get('observacoes', '')}")
+    doc.add_paragraph()
+
+
+def docx_add_imagens_evidencias(doc, evidencias: List[Dict[str, Any]], limite: int = 8):
+    imagens = [ev for ev in evidencias if ev.get("tipo") == "imagem" and ev.get("local")][:limite]
+    if not imagens:
+        docx_add_paragraph(doc, "Nenhuma imagem anexada nesta seção.")
+        return
+    for idx, ev in enumerate(imagens, start=1):
+        p = doc.add_paragraph()
+        if docx_add_picture_safe(p, ev.get("local", ""), 4.8):
+            docx_add_paragraph(doc, f"Imagem {idx} • {ev.get('arquivo')} • {ev.get('data')} • Agente: {ev.get('autor')} • Origem: {ev.get('origem')}")
+
+
+def configurar_docx(doc: Any, dados: Dict[str, Any]) -> None:
+    section = doc.sections[0]
+    section.top_margin = Inches(0.65)
+    section.bottom_margin = Inches(0.65)
+    section.left_margin = Inches(0.7)
+    section.right_margin = Inches(0.7)
+    header = section.header.paragraphs[0]
+    header.text = f"POLÍCIA FEDERAL • DICOR • Processo {dados.get('processo', 'N/I')}"
+    try:
+        header.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        header.runs[0].font.bold = True
+        header.runs[0].font.color.rgb = RGBColor.from_string(DICOR_AZUL)
+        header.runs[0].font.size = Pt(9)
+    except Exception:
+        pass
+    footer = section.footer.paragraphs[0]
+    footer.text = "Documento gerado automaticamente pelo Sistema DICOR • Uso interno GTA RP"
+    try:
+        footer.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        footer.runs[0].font.size = Pt(8)
+    except Exception:
+        pass
+
+
+def gerar_docx_dossie(dados: Dict[str, Any], caminho_docx: Path) -> None:
+    if Document is None:
+        raise RuntimeError("Dependência ausente: instale python-docx.")
+
+    caminho_docx = Path(caminho_docx)
+    caminho_docx.parent.mkdir(parents=True, exist_ok=True)
+    doc = Document()
+    configurar_docx(doc, dados)
+
+    # Página 1 — Capa
+    p = doc.add_paragraph()
+    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    for caminho in [caminho_brasao_pf(), caminho_brasao_dicor()]:
+        if caminho:
+            try:
+                p.add_run().add_picture(str(caminho), width=Inches(0.9))
+                p.add_run("   ")
+            except Exception:
+                pass
+    docx_add_paragraph(doc, "POLÍCIA FEDERAL", bold=True, align=WD_ALIGN_PARAGRAPH.CENTER)
+    docx_add_paragraph(doc, "DIRETORIA DE INVESTIGAÇÃO E COMBATE AO CRIME ORGANIZADO - DICOR", bold=True, align=WD_ALIGN_PARAGRAPH.CENTER)
+    doc.add_paragraph()
+    docx_add_info_table(doc, [
+        ["Campo", "Informação"],
+        ["Processo Nº", dados.get("processo")],
+        ["Investigação Nº", dados.get("numero_investigacao")],
+        ["Nome da Operação", dados.get("nome_operacao")],
+        ["Comunidade Investigada", dados.get("comunidade")],
+        ["Data de Abertura", dados.get("data_abertura")],
+        ["Data de Encerramento", dados.get("data_encerramento")],
+        ["Delegado Responsável", dados.get("delegado_responsavel")],
+    ])
+    docx_add_paragraph(doc, "Documento gerado automaticamente a partir do encerramento da mesa de investigação.", align=WD_ALIGN_PARAGRAPH.CENTER)
+    doc.add_page_break()
+
+    # Página 2 — Resumo
+    docx_add_heading(doc, "2. RESUMO EXECUTIVO", 1)
+    docx_add_paragraph(doc, dados.get("objetivo"))
+    docx_add_paragraph(doc, resumo_contexto_operacional(dados))
+    docx_add_info_table(doc, [
+        ["Campo", "Informação"],
+        ["Status da Investigação", dados.get("status")],
+        ["Prioridade", dados.get("prioridade")],
+        ["Facção Investigada", dados.get("faccao")],
+        ["Agente Responsável pelo Encerramento", dados.get("agente_encerramento")],
+        ["Integrantes da Investigação", ", ".join(dados.get("integrantes_investigacao", []))],
+    ])
+    docx_add_heading(doc, "Tabela de Conteúdo", 2)
+    docx_add_info_table(doc, linhas_tabela_conteudo())
+    doc.add_page_break()
+
+    docx_add_heading(doc, "3. LIDERANÇAS IDENTIFICADAS", 1)
+    docx_add_pessoas(doc, dados.get("liderancas", []), "Nenhuma liderança foi identificada automaticamente nos tópicos da mesa.")
+    doc.add_page_break()
+
+    docx_add_heading(doc, "4. INTEGRANTES IDENTIFICADOS", 1)
+    docx_add_pessoas(doc, dados.get("integrantes", []), "Nenhum integrante foi identificado automaticamente nos tópicos da mesa.")
+    doc.add_page_break()
+
+    docx_add_heading(doc, "5. PAINEL DA ORGANIZAÇÃO", 1)
+    docx_add_paragraph(doc, dados.get("resumos", {}).get("painel"))
+    docx_add_imagens_evidencias(doc, filtrar_evidencias_por_topico(dados.get("evidencias", []), ["painel"]), 8)
+    doc.add_page_break()
+
+    docx_add_heading(doc, "6. LOCALIZAÇÃO", 1)
+    docx_add_paragraph(doc, dados.get("resumos", {}).get("localizacao"))
+    docx_add_paragraph(doc, f"Comunidade/Base: {dados.get('comunidade')}\nCanal de reabertura: {dados.get('reabrir_url')}")
+    docx_add_imagens_evidencias(doc, filtrar_evidencias_por_topico(dados.get("evidencias", []), ["localizacao"]), 8)
+    doc.add_page_break()
+
+    docx_add_heading(doc, "7. PRODUÇÃO E FABRICAÇÃO", 1)
+    docx_add_paragraph(doc, dados.get("resumos", {}).get("producao"))
+    docx_add_imagens_evidencias(doc, filtrar_evidencias_por_topico(dados.get("evidencias", []), ["producao"]), 8)
+    doc.add_page_break()
+
+    docx_add_heading(doc, "8. BAÚS E ARMAZENAMENTO", 1)
+    docx_add_paragraph(doc, dados.get("resumos", {}).get("baus"))
+    docx_add_imagens_evidencias(doc, filtrar_evidencias_por_topico(dados.get("evidencias", []), ["baus"]), 8)
+    doc.add_page_break()
+
+    docx_add_heading(doc, "9. INFORMANTES", 1)
+    docx_add_pessoas(doc, dados.get("informantes", []), "Nenhum informante foi identificado automaticamente nos tópicos da mesa.")
+    docx_add_paragraph(doc, dados.get("resumos", {}).get("informantes"))
+    doc.add_page_break()
+
+    res = dados.get("resultados", {}) or {}
+    docx_add_heading(doc, "10. MATERIAIS APREENDIDOS", 1)
+    docx_add_info_table(doc, [
+        ["Categoria", "Registro"],
+        ["Drogas", res.get("drogas", "Não informado")],
+        ["Armas", res.get("armas", "Não informado")],
+        ["Munições", res.get("municoes", "Não informado")],
+        ["Dinheiro", res.get("dinheiro", "Não informado")],
+        ["Veículos", res.get("veiculos", "Não informado")],
+        ["Outros Itens", res.get("outros", "Não informado")],
+    ])
+    anexos = [["Tipo", "Arquivo", "Data", "Origem"]]
+    for ev in dados.get("evidencias", [])[:40]:
+        anexos.append([ev.get("tipo"), ev.get("arquivo"), ev.get("data"), ev.get("origem")])
+    docx_add_heading(doc, "Provas e anexos registrados", 2)
+    docx_add_info_table(doc, anexos)
+    doc.add_page_break()
+
+    est = dados.get("estatisticas", {}) or {}
+    docx_add_heading(doc, "11. RESULTADO OPERACIONAL", 1)
+    docx_add_info_table(doc, [
+        ["Indicador", "Quantidade/Status"],
+        ["Quantidade de presos", res.get("prisoes", "Não informado")],
+        ["Procurados capturados", res.get("procurados_capturados", "Não informado")],
+        ["Mensagens analisadas", est.get("mensagens_analisadas", 0)],
+        ["Evidências coletadas", est.get("evidencias", 0)],
+        ["Imagens anexadas", est.get("imagens", 0)],
+        ["Vídeos anexados", est.get("videos", 0)],
+        ["Links registrados", est.get("links", 0)],
+        ["Tópicos analisados", est.get("threads", 0)],
+    ])
+    doc.add_page_break()
+
+    docx_add_heading(doc, "12. CONCLUSÃO", 1)
+    docx_add_paragraph(doc, montar_conclusao_dossie(dados))
+    doc.add_paragraph("\n")
+    docx_add_info_table(doc, [
+        ["Assinatura Digital", "Responsável"],
+        ["Delegado Responsável", dados.get("delegado_responsavel")],
+        ["Agente Responsável pelo Encerramento", dados.get("agente_encerramento")],
+        ["Autenticação", f"Processo {dados.get('processo')} • Gerado em {dados.get('data_encerramento')}"]
+    ])
+    if dados.get("qr_reabertura") and Path(dados.get("qr_reabertura")).exists():
+        docx_add_heading(doc, "QR Code para reabrir a investigação arquivada", 2)
+        pqr = doc.add_paragraph()
+        pqr.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        docx_add_picture_safe(pqr, dados.get("qr_reabertura"), 1.35)
+
+    doc.save(str(caminho_docx))
+
 
 # =====================================================
 # MAIN
