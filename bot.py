@@ -99,6 +99,9 @@ BACKUP_CHANNEL_ID = int(os.getenv("BACKUP_CHANNEL_ID", "1515165673276440677") or
 # DOSSIE_CHANNEL_ID=ID_DO_CANAL_DOS_DOSSIES
 DOSSIE_CHANNEL_ID = int(os.getenv("DOSSIE_CHANNEL_ID", str(BACKUP_CHANNEL_ID)) or BACKUP_CHANNEL_ID)
 DOSSIE_HISTORY_LIMIT = int(os.getenv("DOSSIE_HISTORY_LIMIT", "0") or 0)  # 0 = varrer todo o histórico disponível
+DOSSIE_ENVIAR_NA_MESA = os.getenv("DOSSIE_ENVIAR_NA_MESA", "1").strip().lower() not in {"0", "false", "nao", "não", "off"}
+DOSSIE_SKIP_BOT_BOILERPLATE = os.getenv("DOSSIE_SKIP_BOT_BOILERPLATE", "1").strip().lower() not in {"0", "false", "nao", "não", "off"}
+DOSSIE_PROGRESS_INTERVAL = float(os.getenv("DOSSIE_PROGRESS_INTERVAL", "2") or 2)
 
 # Catalogo
 CATALOG_PUBLIC_URL = os.getenv("CATALOG_PUBLIC_URL", "http://127.0.0.1:8000/").strip()
@@ -2145,6 +2148,96 @@ def coletar_texto_embed(msg: discord.Message) -> str:
     return texto_limpo_dossie("\n".join([p for p in partes if p]), 5000)
 
 
+def texto_dossie_eh_boilerplate_bot(texto: str) -> bool:
+    """Ignora mensagens automáticas da própria mesa para mesa vazia não virar dossiê pesado."""
+    if not DOSSIE_SKIP_BOT_BOILERPLATE:
+        return False
+
+    n = normalizar_busca(texto)
+    padroes = [
+        "topicos da investigacao",
+        "abra o topico desejado",
+        "envie aqui todas as informacoes",
+        "para encerrar esta mesa",
+        "mesa de investigacao",
+        "use os topicos abertos",
+        "encerramento confirmado",
+        "coletando dados",
+        "gerando o dossie operacional",
+        "mesa encerrada com sucesso",
+        "dossie operacional gerado",
+        "investigacao arquivada",
+    ]
+    return any(p in n for p in padroes)
+
+
+def texto_dossie_tem_conteudo_util(texto: str) -> bool:
+    """Retorna True quando o texto parece ser dado real da investigação."""
+    if not texto:
+        return False
+    if texto_dossie_eh_boilerplate_bot(texto):
+        return False
+    n = normalizar_busca(texto)
+    if len(n.strip()) < 4:
+        return False
+    return True
+
+
+async def editar_progresso_dossie(mensagem: Optional[discord.Message], texto: str) -> None:
+    if mensagem is None:
+        return
+    try:
+        await mensagem.edit(content=texto[:1900])
+    except Exception:
+        pass
+
+
+async def enviar_arquivos_dossie_destino(
+    destino,
+    dados_dossie: Dict[str, Any],
+    arquivos: Dict[str, str],
+    nome_pdf: str,
+    nome_docx: str,
+    canal_mesa: discord.TextChannel,
+    usuario: discord.abc.User,
+    titulo: str = "🏛️ DOSSIÊ OPERACIONAL AUTOMÁTICO DICOR",
+) -> Optional[discord.Message]:
+    if not destino or not arquivos or not hasattr(destino, "send"):
+        return None
+
+    embed_oficial = discord.Embed(
+        title=titulo,
+        description=(
+            f"**Processo:** `{dados_dossie.get('processo')}`\n"
+            f"**Investigação:** `{dados_dossie.get('numero_investigacao')}`\n"
+            f"**Operação:** {dados_dossie.get('nome_operacao')}\n"
+            f"**Mesa:** {canal_mesa.mention}\n"
+            f"**Encerrada por:** {usuario.mention if hasattr(usuario, 'mention') else usuario}"
+        ),
+        color=discord.Color.from_rgb(0, 43, 91),
+    )
+    embed_oficial.add_field(
+        name="Conteúdo",
+        value=(
+            f"Mensagens: `{dados_dossie.get('estatisticas', {}).get('mensagens_analisadas', 0)}` • "
+            f"Evidências: `{dados_dossie.get('estatisticas', {}).get('evidencias', 0)}` • "
+            f"Links: `{dados_dossie.get('estatisticas', {}).get('links', 0)}`"
+        ),
+        inline=False,
+    )
+    embed_oficial.set_footer(text="Polícia Federal - DICOR • Dossiê gerado automaticamente")
+
+    files_to_send: List[discord.File] = []
+    if "pdf" in arquivos and Path(arquivos["pdf"]).exists():
+        files_to_send.append(discord.File(arquivos["pdf"], filename=nome_pdf))
+    if "docx" in arquivos and Path(arquivos["docx"]).exists():
+        files_to_send.append(discord.File(arquivos["docx"], filename=nome_docx))
+
+    if not files_to_send:
+        return None
+    return await destino.send(embed=embed_oficial, files=files_to_send)
+
+
 async def bloquear_mesa_para_novas_mensagens(canal: discord.TextChannel) -> None:
     guild = canal.guild
     try:
@@ -2362,7 +2455,13 @@ async def coletar_dados_operacionais_mesa(
                     autores[msg.author.id] = str(msg.author)
 
                 texto_msg = coletar_texto_embed(msg)
-                if texto_msg:
+                eh_bot = bool(getattr(msg.author, "bot", False))
+                texto_util = texto_dossie_tem_conteudo_util(texto_msg)
+                links_msg = [link.rstrip(".,)];") for link in URL_REGEX.findall(texto_msg)] if texto_msg else []
+
+                # Mensagens automáticas do próprio bot não entram no relatório,
+                # mas mensagens de usuários, links e anexos continuam sendo coletados.
+                if texto_msg and (texto_util or (not eh_bot and not texto_dossie_eh_boilerplate_bot(texto_msg))):
                     textos_por_topico[topico].append(texto_msg)
                     mensagens.append({
                         "id": msg.id,
@@ -2374,9 +2473,11 @@ async def coletar_dados_operacionais_mesa(
                         "conteudo": texto_msg,
                         "url": getattr(msg, "jump_url", ""),
                     })
-                    for link in URL_REGEX.findall(texto_msg):
+
+                for link in links_msg:
+                    if texto_util or not eh_bot:
                         links.append({
-                            "url": link.rstrip(".,)];"),
+                            "url": link,
                             "data": formatar_data_discord(msg.created_at),
                             "autor": str(msg.author),
                             "origem": origem,
@@ -2556,6 +2657,7 @@ async def fechar_mesa_core(
     motivo: str = "Fechada",
     dados_confirmacao: Optional[Dict[str, Any]] = None,
 ):
+    inicio_total = time.monotonic()
     canal = interaction.channel
     if not isinstance(canal, discord.TextChannel):
         return
@@ -2573,7 +2675,10 @@ async def fechar_mesa_core(
 
     msg_aviso = None
     try:
-        msg_aviso = await canal.send("⏳ **[DICOR] Encerramento confirmado. Bloqueando mesa e iniciando coleta de dados...**")
+        msg_aviso = await canal.send(
+            "⏳ **[DICOR] Encerramento confirmado.**\n"
+            "`Etapa 1/6` Bloqueando a mesa e preparando o Dossiê Operacional..."
+        )
     except Exception:
         pass
 
@@ -2583,6 +2688,10 @@ async def fechar_mesa_core(
     except Exception as erro:
         await enviar_log(f"⚠️ Mesa não localizada no banco local durante fechamento: {erro}")
 
+    await editar_progresso_dossie(
+        msg_aviso,
+        "🔒 **[DICOR] Etapa 1/6**\nBloqueando novas mensagens na mesa e protegendo os tópicos..."
+    )
     try:
         await bloquear_mesa_para_novas_mensagens(canal)
     except Exception as erro:
@@ -2593,12 +2702,13 @@ async def fechar_mesa_core(
     pasta_dossie = DOSSIES_DIR / processo_limpo
     pasta_dossie.mkdir(parents=True, exist_ok=True)
 
-    try:
-        if msg_aviso:
-            await msg_aviso.edit(content="🔎 **[DICOR] Coletando mensagens, tópicos, anexos, links e evidências da investigação...**")
-    except Exception:
-        pass
+    await editar_progresso_dossie(
+        msg_aviso,
+        "🔎 **[DICOR] Etapa 2/6**\nColetando mensagens, tópicos, imagens, vídeos, links e anexos.\n"
+        "Mesas completas podem demorar mais, pois o relatório preserva todas as evidências."
+    )
 
+    t_coleta = time.monotonic()
     dados_dossie = await coletar_dados_operacionais_mesa(
         canal,
         mesa,
@@ -2606,6 +2716,7 @@ async def fechar_mesa_core(
         pasta_dossie,
         dados_confirmacao=dados_confirmacao,
     )
+    tempo_coleta = time.monotonic() - t_coleta
 
     try:
         threads = await listar_threads_da_mesa(canal, mesa)
@@ -2619,13 +2730,21 @@ async def fechar_mesa_core(
     caminho_docx = pasta_dossie / nome_docx
     arquivos: Dict[str, str] = {}
 
-    try:
-        if msg_aviso:
-            await msg_aviso.edit(content="📄 **[DICOR] Gerando PDF profissional e DOCX editável...**")
-    except Exception:
-        pass
+    stats = dados_dossie.get("estatisticas", {})
+    mesa_vazia = (
+        int(stats.get("evidencias", 0) or 0) == 0
+        and int(stats.get("links", 0) or 0) == 0
+        and int(stats.get("mensagens_analisadas", 0) or 0) == 0
+    )
+
+    await editar_progresso_dossie(
+        msg_aviso,
+        "📄 **[DICOR] Etapa 3/6**\nGerando o PDF profissional com capa, índice, páginas oficiais e conclusão.\n"
+        f"Conteúdo coletado: `{stats.get('mensagens_analisadas', 0)}` mensagens • `{stats.get('evidencias', 0)}` evidências • `{stats.get('links', 0)}` links."
+    )
 
     erros_geracao: List[str] = []
+    t_pdf = time.monotonic()
     try:
         await asyncio.to_thread(gerar_pdf_dossie, dados_dossie, caminho_pdf)
         if caminho_pdf.exists():
@@ -2633,7 +2752,14 @@ async def fechar_mesa_core(
     except Exception as erro:
         erros_geracao.append(f"PDF: {erro}")
         await enviar_log(f"❌ Erro ao gerar PDF do dossiê da mesa {canal.id}: {erro}")
+    tempo_pdf = time.monotonic() - t_pdf
 
+    await editar_progresso_dossie(
+        msg_aviso,
+        "📝 **[DICOR] Etapa 4/6**\nGerando o DOCX editável do dossiê, com tabelas e seções organizadas..."
+    )
+
+    t_docx = time.monotonic()
     try:
         await asyncio.to_thread(gerar_docx_dossie, dados_dossie, caminho_docx)
         if caminho_docx.exists():
@@ -2641,32 +2767,57 @@ async def fechar_mesa_core(
     except Exception as erro:
         erros_geracao.append(f"DOCX: {erro}")
         await enviar_log(f"❌ Erro ao gerar DOCX do dossiê da mesa {canal.id}: {erro}")
+    tempo_docx = time.monotonic() - t_docx
+
+    await editar_progresso_dossie(
+        msg_aviso,
+        "📤 **[DICOR] Etapa 5/6**\nEnviando PDF e DOCX para o canal oficial de dossiês e deixando uma cópia na própria mesa..."
+    )
 
     canal_dest = guild.get_channel(DOSSIE_CHANNEL_ID) or guild.get_channel(BACKUP_CHANNEL_ID)
     mensagem_dossie_url = ""
+    erros_envio: List[str] = []
+
     try:
         if canal_dest and arquivos:
-            embed_oficial = discord.Embed(
-                title="🏛️ DOSSIÊ OPERACIONAL AUTOMÁTICO DICOR",
-                description=(
-                    f"**Processo:** `{dados_dossie.get('processo')}`\n"
-                    f"**Investigação:** `{dados_dossie.get('numero_investigacao')}`\n"
-                    f"**Operação:** {dados_dossie.get('nome_operacao')}\n"
-                    f"**Mesa:** {canal.mention}\n"
-                    f"**Encerrada por:** {interaction.user.mention}"
-                ),
-                color=discord.Color.from_rgb(0, 43, 91),
+            msg_dossie = await enviar_arquivos_dossie_destino(
+                canal_dest,
+                dados_dossie,
+                arquivos,
+                nome_pdf,
+                nome_docx,
+                canal,
+                interaction.user,
             )
-            embed_oficial.set_footer(text="Polícia Federal - DICOR • Dossiê gerado automaticamente")
-            files_to_send: List[discord.File] = []
-            if "pdf" in arquivos:
-                files_to_send.append(discord.File(arquivos["pdf"], filename=nome_pdf))
-            if "docx" in arquivos:
-                files_to_send.append(discord.File(arquivos["docx"], filename=nome_docx))
-            msg_dossie = await canal_dest.send(embed=embed_oficial, files=files_to_send)
-            mensagem_dossie_url = msg_dossie.jump_url
+            if msg_dossie:
+                mensagem_dossie_url = msg_dossie.jump_url
+        elif not canal_dest:
+            erros_envio.append("Canal de dossiês não encontrado. Configure DOSSIE_CHANNEL_ID ou BACKUP_CHANNEL_ID.")
+        elif not arquivos:
+            erros_envio.append("Nenhum arquivo foi gerado para envio.")
     except Exception as erro:
+        erros_envio.append(f"Envio canal oficial: {erro}")
         await enviar_log(f"❌ Não foi possível enviar dossiê no canal configurado `{DOSSIE_CHANNEL_ID}`: {erro}")
+
+    # Cópia na própria mesa para não ficar parecendo que sumiu em outro canal.
+    if DOSSIE_ENVIAR_NA_MESA and arquivos:
+        try:
+            if not canal_dest or getattr(canal_dest, "id", None) != canal.id:
+                msg_mesa = await enviar_arquivos_dossie_destino(
+                    canal,
+                    dados_dossie,
+                    arquivos,
+                    nome_pdf,
+                    nome_docx,
+                    canal,
+                    interaction.user,
+                    titulo="📎 CÓPIA DO DOSSIÊ OPERACIONAL DICOR",
+                )
+                if not mensagem_dossie_url and msg_mesa:
+                    mensagem_dossie_url = msg_mesa.jump_url
+        except Exception as erro:
+            erros_envio.append(f"Envio na mesa: {erro}")
+            await enviar_log(f"⚠️ Dossiê gerado, mas não consegui enviar cópia na mesa {canal.id}: {erro}")
 
     await atualizar_status_mesa_fechada(canal.id, dados_dossie, arquivos)
 
@@ -2683,7 +2834,18 @@ async def fechar_mesa_core(
         "docx": arquivos.get("docx"),
         "mensagem_dossie_url": mensagem_dossie_url,
         "estatisticas": dados_dossie.get("estatisticas", {}),
+        "tempos_segundos": {
+            "coleta": round(tempo_coleta, 2),
+            "pdf": round(tempo_pdf, 2),
+            "docx": round(tempo_docx, 2),
+            "total": round(time.monotonic() - inicio_total, 2),
+        },
     })
+
+    await editar_progresso_dossie(
+        msg_aviso,
+        "📚 **[DICOR] Etapa 6/6**\nArquivando a investigação, movendo a mesa e finalizando o registro oficial..."
+    )
 
     try:
         categoria_fechada = guild.get_channel(CATEGORIA_MESAS_FECHADAS_ID) if CATEGORIA_MESAS_FECHADAS_ID else None
@@ -2707,6 +2869,7 @@ async def fechar_mesa_core(
             "✅ **Mesa encerrada com sucesso.**\n\n"
             "📄 **Dossiê Operacional gerado.**\n"
             "📁 **Arquivos salvos com sucesso.**\n"
+            "📎 **Arquivos enviados na mesa e/ou no canal oficial.**\n"
             "📚 **Investigação arquivada.**\n"
             "🏛️ **Polícia Federal - DICOR.**"
         ),
@@ -2714,11 +2877,26 @@ async def fechar_mesa_core(
     )
     embed_sucesso.add_field(name="Processo", value=f"`{dados_dossie.get('processo')}`", inline=True)
     embed_sucesso.add_field(name="Investigação", value=f"`{dados_dossie.get('numero_investigacao')}`", inline=True)
-    embed_sucesso.add_field(name="Evidências coletadas", value=f"`{dados_dossie.get('estatisticas', {}).get('evidencias', 0)}`", inline=True)
+    embed_sucesso.add_field(name="Evidências coletadas", value=f"`{stats.get('evidencias', 0)}`", inline=True)
+    embed_sucesso.add_field(
+        name="Tempo de geração",
+        value=(
+            f"Coleta: `{tempo_coleta:.1f}s` • PDF: `{tempo_pdf:.1f}s` • "
+            f"DOCX: `{tempo_docx:.1f}s` • Total: `{time.monotonic() - inicio_total:.1f}s`"
+        ),
+        inline=False,
+    )
+    if mesa_vazia:
+        embed_sucesso.add_field(
+            name="Observação",
+            value="A mesa estava sem registros úteis de investigação. O dossiê foi gerado com estrutura oficial e campos não informados.",
+            inline=False,
+        )
     if mensagem_dossie_url:
         embed_sucesso.add_field(name="Arquivo oficial", value=f"[Abrir envio do dossiê]({mensagem_dossie_url})", inline=False)
-    if erros_geracao:
-        embed_sucesso.add_field(name="Avisos", value="\n".join(erros_geracao)[:900], inline=False)
+    avisos = erros_geracao + erros_envio
+    if avisos:
+        embed_sucesso.add_field(name="Avisos", value="\n".join(avisos)[:900], inline=False)
 
     try:
         await canal.send(embed=embed_sucesso, view=ReabrirMesaView())
@@ -2736,13 +2914,18 @@ async def fechar_mesa_core(
             f"Mesa: {canal.mention}\n"
             f"Processo: `{dados_dossie.get('processo')}`\n"
             f"Arquivos: PDF={'sim' if 'pdf' in arquivos else 'não'} | DOCX={'sim' if 'docx' in arquivos else 'não'}\n"
+            f"Evidências: `{stats.get('evidencias', 0)}` | Mensagens: `{stats.get('mensagens_analisadas', 0)}`\n"
+            f"Tempo total: `{time.monotonic() - inicio_total:.1f}s`\n"
             f"Canal dos dossiês: <#{DOSSIE_CHANNEL_ID}>"
         )
     except Exception:
         pass
 
     try:
-        await interaction.followup.send("✅ Mesa encerrada e Dossiê Operacional gerado com sucesso.", ephemeral=True)
+        await interaction.followup.send(
+            "✅ Mesa encerrada e Dossiê Operacional gerado com sucesso. Os arquivos foram enviados na mesa/canal oficial.",
+            ephemeral=True,
+        )
     except Exception:
         pass
 
