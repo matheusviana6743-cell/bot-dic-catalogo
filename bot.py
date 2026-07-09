@@ -6124,54 +6124,36 @@ async def reabrirmesa(interaction: discord.Interaction, canal: discord.TextChann
     await reabrir_mesa_core(interaction, canal)
 
 
-@bot.tree.command(name="minhaassinatura", description="Salva sua assinatura por texto e, opcionalmente, imagem.")
+@bot.tree.command(name="minhaassinatura", description="Salva sua assinatura por imagem para aparecer no dossiê.")
 @app_commands.describe(
-    texto="Texto da assinatura que aparecerá no dossiê",
-    arquivo="Imagem opcional da assinatura em PNG/JPG/WebP",
-    nome="Nome que aparecerá abaixo da assinatura"
+    arquivo="Imagem da assinatura em PNG/JPG/WebP"
 )
 async def minhaassinatura(
     interaction: discord.Interaction,
-    texto: str,
-    arquivo: Optional[discord.Attachment] = None,
-    nome: Optional[str] = None,
+    arquivo: discord.Attachment,
 ):
-    texto = (texto or "").strip()
-    nome_final = (nome or interaction.user.display_name or str(interaction.user)).strip()
-
-    if len(texto) < 2:
-        await interaction.response.send_message("❌ Escreva o texto da assinatura.", ephemeral=True)
-        return
-
-    if len(texto) > 180:
-        await interaction.response.send_message("❌ O texto da assinatura deve ter no máximo 180 caracteres.", ephemeral=True)
-        return
-
-    if arquivo and (not arquivo.content_type or not arquivo.content_type.startswith("image/")):
-        await interaction.response.send_message("❌ A imagem opcional precisa ser PNG, JPG ou WebP.", ephemeral=True)
+    if not arquivo.content_type or not arquivo.content_type.startswith("image/"):
+        await interaction.response.send_message("❌ Envie uma imagem PNG, JPG ou WebP da assinatura.", ephemeral=True)
         return
 
     await interaction.response.defer(ephemeral=True, thinking=True)
     try:
         dados = carregar_assinaturas_dossie()
         registro = {
-            "nome": nome_final,
-            "texto": texto,
+            "nome": "",
+            "texto": "",
             "atualizado_por": str(interaction.user),
             "atualizado_em": agora_br(),
         }
 
-        if arquivo:
-            destino = ASSINATURAS_DOSSIE_DIR / f"agente_{interaction.user.id}"
-            caminho = await salvar_imagem_assinatura(arquivo, destino)
-            registro["arquivo"] = caminho_relativo_base(caminho)
-        else:
-            registro["arquivo"] = dados.get(f"agente_{interaction.user.id}", {}).get("arquivo", "")
+        destino = ASSINATURAS_DOSSIE_DIR / f"agente_{interaction.user.id}"
+        caminho = await salvar_imagem_assinatura(arquivo, destino)
+        registro["arquivo"] = caminho_relativo_base(caminho)
 
         dados[f"agente_{interaction.user.id}"] = registro
         salvar_assinaturas_dossie(dados)
         await interaction.followup.send(
-            "✅ Sua assinatura foi salva. Ela aparecerá como **Agente Responsável** nos próximos dossiês.",
+            "✅ Sua assinatura por imagem foi salva. Ela aparecerá como **Agente Responsável** nos próximos dossiês.",
             ephemeral=True,
         )
     except Exception as erro:
@@ -6179,12 +6161,10 @@ async def minhaassinatura(
         await interaction.followup.send("❌ Não consegui salvar a assinatura. Veja os logs do Railway.", ephemeral=True)
 
 
-@bot.tree.command(name="assinaturadicor", description="Configura assinatura oficial por texto e, opcionalmente, imagem.")
+@bot.tree.command(name="assinaturadicor", description="Configura assinatura oficial por imagem.")
 @app_commands.describe(
     tipo="Tipo de assinatura",
-    nome="Nome que aparecerá abaixo da assinatura",
-    texto="Texto da assinatura que aparecerá no dossiê",
-    arquivo="Imagem opcional da assinatura em PNG/JPG/WebP"
+    arquivo="Imagem da assinatura em PNG/JPG/WebP"
 )
 @app_commands.choices(tipo=[
     app_commands.Choice(name="Delegado Geral", value="delegado_geral"),
@@ -6193,27 +6173,14 @@ async def minhaassinatura(
 async def assinaturadicor(
     interaction: discord.Interaction,
     tipo: app_commands.Choice[str],
-    nome: str,
-    texto: str,
-    arquivo: Optional[discord.Attachment] = None,
+    arquivo: discord.Attachment,
 ):
     if not isinstance(interaction.user, discord.Member) or not usuario_pode_fechar_mesa(interaction.user):
         await interaction.response.send_message("❌ Apenas a ADM da DICOR pode configurar essas assinaturas.", ephemeral=True)
         return
 
-    texto = (texto or "").strip()
-    nome_final = (nome or tipo.name).strip()
-
-    if len(texto) < 2:
-        await interaction.response.send_message("❌ Escreva o texto da assinatura.", ephemeral=True)
-        return
-
-    if len(texto) > 180:
-        await interaction.response.send_message("❌ O texto da assinatura deve ter no máximo 180 caracteres.", ephemeral=True)
-        return
-
-    if arquivo and (not arquivo.content_type or not arquivo.content_type.startswith("image/")):
-        await interaction.response.send_message("❌ A imagem opcional precisa ser PNG, JPG ou WebP.", ephemeral=True)
+    if not arquivo.content_type or not arquivo.content_type.startswith("image/"):
+        await interaction.response.send_message("❌ Envie uma imagem PNG, JPG ou WebP da assinatura.", ephemeral=True)
         return
 
     await interaction.response.defer(ephemeral=True, thinking=True)
@@ -6221,18 +6188,15 @@ async def assinaturadicor(
     try:
         dados = carregar_assinaturas_dossie()
         registro = {
-            "nome": nome_final,
-            "texto": texto,
+            "nome": "",
+            "texto": "",
             "atualizado_por": str(interaction.user),
             "atualizado_em": agora_br(),
         }
 
-        if arquivo:
-            destino = ASSINATURAS_DOSSIE_DIR / chave
-            caminho = await salvar_imagem_assinatura(arquivo, destino)
-            registro["arquivo"] = caminho_relativo_base(caminho)
-        else:
-            registro["arquivo"] = dados.get(chave, {}).get("arquivo", "")
+        destino = ASSINATURAS_DOSSIE_DIR / chave
+        caminho = await salvar_imagem_assinatura(arquivo, destino)
+        registro["arquivo"] = caminho_relativo_base(caminho)
 
         dados[chave] = registro
         salvar_assinaturas_dossie(dados)
@@ -6885,37 +6849,36 @@ def pdf_add_pessoas(story: List[Any], pessoas: List[Dict[str, str]], titulo_vazi
 
 
 def pdf_add_assinaturas_dossie(story: List[Any], dados: Dict[str, Any], style_center) -> None:
+    """Adiciona assinaturas usando somente os arquivos/imagens enviados."""
     assinaturas = obter_assinaturas_dossie(dados)
     linha_imagens = []
-    linha_textos = []
     linha_vazia = []
     linha_titulos = []
-    linha_nomes = []
 
     for ass in assinaturas:
-        img = pdf_img_fit(str(limpar_imagem_assinatura_dossie(ass.get("imagem")) or ass.get("imagem") or ""), 5.05 * cm, 2.15 * cm)
-        texto_ass = str(ass.get("texto") or "").strip()
-        linha_imagens.append(img if img else Spacer(1, 0.75 * cm))
-        if texto_ass:
-            linha_textos.append(Paragraph(f"<i>{escape(texto_ass)}</i>", style_center))
-        else:
-            linha_textos.append(Spacer(1, 0.25 * cm))
+        img = pdf_img_fit(
+            str(limpar_imagem_assinatura_dossie(ass.get("imagem")) or ass.get("imagem") or ""),
+            5.25 * cm,
+            2.35 * cm,
+        )
+        linha_imagens.append(img if img else Spacer(1, 1.15 * cm))
         linha_vazia.append("")
         linha_titulos.append(pdf_paragrafo(ass.get("titulo"), style_center))
-        linha_nomes.append(pdf_paragrafo(ass.get("nome"), style_center))
 
     tabela = Table(
-        [linha_imagens, linha_textos, linha_vazia, linha_titulos, linha_nomes],
+        [linha_imagens, linha_vazia, linha_titulos],
         colWidths=[5.55 * cm, 5.55 * cm, 5.55 * cm],
         hAlign="CENTER",
     )
     tabela.setStyle(TableStyle([
         ("ALIGN", (0, 0), (-1, -1), "CENTER"),
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-        ("LINEABOVE", (0, 2), (0, 2), 0.8, colors.HexColor("#333333")),
-        ("LINEABOVE", (1, 2), (1, 2), 0.8, colors.HexColor("#333333")),
-        ("LINEABOVE", (2, 2), (2, 2), 0.8, colors.HexColor("#333333")),
+        ("LINEABOVE", (0, 1), (0, 1), 0.8, colors.HexColor("#333333")),
+        ("LINEABOVE", (1, 1), (1, 1), 0.8, colors.HexColor("#333333")),
+        ("LINEABOVE", (2, 1), (2, 1), 0.8, colors.HexColor("#333333")),
         ("PADDING", (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, 0), 2),
+        ("TOPPADDING", (0, 2), (-1, 2), 8),
     ]))
     story.append(tabela)
     story.append(Spacer(1, 0.45 * cm))
@@ -6923,7 +6886,6 @@ def pdf_add_assinaturas_dossie(story: List[Any], dados: Dict[str, Any], style_ce
         f"Assinaturas digitais vinculadas ao processo {dados.get('processo')} • Gerado em {dados.get('data_encerramento')}",
         style_center,
     ))
-
 
 def gerar_pdf_dossie(dados: Dict[str, Any], caminho_pdf: Path) -> None:
     if SimpleDocTemplate is None:
@@ -7260,8 +7222,9 @@ def configurar_docx(doc: Any, dados: Dict[str, Any]) -> None:
 
 
 def docx_add_assinaturas_dossie(doc, dados: Dict[str, Any]) -> None:
+    """Adiciona assinaturas no DOCX usando somente os arquivos/imagens enviados."""
     assinaturas = obter_assinaturas_dossie(dados)
-    tabela = doc.add_table(rows=5, cols=3)
+    tabela = doc.add_table(rows=3, cols=3)
     try:
         tabela.alignment = WD_TABLE_ALIGNMENT.CENTER
     except Exception:
@@ -7278,35 +7241,21 @@ def docx_add_assinaturas_dossie(doc, dados: Dict[str, Any]) -> None:
         imagem_limpa = limpar_imagem_assinatura_dossie(imagem) if imagem else None
         if imagem_limpa and Path(imagem_limpa).exists():
             try:
-                p_img.add_run().add_picture(str(imagem_limpa), width=Inches(2.05))
+                p_img.add_run().add_picture(str(imagem_limpa), width=Inches(2.15))
             except Exception:
                 p_img.add_run("\n")
         else:
             p_img.add_run("\n")
 
-        texto_ass = str(ass.get("texto") or "").strip()
-        p_texto = tabela.cell(1, col).paragraphs[0]
-        try:
-            p_texto.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        except Exception:
-            pass
-        run_texto = p_texto.add_run(texto_ass if texto_ass else " ")
-        try:
-            run_texto.italic = True
-            run_texto.font.size = Pt(10)
-        except Exception:
-            pass
-
-        tabela.cell(2, col).text = "________________________________"
-        tabela.cell(3, col).text = str(ass.get("titulo") or "")
-        tabela.cell(4, col).text = str(ass.get("nome") or "")
-        for row in range(2, 5):
+        tabela.cell(1, col).text = "________________________________"
+        tabela.cell(2, col).text = str(ass.get("titulo") or "")
+        for row in range(1, 3):
             p = tabela.cell(row, col).paragraphs[0]
             try:
                 p.alignment = WD_ALIGN_PARAGRAPH.CENTER
                 for run in p.runs:
-                    run.font.size = Pt(9.5 if row > 2 else 8.5)
-                    if row == 3:
+                    run.font.size = Pt(9.5 if row == 2 else 8.5)
+                    if row == 2:
                         run.bold = True
             except Exception:
                 pass
@@ -7316,7 +7265,6 @@ def docx_add_assinaturas_dossie(doc, dados: Dict[str, Any]) -> None:
         f"Assinaturas digitais vinculadas ao processo {dados.get('processo')} • Gerado em {dados.get('data_encerramento')}",
         align=WD_ALIGN_PARAGRAPH.CENTER,
     )
-
 
 def gerar_docx_dossie(dados: Dict[str, Any], caminho_docx: Path) -> None:
     if Document is None:
