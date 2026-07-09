@@ -1760,6 +1760,9 @@ class PainelMesasView(View):
     async def criar(self, interaction: discord.Interaction, button: Button):
         await interaction.response.send_modal(CriarMesaModal())
 
+    @discord.ui.button(label="🔒 Fechar Mesa", ...)
+    async def fechar_mesa(self, interaction: discord.Interaction, button: discord.ui.Button):
+
     @discord.ui.button(label="Reabrir Mesa", emoji="🔓", style=discord.ButtonStyle.blurple, custom_id="dic_reabrir_mesa")
     async def reabrir(self, interaction: discord.Interaction, button: Button):
         await interaction.response.send_message("Use `/reabrirmesa canal:#canal` para escolher a mesa que será reaberta.", ephemeral=True)
