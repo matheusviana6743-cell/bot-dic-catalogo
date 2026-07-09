@@ -1859,150 +1859,119 @@ async def criar_mesa_core(interaction: discord.Interaction, apelido: str, famili
 async def fechar_mesa_core(interaction: discord.Interaction, motivo: str = "Fechada"):
     canal = interaction.channel
     if not isinstance(canal, discord.TextChannel):
-        await interaction.response.send_message("❌ Use dentro do canal da mesa.", ephemeral=True)
         return
 
-    mesa = buscar_mesa_por_canal(canal.id)
-    if not mesa:
-        await interaction.response.send_message("❌ Esse canal não parece ser uma mesa cadastrada.", ephemeral=True)
-        return
-
-    guild = interaction.guild
-    categoria_fechada = guild.get_channel(CATEGORIA_MESAS_FECHADAS_ID) if guild and CATEGORIA_MESAS_FECHADAS_ID else None
+    # 1. Responde imediatamente para sumir o erro de "Interação falhou"
     try:
-        if categoria_fechada:
-            await canal.edit(category=categoria_fechada, name=canal.name if canal.name.startswith("🔒") else f"🔒・{canal.name}")
-        else:
-            await canal.edit(name=canal.name if canal.name.startswith("🔒") else f"🔒・{canal.name}")
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=True)
     except Exception:
         pass
 
-    mesas = carregar_mesas()
-    for m in mesas:
-        if int(m.get("canal_id", 0)) == canal.id:
-            m["status"] = "FECHADA"
-            m["fechada_em"] = agora_br()
-            m["motivo_fechamento"] = motivo
-    salvar_mesas(mesas)
+    msg_aviso = await canal.send("⏳ **[DICOR] Iniciando arquivamento e gerando Dossiê Oficial...**")
 
-    await enviar_log(f"🔒 Mesa fechada: {canal.mention} | Por: {interaction.user.mention}")
-    
-    # 1. Responde a interacao de forma segura para evitar erros na interface
-    if not interaction.response.is_done():
-        await interaction.response.send_message("Iniciando varredura e gerando Dossie...", ephemeral=True)
-        
-    msg_aviso = await canal.send("Compilando dados estruturados nas páginas oficiais...")
-    
-    # 2. Coleta automatica de evidencias enviadas no canal
+    # 2. Busca no banco sem deixar o bot travar se não encontrar
+    mesa = None
+    try:
+        mesa = buscar_mesa_por_canal(canal.id)
+    except Exception as e:
+        print(f"[DICOR LOG] Aviso: Mesa não localizada: {e}")
+
+    # 3. Move o canal de categoria
+    guild = interaction.guild
+    categoria_fechada = guild.get_channel(CATEGORIA_MESAS_FECHADAS_ID) if 'CATEGORIA_MESAS_FECHADAS_ID' in globals() else None
+    try:
+        novo_nome = canal.name if canal.name.startswith("🔒") else f"🔒-{canal.name}"
+        if categoria_fechada:
+            await canal.edit(category=categoria_fechada, name=novo_nome)
+        else:
+            await canal.edit(name=novo_nome)
+    except Exception as e:
+        print(f"[DICOR LOG] Erro ao mover categoria: {e}")
+
+    # 4. Salva status no histórico local
+    try:
+        mesas = carregar_mesas()
+        for m in mesas:
+            if int(m.get("canal_id", 0)) == canal.id:
+                m["status"] = "FECHADA"
+                m["fechada_em"] = agora_br() if 'agora_br' in globals() else "Agora"
+        salvar_mesas(mesas)
+    except Exception as e:
+        print(f"[DICOR LOG] Erro ao salvar banco local: {e}")
+
+    # 5. Monta os dados do dossiê com segurança
+    dados_relatorio = {
+        "nome": f"OPERACAO {mesa.get('familia', 'PADRAO').upper()}" if (mesa and isinstance(mesa, dict)) else f"OPERACAO {canal.name.upper()}",
+        "comunidade": mesa.get('familia', 'Setor Operacional') if (mesa and isinstance(mesa, dict)) else "Mapeamento Geral",
+        "delegado": mesa.get('autor_name', str(interaction.user.display_name)) if (mesa and isinstance(mesa, dict)) else str(interaction.user.display_name),
+        "data_abertura": mesa.get('criada_em', 'Nao Informada') if (mesa and isinstance(mesa, dict)) else "Recente",
+        "processo": str(canal.id)[-6:]
+    }
+
+    # 6. Varredura de evidências
     mensagens_provas = []
     try:
-        async for msg in canal.history(limit=200, oldest_first=True):
-            if "http://" in msg.content or "https://" in msg.content:
+        async for msg in canal.history(limit=100, oldest_first=True):
+            if "http" in msg.content:
                 mensagens_provas.append(msg.content)
             for attachment in msg.attachments:
                 mensagens_provas.append(attachment.url)
     except Exception as e:
-        print(f"Erro ao coletar historico: {e}")
+        print(f"[DICOR LOG] Erro histórico: {e}")
 
-    # 3. Organiza os metadados usando a variavel 'mesa'
-    dados_relatorio = {
-        "nome": f"OPERACAO {mesa.get('familia', 'PADRAO').upper()}" if mesa else f"OPERACAO {canal.name.upper()}",
-        "comunidade": mesa.get('familia', 'Mapeada em logs') if mesa else "Setor Operacional",
-        "delegado": mesa.get('autor_name', 'Superintendencia DICOR') if mesa else str(interaction.user.display_name),
-        "data_abertura": mesa.get('criada_em', agora_br()) if mesa else agora_br(),
-        "processo": str(canal.id)[-6:]
-    }
-
-    # 4. Geracao paralela dos relatorios locais
-    import os
+    # 7. Geração dos arquivos físicos (PDF/DOCX)
     import asyncio
     from pathlib import Path
-    
-    nome_pdf = f"DOSSIE_OPERACIONAL_{dados_relatorio['processo']}.pdf"
-    nome_docx = f"DOSSIE_OPERACIONAL_{dados_relatorio['processo']}.docx"
+    nome_pdf = f"DOSSIE_{dados_relatorio['processo']}.pdf"
+    nome_docx = f"DOSSIE_{dados_relatorio['processo']}.docx"
     pasta_saida = Path("data/dossies")
     pasta_saida.mkdir(parents=True, exist_ok=True)
     
     try:
-        await asyncio.to_thread(gerar_pdf_dossie, dados_relatorio, mensagens_provas, pasta_saida / nome_pdf)
-        await asyncio.to_thread(gerar_docx_dossie, dados_relatorio, mensagens_provas, pasta_saida / nome_docx)
+        if 'gerar_pdf_dossie' in globals():
+            await asyncio.to_thread(gerar_pdf_dossie, dados_relatorio, mensagens_provas, pasta_saida / nome_pdf)
+        if 'gerar_docx_dossie' in globals():
+            await asyncio.to_thread(gerar_docx_dossie, dados_relatorio, mensagens_provas, pasta_saida / nome_docx)
     except Exception as e:
-        print(f"Erro ao gerar arquivos de dossie: {e}")
+        print(f"[DICOR LOG] Erro gerador: {e}")
 
-    # 5. Envio automatico para o canal central configurado da PF
-    CANAL_DOSSIES_OFICIAL = 1490200477248520333
-    canal_dest = interaction.guild.get_channel(CANAL_DOSSIES_OFICIAL)
-    
-    if canal_dest:
-        embed_oficial = discord.Embed(
-            title="DIRETORIA DE INVESTIGACAO E COMBATE AO CRIME ORGANIZADO",
-            description=f"Um novo Dossie Operacional foi gerado a partir do encerramento da mesa.",
-            color=discord.Color.from_rgb(0, 43, 91)
-        )
-        embed_oficial.add_field(name="Operacao / Alvo", value=dados_relatorio["nome"], inline=True)
-        embed_oficial.add_field(name="Identificacao", value=f"Nº {dados_relatorio['processo']}", inline=True)
-        
-        files_to_send = []
-        if (pasta_saida / nome_pdf).exists(): 
-            files_to_send.append(discord.File(str(pasta_saida / nome_pdf), filename=nome_pdf))
-        if (pasta_saida / nome_docx).exists(): 
-            files_to_send.append(discord.File(str(pasta_saida / nome_docx), filename=nome_docx))
-        
-        if files_to_send:
-            await canal_dest.send(embed=embed_oficial, files=files_to_send)
+    # 8. Envia para os logs oficiais da PF
+    try:
+        CANAL_DOSSIES_OFICIAL = 1490200477248520333
+        canal_dest = guild.get_channel(CANAL_DOSSIES_OFICIAL)
+        if canal_dest:
+            embed_oficial = discord.Embed(
+                title="🏛️ DIRETORIA DE INVESTIGAÇÃO E COMBATE AO CRIME ORGANIZADO",
+                description=f"Dossiê Operacional consolidado com sucesso a partir de {canal.name}.",
+                color=discord.Color.from_rgb(0, 43, 91)
+            )
+            files_to_send = []
+            if (pasta_saida / nome_pdf).exists(): files_to_send.append(discord.File(str(pasta_saida / nome_pdf), filename=nome_pdf))
+            if (pasta_saida / nome_docx).exists(): files_to_send.append(discord.File(str(pasta_saida / nome_docx), filename=nome_docx))
+            if files_to_send:
+                await canal_dest.send(embed=embed_oficial, files=files_to_send)
+    except Exception as e:
+        print(f"[DICOR LOG] Erro logs: {e}")
 
-    # 6. Finalizacao visual
     try:
         await msg_aviso.delete()
     except Exception:
         pass
 
-    # Altera a mensagem do painel para substituir o botao vermelho pelo verde de reabrir
+    # 9. Troca os botões na interface do canal arquivado
     embed_sucesso = discord.Embed(
-        title="DIRETORIA DE INVESTIGACAO E COMBATE AO CRIME ORGANIZADO",
-        description="Esta mesa foi encerrada e o Dossie foi consolidado com sucesso no arquivo central.",
+        title="🏛️ DIRETORIA DE INVESTIGAÇÃO E COMBATE AO CRIME ORGANIZADO",
+        description="Esta mesa foi encerrada e o Dossiê foi movido para o arquivo central.",
         color=discord.Color.red()
     )
     
     try:
+        await canal.send(content="🔒 **Mesa Arquivada.**", embed=embed_sucesso, view=ReabrirMesaView())
         if interaction.message:
-            await interaction.message.edit(content="Esta mesa encontra-se arquivada.", embed=embed_sucesso, view=ReabrirMesaView())
-        else:
-            await canal.send(content="Esta mesa encontra-se arquivada.", embed=embed_sucesso, view=ReabrirMesaView())
-    except Exception:
-        await canal.send(content="Esta mesa encontra-se arquivada.", embed=embed_sucesso, view=ReabrirMesaView())
-
-async def reabrir_mesa_core(interaction: discord.Interaction, canal: discord.TextChannel):
-    mesa = buscar_mesa_por_canal(canal.id)
-    if not mesa:
-        await interaction.response.send_message("❌ Essa mesa não foi encontrada no histórico.", ephemeral=True)
-        return
-    guild = interaction.guild
-    categoria_aberta = guild.get_channel(CATEGORIA_MESAS_ABERTAS_ID) if guild and CATEGORIA_MESAS_ABERTAS_ID else None
-    try:
-        novo_nome = canal.name.replace("🔒・", "").replace("🔒-", "")
-        await canal.edit(category=categoria_aberta, name=novo_nome)
+            await interaction.message.delete()
     except Exception:
         pass
-    mesas = carregar_mesas()
-    for m in mesas:
-        if int(m.get("canal_id", 0)) == canal.id:
-            m["status"] = "ABERTA"
-            m["reaberta_em"] = agora_br()
-    salvar_mesas(mesas)
-    await enviar_log(f"🔓 Mesa reaberta: {canal.mention} | Por: {interaction.user.mention}")
-    await interaction.response.send_message(f"🔓 Mesa reaberta: {canal.mention}", ephemeral=True)
-
-
-async def historico_mesa_core(interaction: discord.Interaction):
-    mesas = carregar_mesas()
-    if not mesas:
-        await interaction.response.send_message("📂 Nenhuma mesa registrada ainda.", ephemeral=True)
-        return
-    linhas = []
-    for m in mesas[-25:]:
-        linhas.append(f"• **{m.get('familia','Sem nome')}** | `{m.get('status')}` | <#{m.get('canal_id')}> | {m.get('criada_em')}")
-    await interaction.response.send_message("📂 **Histórico de Mesas:**\n" + "\n".join(linhas), ephemeral=True)
 
 
 async def backup_core(interaction: discord.Interaction):
