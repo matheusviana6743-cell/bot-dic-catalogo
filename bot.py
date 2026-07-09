@@ -1760,8 +1760,18 @@ class PainelMesasView(View):
     async def criar(self, interaction: discord.Interaction, button: Button):
         await interaction.response.send_modal(CriarMesaModal())
 
-    @discord.ui.button(label="🔒 Fechar Mesa", ...)
-    async def fechar_mesa(self, interaction: discord.Interaction, button: discord.ui.Button):
+    @discord.ui.button(
+    label="🔒 Fechar Mesa",
+    emoji="🔒",
+    style=discord.ButtonStyle.red,
+    custom_id="dic_fechar_mesa"
+)
+async def fechar_mesa(self, interaction: discord.Interaction, button: discord.ui.Button):
+    await interaction.response.send_message(
+        "⚠️ Tem certeza que deseja encerrar esta investigação?",
+        view=ConfirmacaoFecharMesaView(),
+        ephemeral=True
+    )
 
     @discord.ui.button(label="Reabrir Mesa", emoji="🔓", style=discord.ButtonStyle.blurple, custom_id="dic_reabrir_mesa")
     async def reabrir(self, interaction: discord.Interaction, button: Button):
