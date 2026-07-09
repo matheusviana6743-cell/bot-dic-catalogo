@@ -4853,7 +4853,7 @@ async def on_ready():
     print(f"Bot online como {bot.user}")
 
 # =====================================================
-# SISTEMA DE PAINEL DE RELATÓRIOS OPERACIONAIS (CORRIGIDO)
+# SISTEMA DE PAINEL DE RELATÓRIOS OPERACIONAIS (ATUALIZADO)
 # =====================================================
 
 RELATORIOS_CONTADOR_JSON = DATA_DIR / "relatorios_contador.json"
@@ -4918,16 +4918,18 @@ class RelatoriosPainelView(View):
         await interaction.followup.send(f"✅ Canal de relatório criado: {canal.mention}", ephemeral=True)
         
         embed = discord.Embed(
-            title=f"📝 Formulário — {titulo_bonito}",
+            title=f"📝 {titulo_bonito.upper()} — INSTRUÇÕES",
             description=(
-                f"Bem-vindo ao seu canal temporário de relatório, {interaction.user.mention}.\n\n"
-                "**Instruções:**\n"
-                "1. Clique no botão abaixo para abrir o formulário e preencher as informações.\n"
-                "2. Após enviar o formulário, utilize este canal para enviar imagens, prints ou provas adicionais desejadas antes do encerramento."
+                f"Olá {interaction.user.mention}, o seu canal de relatório provisório foi gerado com sucesso!\n\n"
+                "**Siga os passos abaixo para concluir o procedimento:**\n\n"
+                "📸 **1. ENVIE AS PROVAS NESTE CANAL**\n"
+                "Antes de preencher o formulário, faça o upload de todas as imagens, prints, links ou registros fotográficos necessários diretamente aqui no chat.\n\n"
+                "✍️ **2. PREENCHA O FORMULÁRIO A SEGUIR**\n"
+                "Clique no botão azul abaixo para abrir o formulário oficial e preencher os dados requeridos. Ao enviar, o relatório será gerado automaticamente."
             ),
             color=discord.Color.blue()
         )
-        embed.set_footer(text="DICOR • Sistema de Relatórios")
+        embed.set_footer(text="DICOR • Procedimento Operacional Padrão")
         await canal.send(content=interaction.user.mention, embed=embed, view=IniciarFormularioRelatorioView(tipo))
 
     @discord.ui.button(label="👀 TOCAIA", style=discord.ButtonStyle.secondary, custom_id="rel_btn_tocaia")
@@ -4953,7 +4955,6 @@ class IniciarFormularioRelatorioView(View):
 
     @discord.ui.button(label="✍️ Preencher Formulário", style=discord.ButtonStyle.primary, custom_id="rel_btn_preencher")
     async def preencher(self, interaction: discord.Interaction, button: Button):
-        # Detecta dinamicamente o tipo baseado no nome do canal se o estado da view for resetado
         tipo_atual = self.tipo
         nome_canal = interaction.channel.name if interaction.channel else ""
         if "olb" in nome_canal:
@@ -5063,12 +5064,10 @@ class PericiaExternaModal(Modal, title="Perícia Externa"):
         await finalizar_e_postar_relatorio(interaction, "pericia_externa", texto)
 
 class RelatorioDiarioModal(Modal, title="Relatório Diário de Perícia"):
-    material = TextInput(label="Material apreendido", style=discord.TextStyle.paragraph, placeholder="Descrição detalhada", max_length=400)
-    local = TextInput(label="Local", placeholder="Local dos fatos", max_length=150)
-    proprietario = TextInput(label="Proprietário", placeholder="Nome completo", max_length=150, required=False)
-    telefone = TextInput(label="Telefone", placeholder="Contato", max_length=50, required=False)
-    rg_doc = TextInput(label="RG / Placa / Modelo", placeholder="Documentos e Veículo", max_length=150, required=False)
-    relato = TextInput(label="Relato dos fatos", style=discord.TextStyle.paragraph, placeholder="Resumo dos acontecimentos", max_length=1000)
+    material = TextInput(label="Material apreendido", style=discord.TextStyle.paragraph, placeholder="Descrição detalhada do material", max_length=400)
+    local = TextInput(label="Local dos fatos", placeholder="Local da ocorrência", max_length=150)
+    complementares = TextInput(label="Dados do Proprietário (Se houver)", placeholder="Nome, Telefone, RG ou Placa do veículo", max_length=300, required=False)
+    relato = TextInput(label="Relato dos fatos", style=discord.TextStyle.paragraph, placeholder="Resumo detalhado dos acontecimentos", max_length=1000)
 
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
@@ -5079,10 +5078,7 @@ class RelatorioDiarioModal(Modal, title="Relatório Diário de Perícia"):
             f"**👤 PERITO RESPONSÁVEL:** {interaction.user.mention}\n"
             f"**📍 LOCAL DOS FATOS:** {self.local.value}\n\n"
             f"**📦 MATERIAL ANALISADO:**\n{self.material.value}\n\n"
-            f"**🪪 DADOS COMPLEMENTARES:**\n"
-            f"• Proprietário: {self.proprietario.value or 'Não informado'}\n"
-            f"• Contato: {self.telefone.value or 'Não informado'}\n"
-            f"• Doc/Veículo: {self.rg_doc.value or 'Não informado'}\n\n"
+            f"**🪪 DADOS COMPLEMENTARES:**\n{self.complementares.value or 'Nenhum dado informado.'}\n\n"
             f"**📖 RELATO DOS FATOS:**\n{self.relato.value}\n\n"
             f"📅 *Enviado em {data_hora.split()[0]} às {data_hora.split()[1]}*"
         )
@@ -5100,7 +5096,7 @@ async def painel_relatorios(interaction: discord.Interaction):
             "👀 **TOCAIA:** Registrar vigilâncias em locais de interesse.\n"
             "🚔 **OLB:** Registro de emboscadas e operações planejadas.\n"
             "🔬 **PERÍCIA EXTERNA:** Análises e levantamentos periciais externos.\n"
-            "📑 **RELATÓRIO DIÁRIO:** Consolidação de perícias investigativas realizadas."
+            "📑 **RELATÓRIO DIÁRIO:** Consolidação de卑erícias investigativas realizadas."
         ),
         color=discord.Color.blurple()
     )
