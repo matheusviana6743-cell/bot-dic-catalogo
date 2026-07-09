@@ -117,6 +117,9 @@ ASSINATURA_DELEGADO_DICOR_NOME = os.getenv("ASSINATURA_DELEGADO_DICOR_NOME", "De
 ASSINATURA_DELEGADO_GERAL_IMAGEM = os.getenv("ASSINATURA_DELEGADO_GERAL_IMAGEM", "").strip()
 ASSINATURA_DELEGADO_DICOR_IMAGEM = os.getenv("ASSINATURA_DELEGADO_DICOR_IMAGEM", "").strip()
 ASSINATURA_AGENTE_RESPONSAVEL_IMAGEM = os.getenv("ASSINATURA_AGENTE_RESPONSAVEL_IMAGEM", "").strip()
+ASSINATURA_DELEGADO_GERAL_TEXTO = os.getenv("ASSINATURA_DELEGADO_GERAL_TEXTO", "").strip()
+ASSINATURA_DELEGADO_DICOR_TEXTO = os.getenv("ASSINATURA_DELEGADO_DICOR_TEXTO", "").strip()
+ASSINATURA_AGENTE_RESPONSAVEL_TEXTO = os.getenv("ASSINATURA_AGENTE_RESPONSAVEL_TEXTO", "").strip()
 
 # Catalogo
 CATALOG_PUBLIC_URL = os.getenv("CATALOG_PUBLIC_URL", "http://127.0.0.1:8000/").strip()
@@ -264,6 +267,115 @@ async def salvar_imagem_assinatura(arquivo: discord.Attachment, destino: Path) -
     destino = destino.with_suffix(extensao)
     await arquivo.save(str(destino))
     return destino
+
+
+# -----------------------------------------------------
+# Tratamento visual das imagens do dossiê
+# Remove fundo preto/branco de borda, corta sobra vazia e deixa brasões/assinaturas maiores e limpos.
+# -----------------------------------------------------
+def _is_dark_pixel(px) -> bool:
+    r, g, b, a = px
+    return a > 0 and r < 38 and g < 38 and b < 38
+
+
+def _flood_transparent_from_edges(img, predicate) -> None:
+    """Deixa transparente apenas o fundo conectado às bordas, preservando detalhes internos."""
+    if PILImage is None:
+        return
+    w, h = img.size
+    pix = img.load()
+    visitados = set()
+    pilha = []
+
+    for x in range(w):
+        pilha.append((x, 0))
+        pilha.append((x, h - 1))
+    for y in range(h):
+        pilha.append((0, y))
+        pilha.append((w - 1, y))
+
+    while pilha:
+        x, y = pilha.pop()
+        if x < 0 or y < 0 or x >= w or y >= h or (x, y) in visitados:
+            continue
+        visitados.add((x, y))
+        r, g, b, a = pix[x, y]
+        if not predicate((r, g, b, a)):
+            continue
+        pix[x, y] = (r, g, b, 0)
+        pilha.append((x + 1, y))
+        pilha.append((x - 1, y))
+        pilha.append((x, y + 1))
+        pilha.append((x, y - 1))
+
+
+def limpar_imagem_brasao_dossie(caminho: Optional[Path]) -> Optional[Path]:
+    """Remove o quadrado preto externo dos brasões e gera PNG com transparência."""
+    if not caminho or not Path(caminho).exists() or PILImage is None:
+        return caminho
+    try:
+        caminho = Path(caminho)
+        cache = DOSSIE_ASSETS_DIR / f"limpo_{caminho.stem}_{int(caminho.stat().st_mtime)}.png"
+        if cache.exists():
+            return cache
+
+        img = PILImage.open(caminho).convert("RGBA")
+        _flood_transparent_from_edges(img, _is_dark_pixel)
+
+        # Corta a sobra transparente ao redor, mantendo pequena margem para não encostar no texto.
+        alpha = img.getchannel("A")
+        bbox = alpha.getbbox()
+        if bbox:
+            margem = 18
+            left = max(0, bbox[0] - margem)
+            top = max(0, bbox[1] - margem)
+            right = min(img.size[0], bbox[2] + margem)
+            bottom = min(img.size[1], bbox[3] + margem)
+            img = img.crop((left, top, right, bottom))
+
+        img.save(cache, "PNG")
+        return cache
+    except Exception:
+        return caminho
+
+
+def limpar_imagem_assinatura_dossie(caminho: Optional[Path]) -> Optional[Path]:
+    """Corta espaços brancos da assinatura e remove fundo branco quando houver."""
+    if not caminho or not Path(caminho).exists() or PILImage is None:
+        return caminho
+    try:
+        caminho = Path(caminho)
+        cache = DOSSIE_ASSETS_DIR / "assinaturas" / f"limpa_{caminho.stem}_{int(caminho.stat().st_mtime)}.png"
+        if cache.exists():
+            return cache
+
+        img = PILImage.open(caminho).convert("RGBA")
+        pix = img.load()
+        w, h = img.size
+
+        # Remove fundo branco/claro em imagens de assinatura escaneada/printada.
+        for y in range(h):
+            for x in range(w):
+                r, g, b, a = pix[x, y]
+                if a == 0:
+                    continue
+                if r > 232 and g > 232 and b > 232:
+                    pix[x, y] = (r, g, b, 0)
+
+        alpha = img.getchannel("A")
+        bbox = alpha.getbbox()
+        if bbox:
+            margem = 12
+            left = max(0, bbox[0] - margem)
+            top = max(0, bbox[1] - margem)
+            right = min(img.size[0], bbox[2] + margem)
+            bottom = min(img.size[1], bbox[3] + margem)
+            img = img.crop((left, top, right, bottom))
+
+        img.save(cache, "PNG")
+        return cache
+    except Exception:
+        return caminho
 
 
 def garantir_senha_catalogo() -> str:
@@ -6012,61 +6124,160 @@ async def reabrirmesa(interaction: discord.Interaction, canal: discord.TextChann
     await reabrir_mesa_core(interaction, canal)
 
 
-@bot.tree.command(name="minhaassinatura", description="Salva a sua assinatura para aparecer como Agente Responsável nos dossiês.")
-@app_commands.describe(arquivo="Imagem da assinatura em PNG/JPG/WebP")
-async def minhaassinatura(interaction: discord.Interaction, arquivo: discord.Attachment):
-    if not arquivo.content_type or not arquivo.content_type.startswith("image/"):
-        await interaction.response.send_message("❌ Envie uma imagem da assinatura em PNG, JPG ou WebP.", ephemeral=True)
+@bot.tree.command(name="minhaassinatura", description="Salva sua assinatura por texto e, opcionalmente, imagem.")
+@app_commands.describe(
+    texto="Texto da assinatura que aparecerá no dossiê",
+    arquivo="Imagem opcional da assinatura em PNG/JPG/WebP",
+    nome="Nome que aparecerá abaixo da assinatura"
+)
+async def minhaassinatura(
+    interaction: discord.Interaction,
+    texto: str,
+    arquivo: Optional[discord.Attachment] = None,
+    nome: Optional[str] = None,
+):
+    texto = (texto or "").strip()
+    nome_final = (nome or interaction.user.display_name or str(interaction.user)).strip()
+
+    if len(texto) < 2:
+        await interaction.response.send_message("❌ Escreva o texto da assinatura.", ephemeral=True)
+        return
+
+    if len(texto) > 180:
+        await interaction.response.send_message("❌ O texto da assinatura deve ter no máximo 180 caracteres.", ephemeral=True)
+        return
+
+    if arquivo and (not arquivo.content_type or not arquivo.content_type.startswith("image/")):
+        await interaction.response.send_message("❌ A imagem opcional precisa ser PNG, JPG ou WebP.", ephemeral=True)
         return
 
     await interaction.response.defer(ephemeral=True, thinking=True)
-    destino = ASSINATURAS_DOSSIE_DIR / f"agente_{interaction.user.id}"
     try:
-        caminho = await salvar_imagem_assinatura(arquivo, destino)
         dados = carregar_assinaturas_dossie()
-        dados[f"agente_{interaction.user.id}"] = {
-            "nome": str(interaction.user),
-            "arquivo": caminho_relativo_base(caminho),
+        registro = {
+            "nome": nome_final,
+            "texto": texto,
+            "atualizado_por": str(interaction.user),
             "atualizado_em": agora_br(),
         }
+
+        if arquivo:
+            destino = ASSINATURAS_DOSSIE_DIR / f"agente_{interaction.user.id}"
+            caminho = await salvar_imagem_assinatura(arquivo, destino)
+            registro["arquivo"] = caminho_relativo_base(caminho)
+        else:
+            registro["arquivo"] = dados.get(f"agente_{interaction.user.id}", {}).get("arquivo", "")
+
+        dados[f"agente_{interaction.user.id}"] = registro
         salvar_assinaturas_dossie(dados)
-        await interaction.followup.send("✅ Sua assinatura foi salva. Agora ela aparecerá quando você fechar uma mesa.", ephemeral=True)
+        await interaction.followup.send(
+            "✅ Sua assinatura foi salva. Ela aparecerá como **Agente Responsável** nos próximos dossiês.",
+            ephemeral=True,
+        )
     except Exception as erro:
         await enviar_log(f"❌ Erro ao salvar assinatura do agente {interaction.user}: {erro}")
         await interaction.followup.send("❌ Não consegui salvar a assinatura. Veja os logs do Railway.", ephemeral=True)
 
 
-@bot.tree.command(name="assinaturadicor", description="Configura assinatura do Delegado Geral ou Delegado DICOR no dossiê.")
-@app_commands.describe(tipo="Tipo de assinatura", nome="Nome que aparecerá abaixo da assinatura", arquivo="Imagem da assinatura em PNG/JPG/WebP")
+@bot.tree.command(name="assinaturadicor", description="Configura assinatura oficial por texto e, opcionalmente, imagem.")
+@app_commands.describe(
+    tipo="Tipo de assinatura",
+    nome="Nome que aparecerá abaixo da assinatura",
+    texto="Texto da assinatura que aparecerá no dossiê",
+    arquivo="Imagem opcional da assinatura em PNG/JPG/WebP"
+)
 @app_commands.choices(tipo=[
     app_commands.Choice(name="Delegado Geral", value="delegado_geral"),
     app_commands.Choice(name="Delegado DICOR", value="delegado_dicor"),
 ])
-async def assinaturadicor(interaction: discord.Interaction, tipo: app_commands.Choice[str], nome: str, arquivo: discord.Attachment):
+async def assinaturadicor(
+    interaction: discord.Interaction,
+    tipo: app_commands.Choice[str],
+    nome: str,
+    texto: str,
+    arquivo: Optional[discord.Attachment] = None,
+):
     if not isinstance(interaction.user, discord.Member) or not usuario_pode_fechar_mesa(interaction.user):
         await interaction.response.send_message("❌ Apenas a ADM da DICOR pode configurar essas assinaturas.", ephemeral=True)
         return
-    if not arquivo.content_type or not arquivo.content_type.startswith("image/"):
-        await interaction.response.send_message("❌ Envie uma imagem da assinatura em PNG, JPG ou WebP.", ephemeral=True)
+
+    texto = (texto or "").strip()
+    nome_final = (nome or tipo.name).strip()
+
+    if len(texto) < 2:
+        await interaction.response.send_message("❌ Escreva o texto da assinatura.", ephemeral=True)
+        return
+
+    if len(texto) > 180:
+        await interaction.response.send_message("❌ O texto da assinatura deve ter no máximo 180 caracteres.", ephemeral=True)
+        return
+
+    if arquivo and (not arquivo.content_type or not arquivo.content_type.startswith("image/")):
+        await interaction.response.send_message("❌ A imagem opcional precisa ser PNG, JPG ou WebP.", ephemeral=True)
         return
 
     await interaction.response.defer(ephemeral=True, thinking=True)
     chave = tipo.value
-    destino = ASSINATURAS_DOSSIE_DIR / chave
     try:
-        caminho = await salvar_imagem_assinatura(arquivo, destino)
         dados = carregar_assinaturas_dossie()
-        dados[chave] = {
-            "nome": nome.strip() or tipo.name,
-            "arquivo": caminho_relativo_base(caminho),
+        registro = {
+            "nome": nome_final,
+            "texto": texto,
             "atualizado_por": str(interaction.user),
             "atualizado_em": agora_br(),
         }
+
+        if arquivo:
+            destino = ASSINATURAS_DOSSIE_DIR / chave
+            caminho = await salvar_imagem_assinatura(arquivo, destino)
+            registro["arquivo"] = caminho_relativo_base(caminho)
+        else:
+            registro["arquivo"] = dados.get(chave, {}).get("arquivo", "")
+
+        dados[chave] = registro
         salvar_assinaturas_dossie(dados)
         await interaction.followup.send(f"✅ Assinatura de **{tipo.name}** salva com sucesso.", ephemeral=True)
     except Exception as erro:
         await enviar_log(f"❌ Erro ao salvar assinatura {chave}: {erro}")
         await interaction.followup.send("❌ Não consegui salvar a assinatura. Veja os logs do Railway.", ephemeral=True)
+
+
+@bot.tree.command(name="verassinaturas", description="Mostra quais assinaturas do dossiê estão configuradas.")
+async def verassinaturas(interaction: discord.Interaction):
+    registros = carregar_assinaturas_dossie()
+    agente_chave = f"agente_{interaction.user.id}"
+
+    def status(chave: str, titulo: str) -> str:
+        reg = registros.get(chave, {}) if isinstance(registros, dict) else {}
+        tem_texto = bool(str(reg.get("texto", "") or "").strip())
+        tem_img = bool(caminho_assinatura_registrada(reg))
+        nome = str(reg.get("nome", titulo) or titulo)
+        return f"• **{titulo}:** {nome} | Texto: {'✅' if tem_texto else '❌'} | Imagem: {'✅' if tem_img else '❌'}"
+
+    texto = "\n".join([
+        status("delegado_geral", "Delegado Geral"),
+        status("delegado_dicor", "Delegado DICOR"),
+        status(agente_chave, "Minha assinatura"),
+    ])
+    await interaction.response.send_message(f"📋 **Assinaturas configuradas:**\n{texto}", ephemeral=True)
+
+
+@bot.tree.command(name="apagarminhaassinatura", description="Apaga sua assinatura de agente responsável.")
+async def apagarminhaassinatura(interaction: discord.Interaction):
+    dados = carregar_assinaturas_dossie()
+    chave = f"agente_{interaction.user.id}"
+    reg = dados.pop(chave, None)
+    if reg:
+        caminho = caminho_assinatura_registrada(reg)
+        if caminho:
+            try:
+                caminho.unlink()
+            except Exception:
+                pass
+        salvar_assinaturas_dossie(dados)
+        await interaction.response.send_message("✅ Sua assinatura foi apagada.", ephemeral=True)
+    else:
+        await interaction.response.send_message("⚠️ Você ainda não tinha assinatura salva.", ephemeral=True)
 
 
 @bot.tree.command(name="historicomesa", description="Mostra histórico das mesas.")
@@ -6462,16 +6673,14 @@ DICOR_CINZA = "F4F6F8"
 
 def caminho_brasao_pf() -> Optional[Path]:
     externo = caminho_arquivo_configurado("", ["brasao_pf.png", "brasao_pf.jpg", "pf.png", "pf.jpg"])
-    if externo:
-        return externo
-    return escrever_asset_padrao("brasao_pf_padrao.jpg", DOSSIE_BRASAO_PF_PADRAO_B64)
+    caminho = externo or escrever_asset_padrao("brasao_pf_padrao.jpg", DOSSIE_BRASAO_PF_PADRAO_B64)
+    return limpar_imagem_brasao_dossie(caminho)
 
 
 def caminho_brasao_dicor() -> Optional[Path]:
     externo = caminho_arquivo_configurado("", ["brasao_dicor.png", "brasao_dicor.jpg", "dicor.png", "dicor.jpg"])
-    if externo:
-        return externo
-    return escrever_asset_padrao("brasao_dicor_padrao.jpg", DOSSIE_BRASAO_DICOR_PADRAO_B64)
+    caminho = externo or escrever_asset_padrao("brasao_dicor_padrao.jpg", DOSSIE_BRASAO_DICOR_PADRAO_B64)
+    return limpar_imagem_brasao_dossie(caminho)
 
 
 def obter_assinaturas_dossie(dados: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -6485,6 +6694,7 @@ def obter_assinaturas_dossie(dados: Dict[str, Any]) -> List[Dict[str, Any]]:
         {
             "titulo": "DELEGADO GERAL",
             "nome": delegado_geral.get("nome") or ASSINATURA_DELEGADO_GERAL_NOME,
+            "texto": delegado_geral.get("texto") or ASSINATURA_DELEGADO_GERAL_TEXTO,
             "imagem": caminho_assinatura_registrada(delegado_geral) or caminho_arquivo_configurado(ASSINATURA_DELEGADO_GERAL_IMAGEM, [
                 "assinatura_delegado_geral.png", "assinatura_delegado_geral.jpg",
             ]),
@@ -6492,6 +6702,7 @@ def obter_assinaturas_dossie(dados: Dict[str, Any]) -> List[Dict[str, Any]]:
         {
             "titulo": "DELEGADO DICOR",
             "nome": delegado_dicor.get("nome") or ASSINATURA_DELEGADO_DICOR_NOME,
+            "texto": delegado_dicor.get("texto") or ASSINATURA_DELEGADO_DICOR_TEXTO,
             "imagem": caminho_assinatura_registrada(delegado_dicor) or caminho_arquivo_configurado(ASSINATURA_DELEGADO_DICOR_IMAGEM, [
                 "assinatura_delegado_dicor.png", "assinatura_delegado_dicor.jpg",
             ]),
@@ -6499,6 +6710,7 @@ def obter_assinaturas_dossie(dados: Dict[str, Any]) -> List[Dict[str, Any]]:
         {
             "titulo": "AGENTE RESPONSÁVEL",
             "nome": agente_reg.get("nome") or dados.get("agente_encerramento") or "Agente responsável",
+            "texto": agente_reg.get("texto") or ASSINATURA_AGENTE_RESPONSAVEL_TEXTO,
             "imagem": caminho_assinatura_registrada(agente_reg) or caminho_arquivo_configurado(ASSINATURA_AGENTE_RESPONSAVEL_IMAGEM, [
                 "assinatura_agente_responsavel.png", "assinatura_agente_responsavel.jpg",
             ]),
@@ -6675,28 +6887,34 @@ def pdf_add_pessoas(story: List[Any], pessoas: List[Dict[str, str]], titulo_vazi
 def pdf_add_assinaturas_dossie(story: List[Any], dados: Dict[str, Any], style_center) -> None:
     assinaturas = obter_assinaturas_dossie(dados)
     linha_imagens = []
+    linha_textos = []
     linha_vazia = []
     linha_titulos = []
     linha_nomes = []
 
     for ass in assinaturas:
-        img = pdf_img_fit(str(ass.get("imagem") or ""), 4.3 * cm, 1.45 * cm)
-        linha_imagens.append(img if img else Spacer(1, 1.45 * cm))
+        img = pdf_img_fit(str(limpar_imagem_assinatura_dossie(ass.get("imagem")) or ass.get("imagem") or ""), 5.05 * cm, 2.15 * cm)
+        texto_ass = str(ass.get("texto") or "").strip()
+        linha_imagens.append(img if img else Spacer(1, 0.75 * cm))
+        if texto_ass:
+            linha_textos.append(Paragraph(f"<i>{escape(texto_ass)}</i>", style_center))
+        else:
+            linha_textos.append(Spacer(1, 0.25 * cm))
         linha_vazia.append("")
         linha_titulos.append(pdf_paragrafo(ass.get("titulo"), style_center))
         linha_nomes.append(pdf_paragrafo(ass.get("nome"), style_center))
 
     tabela = Table(
-        [linha_imagens, linha_vazia, linha_titulos, linha_nomes],
-        colWidths=[5.35 * cm, 5.35 * cm, 5.35 * cm],
+        [linha_imagens, linha_textos, linha_vazia, linha_titulos, linha_nomes],
+        colWidths=[5.55 * cm, 5.55 * cm, 5.55 * cm],
         hAlign="CENTER",
     )
     tabela.setStyle(TableStyle([
         ("ALIGN", (0, 0), (-1, -1), "CENTER"),
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-        ("LINEABOVE", (0, 1), (0, 1), 0.8, colors.HexColor("#333333")),
-        ("LINEABOVE", (1, 1), (1, 1), 0.8, colors.HexColor("#333333")),
-        ("LINEABOVE", (2, 1), (2, 1), 0.8, colors.HexColor("#333333")),
+        ("LINEABOVE", (0, 2), (0, 2), 0.8, colors.HexColor("#333333")),
+        ("LINEABOVE", (1, 2), (1, 2), 0.8, colors.HexColor("#333333")),
+        ("LINEABOVE", (2, 2), (2, 2), 0.8, colors.HexColor("#333333")),
         ("PADDING", (0, 0), (-1, -1), 4),
     ]))
     story.append(tabela)
@@ -6738,12 +6956,12 @@ def gerar_pdf_dossie(dados: Dict[str, Any], caminho_pdf: Path) -> None:
     # Página 1 — Capa
     brasao_pf = caminho_brasao_pf()
     brasao_dicor = caminho_brasao_dicor()
-    img_pf = pdf_img_fit(str(brasao_pf), 2.2 * cm, 2.2 * cm) if brasao_pf else pdf_paragrafo("PF", style_center)
-    img_dicor = pdf_img_fit(str(brasao_dicor), 2.2 * cm, 2.2 * cm) if brasao_dicor else pdf_paragrafo("DICOR", style_center)
-    cab = Table([[img_pf, pdf_paragrafo("REPÚBLICA FEDERATIVA DO BRASIL\nMINISTÉRIO DA JUSTIÇA E SEGURANÇA PÚBLICA\nPOLÍCIA FEDERAL", style_center), img_dicor]], colWidths=[3 * cm, 10.5 * cm, 3 * cm])
+    img_pf = pdf_img_fit(str(brasao_pf), 3.45 * cm, 3.45 * cm) if brasao_pf else pdf_paragrafo("PF", style_center)
+    img_dicor = pdf_img_fit(str(brasao_dicor), 3.45 * cm, 3.45 * cm) if brasao_dicor else pdf_paragrafo("DICOR", style_center)
+    cab = Table([[img_pf, pdf_paragrafo("REPÚBLICA FEDERATIVA DO BRASIL\nMINISTÉRIO DA JUSTIÇA E SEGURANÇA PÚBLICA\nPOLÍCIA FEDERAL", style_center), img_dicor]], colWidths=[4.05 * cm, 9.3 * cm, 4.05 * cm])
     cab.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "MIDDLE"), ("ALIGN", (0, 0), (-1, -1), "CENTER")]))
     story.append(cab)
-    story.append(Spacer(1, 1.2 * cm))
+    story.append(Spacer(1, 0.75 * cm))
     story.append(Paragraph("POLÍCIA FEDERAL", style_title))
     story.append(Paragraph("DIRETORIA DE INVESTIGAÇÃO E COMBATE AO CRIME ORGANIZADO - DICOR", style_subtitle))
     faixa = Table([[pdf_paragrafo("DOCUMENTO RESERVADO • INTELIGÊNCIA • INVESTIGAÇÃO • RESULTADO", style_center)]], colWidths=[16 * cm])
@@ -7043,7 +7261,7 @@ def configurar_docx(doc: Any, dados: Dict[str, Any]) -> None:
 
 def docx_add_assinaturas_dossie(doc, dados: Dict[str, Any]) -> None:
     assinaturas = obter_assinaturas_dossie(dados)
-    tabela = doc.add_table(rows=4, cols=3)
+    tabela = doc.add_table(rows=5, cols=3)
     try:
         tabela.alignment = WD_TABLE_ALIGNMENT.CENTER
     except Exception:
@@ -7057,24 +7275,38 @@ def docx_add_assinaturas_dossie(doc, dados: Dict[str, Any]) -> None:
         except Exception:
             pass
         imagem = ass.get("imagem")
-        if imagem and Path(imagem).exists():
+        imagem_limpa = limpar_imagem_assinatura_dossie(imagem) if imagem else None
+        if imagem_limpa and Path(imagem_limpa).exists():
             try:
-                p_img.add_run().add_picture(str(imagem), width=Inches(1.55))
+                p_img.add_run().add_picture(str(imagem_limpa), width=Inches(2.05))
             except Exception:
                 p_img.add_run("\n")
         else:
-            p_img.add_run("\n\n")
+            p_img.add_run("\n")
 
-        tabela.cell(1, col).text = "________________________________"
-        tabela.cell(2, col).text = str(ass.get("titulo") or "")
-        tabela.cell(3, col).text = str(ass.get("nome") or "")
-        for row in range(1, 4):
+        texto_ass = str(ass.get("texto") or "").strip()
+        p_texto = tabela.cell(1, col).paragraphs[0]
+        try:
+            p_texto.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        except Exception:
+            pass
+        run_texto = p_texto.add_run(texto_ass if texto_ass else " ")
+        try:
+            run_texto.italic = True
+            run_texto.font.size = Pt(10)
+        except Exception:
+            pass
+
+        tabela.cell(2, col).text = "________________________________"
+        tabela.cell(3, col).text = str(ass.get("titulo") or "")
+        tabela.cell(4, col).text = str(ass.get("nome") or "")
+        for row in range(2, 5):
             p = tabela.cell(row, col).paragraphs[0]
             try:
                 p.alignment = WD_ALIGN_PARAGRAPH.CENTER
                 for run in p.runs:
-                    run.font.size = Pt(8.5 if row > 1 else 8)
-                    if row == 2:
+                    run.font.size = Pt(9.5 if row > 2 else 8.5)
+                    if row == 3:
                         run.bold = True
             except Exception:
                 pass
@@ -7101,7 +7333,7 @@ def gerar_docx_dossie(dados: Dict[str, Any], caminho_docx: Path) -> None:
     for caminho in [caminho_brasao_pf(), caminho_brasao_dicor()]:
         if caminho:
             try:
-                p.add_run().add_picture(str(caminho), width=Inches(0.9))
+                p.add_run().add_picture(str(caminho), width=Inches(1.45))
                 p.add_run("   ")
             except Exception:
                 pass
