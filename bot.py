@@ -1887,13 +1887,13 @@ async def fechar_mesa_core(interaction: discord.Interaction, motivo: str = "Fech
 
     await enviar_log(f"🔒 Mesa fechada: {canal.mention} | Por: {interaction.user.mention}")
     
-    # 1. Avisa no chat e responde à interação para evitar o erro "Esta interação falhou"
+    # 1. Responde a interacao de forma segura para evitar erros na interface
     if not interaction.response.is_done():
-        await interaction.response.send_message("⏳ **[SISTEMA DICOR] Iniciando varredura tática e coleta de dados...**", ephemeral=True)
+        await interaction.response.send_message("Iniciando varredura e gerando Dossie...", ephemeral=True)
+        
+    msg_aviso = await canal.send("Compilando dados estruturados nas páginas oficiais...")
     
-    msg_aviso = await canal.send("📄 **Compilando dados estruturados nas páginas oficiais da Polícia Federal...**")
-    
-    # 2. Coleta automática de evidências enviadas no canal (links e anexos)
+    # 2. Coleta automatica de evidencias enviadas no canal
     mensagens_provas = []
     try:
         async for msg in canal.history(limit=200, oldest_first=True):
@@ -1902,18 +1902,18 @@ async def fechar_mesa_core(interaction: discord.Interaction, motivo: str = "Fech
             for attachment in msg.attachments:
                 mensagens_provas.append(attachment.url)
     except Exception as e:
-        print(f"Erro ao coletar histórico: {e}")
+        print(f"Erro ao coletar historico: {e}")
 
-    # 3. Organiza os metadados usando a variável 'mesa' que seu código buscou no banco
+    # 3. Organiza os metadados usando a variavel 'mesa'
     dados_relatorio = {
-        "nome": f"OPERAÇÃO {mesa.get('familia', 'PADRÃO').upper()}" if mesa else f"OPERAÇÃO {canal.name.upper()}",
+        "nome": f"OPERACAO {mesa.get('familia', 'PADRAO').upper()}" if mesa else f"OPERACAO {canal.name.upper()}",
         "comunidade": mesa.get('familia', 'Mapeada em logs') if mesa else "Setor Operacional",
-        "delegado": mesa.get('autor_name', 'Superintendência DICOR') if mesa else str(interaction.user.display_name),
+        "delegado": mesa.get('autor_name', 'Superintendencia DICOR') if mesa else str(interaction.user.display_name),
         "data_abertura": mesa.get('criada_em', agora_br()) if mesa else agora_br(),
         "processo": str(canal.id)[-6:]
     }
 
-    # 4. Geração paralela dos relatórios locais (PDF e DOCX)
+    # 4. Geracao paralela dos relatorios locais
     import os
     import asyncio
     from pathlib import Path
@@ -1923,37 +1923,41 @@ async def fechar_mesa_core(interaction: discord.Interaction, motivo: str = "Fech
     pasta_saida = Path("data/dossies")
     pasta_saida.mkdir(parents=True, exist_ok=True)
     
-    await asyncio.to_thread(gerar_pdf_dossie, dados_relatorio, mensagens_provas, pasta_saida / nome_pdf)
-    await asyncio.to_thread(gerar_docx_dossie, dados_relatorio, mensagens_provas, pasta_saida / nome_docx)
+    try:
+        await asyncio.to_thread(gerar_pdf_dossie, dados_relatorio, mensagens_provas, pasta_saida / nome_pdf)
+        await asyncio.to_thread(gerar_docx_dossie, dados_relatorio, mensagens_provas, pasta_saida / nome_docx)
+    except Exception as e:
+        print(f"Erro ao gerar arquivos de dossie: {e}")
 
-    # 5. Envio automático para o canal central configurável da PF
-    CANAL_DOSSIES_OFICIAL = 1490200477248520333  # Subistitua com o ID do canal onde quer salvar os dossiês
+    # 5. Envio automatico para o canal central configurado da PF
+    CANAL_DOSSIES_OFICIAL = 1490200477248520333
     canal_dest = interaction.guild.get_channel(CANAL_DOSSIES_OFICIAL)
     
     if canal_dest:
         embed_oficial = discord.Embed(
-            title="🏛️ DIRETORIA DE INVESTIGAÇÃO E COMBATE AO CRIME ORGANIZADO",
-            description=f"Um novo **Dossiê Operacional** foi gerado a partir do encerramento da mesa {canal.mention}.",
+            title="DIRETORIA DE INVESTIGACAO E COMBATE AO CRIME ORGANIZADO",
+            description=f"Um novo Dossie Operacional foi gerado a partir do encerramento da mesa.",
             color=discord.Color.from_rgb(0, 43, 91)
         )
-        embed_oficial.add_field(name="📋 Operação / Alvo", value=dados_relatorio["nome"], inline=True)
-        embed_oficial.add_field(name="🔢 Identificação", value=f"Nº {dados_relatorio['processo']}", inline=True)
-        embed_oficial.set_footer(text="Polícia Federal • Arquivo Confidencial")
+        embed_oficial.add_field(name="Operacao / Alvo", value=dados_relatorio["nome"], inline=True)
+        embed_oficial.add_field(name="Identificacao", value=f"Nº {dados_relatorio['processo']}", inline=True)
         
         files_to_send = []
-        if (pasta_saida / nome_pdf).exists(): files_to_send.append(discord.File(str(pasta_saida / nome_pdf), filename=nome_pdf))
-        if (pasta_saida / nome_docx).exists(): files_to_send.append(discord.File(str(pasta_saida / nome_docx), filename=nome_docx))
+        if (pasta_saida / nome_pdf).exists(): 
+            files_to_send.append(discord.File(str(pasta_saida / nome_pdf), filename=nome_pdf))
+        if (pasta_saida / nome_docx).exists(): 
+            files_to_send.append(discord.File(str(pasta_saida / nome_docx), filename=nome_docx))
         
-        await canal_dest.send(embed=embed_oficial, files=files_to_send)
+        if files_to_send:
+            await canal_dest.send(embed=embed_oficial, files=files_to_send)
 
-    # 6. Finalização e retorno visual para a equipe na mesa
+    # 6. Finalizacao visual
     try:
         await msg_aviso.delete()
     except Exception:
         pass
 
-    embed_sucesso = discord.Embed(
-        title="🏛
+    await canal.send("Mesa encerrada com sucesso e Dossie Oficial arquivado.")
 
 async def reabrir_mesa_core(interaction: discord.Interaction, canal: discord.TextChannel):
     mesa = buscar_mesa_por_canal(canal.id)
