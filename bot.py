@@ -4484,9 +4484,18 @@ async def criar_mesa_por_texto(ctx: commands.Context, apelido: str, familia: str
     )
 
     topicos_ids = await criar_topicos_reais_mesa(canal)
+    
+    # Coleta os dados em tempo de execução para alimentar a capa do PDF
+    dados_iniciais_mesa = {
+        "nome": f"OPERAÇÃO {familia.upper()}",
+        "comunidade": familia,
+        "delegado": str(interaction.user.display_name if hasattr(interaction, 'user') else ctx.author.display_name),
+        "data_abertura": agora_br()
+    }
+
     await canal.send(
         "🔒 Para encerrar esta mesa, clique no botão abaixo.",
-        view=FecharMesaView(),
+        view=FecharMesaView(dados_mesa=dados_iniciais_mesa),
     )
 
     registrar_mesa({
@@ -4538,7 +4547,56 @@ async def fechar_mesa_por_texto(ctx: commands.Context, motivo: str = "Fechada po
     salvar_mesas(mesas)
 
     await enviar_log(f"🔒 Mesa fechada por comando de texto: {canal.mention} | Motivo: {motivo}")
-    await ctx.reply("🔒 Mesa fechada e movida para a categoria de mesas fechadas.")
+    
+    # Coleta de mídias e geração do Dossiê Automático antes de arquivar de vez
+    msg_aviso = await ctx.send("⏳ **[SISTEMA DICOR] Iniciando varredura e gerando Dossiê Operacional...**")
+    
+    mensagens_provas = []
+    try:
+        async for msg in canal.history(limit=200, oldest_first=True):
+            if "http://" in msg.content or "https://" in msg.content:
+                mensagens_provas.append(msg.content)
+            for attachment in msg.attachments:
+                mensagens_provas.append(attachment.url)
+    except Exception as e:
+        print(f"Erro no histórico: {e}")
+
+    # Puxa informações da variável 'mesa' que você buscou ali em cima por buscar_mesa_por_canal
+    dados_relatorio = {
+        "nome": f"OPERAÇÃO {mesa.get('familia', 'PADRÃO').upper()}",
+        "comunidade": mesa.get('familia', 'Não Informada'),
+        "delegado": mesa.get('autor_name', 'DICOR PF'),
+        "data_abertura": mesa.get('criada_em', agora_br()),
+        "processo": str(canal.id)[-6:]
+    }
+
+    import os
+    from pathlib import Path
+    nome_pdf = f"DOSSIE_OPERACIONAL_{dados_relatorio['processo']}.pdf"
+    nome_docx = f"DOSSIE_OPERACIONAL_{dados_relatorio['processo']}.docx"
+    pasta_saida = Path("data/dossies")
+    pasta_saida.mkdir(parents=True, exist_ok=True)
+    
+    import asyncio
+    await asyncio.to_thread(gerar_pdf_dossie, dados_relatorio, mensagens_provas, pasta_saida / nome_pdf)
+    await asyncio.to_thread(gerar_docx_dossie, dados_relatorio, mensagens_provas, pasta_saida / nome_docx)
+
+    # Envia para o canal central da PF (Altere para o ID correto do seu canal de Dossiês)
+    CANAL_DOSSIES_OFICIAL = 1490200477248520333 
+    canal_dest = ctx.guild.get_channel(CANAL_DOSSIES_OFICIAL)
+    if canal_dest:
+        embed_oficial = discord.Embed(
+            title="🏛️ DIRETORIA DE INVESTIGAÇÃO E COMBATE AO CRIME ORGANIZADO",
+            description=f"Dossiê estruturado com sucesso a partir do comando executado em {canal.mention}.",
+            color=discord.Color.from_rgb(0, 43, 91)
+        )
+        files = []
+        if (pasta_saida / nome_pdf).exists(): files.append(discord.File(str(pasta_saida / nome_pdf)))
+        if (pasta_saida / nome_docx).exists(): files.append(discord.File(str(pasta_saida / nome_docx)))
+        await canal_dest.send(embed=embed_oficial, files=files)
+
+    await msg_aviso.delete()
+    await ctx.reply("🔒 **Mesa fechada, movida e Dossiê DICOR arquivado com sucesso.**")
 
 
 
@@ -5102,6 +5160,200 @@ async def painel_relatorios(interaction: discord.Interaction):
     )
     embed.set_footer(text="DICOR • Sistema Operacional Seguro")
     await interaction.response.send_message(embed=embed, view=RelatoriosPainelView())
+
+# =====================================================
+# FUNÇÃO REFEITA: GERADOR DE PDF COM BRASÕES OFICIAIS
+# =====================================================
+
+async def gerar_pdf_dossie(dados_mesa, mensagens_provas, caminho_pdf):
+    """Gera o arquivo PDF altamente estruturado com base nas diretrizes da DICOR."""
+    doc = SimpleDocTemplate(
+        str(caminho_pdf),
+        pagesize=letter,
+        leftMargin=54, rightMargin=54,
+        topMargin=72, bottomMargin=72
+    )
+    
+    styles = getSampleStyleSheet()
+    
+    # Estilos customizados
+    style_titulo_capa = ParagraphStyle('CapaTitulo', parent=styles['Normal'], fontName='Helvetica-Bold', fontSize=24, leading=28, textColor=colors.HexColor("#002B5B"), alignment=1)
+    style_sub_capa = ParagraphStyle('CapaSub', parent=styles['Normal'], fontName='Helvetica-Bold', fontSize=12, leading=16, textColor=colors.HexColor("#D4AF37"), alignment=1)
+    style_h1 = ParagraphStyle('DossieH1', parent=styles['Heading1'], fontName='Helvetica-Bold', fontSize=16, leading=20, textColor=colors.HexColor("#002B5B"), spaceBefore=15, spaceAfter=10)
+    style_body = ParagraphStyle('DossieBody', parent=styles['Normal'], fontName='Helvetica', fontSize=10, leading=14, textColor=colors.HexColor("#222222"), spaceAfter=8)
+    style_meta_label = ParagraphStyle('MetaLabel', parent=styles['Normal'], fontName='Helvetica-Bold', fontSize=10, textColor=colors.HexColor("#002B5B"))
+    
+    story = []
+
+    # =====================================================
+    # PÁGINA 1: CAPA OFICIAL COM BRASÕES DO USUÁRIO
+    # =====================================================
+    story.append(Spacer(1, 10))
+    
+    # Bloco de Alinhamento dos Brasões (Lado a Lado no topo da Capa)
+    caminho_pf = "brasao_pf.jpg"       # Certifique-se de salvar a image_d50316 com este nome
+    caminho_dicor = "brasao_dicor.jpg" # Certifique-se de salvar a image_d5063b com este nome
+    
+    img_pf_element = ""
+    img_dicor_element = ""
+    
+    # Verifica se os arquivos de imagem existem no servidor para não quebrar a compilação do ReportLab
+    if os.path.exists(caminho_pf):
+        img_pf_element = Image(caminho_pf, width=65, height=65)
+    if os.path.exists(caminho_dicor):
+        img_dicor_element = Image(caminho_dicor, width=60, height=70)
+        
+    # Tabela Invisível para alinhar Brasão PF (Esquerda), Textos de Estado (Centro) e DICOR (Direita)
+    texto_republica = (
+        "<para align=center><b>REPÚBLICA FEDERATIVA DO BRASIL</b><br/>"
+        "<font size=9>MINISTÉRIO DA JUSTIÇA E SEGURANÇA PÚBLICA</font><br/>"
+        "<font size=9 color='#002B5B'><b>POLÍCIA FEDERAL</b></font></para>"
+    )
+    p_rep = Paragraph(texto_republica, ParagraphStyle('TxtRep', fontName='Helvetica', fontSize=10, leading=13, alignment=1))
+    
+    t_cabecalho_capa = Table([[img_pf_element, p_rep, img_dicor_element]], colWidths=[80, 290, 80])
+    t_cabecalho_capa.setStyle(TableStyle([
+        ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+        ('ALIGN', (0,0), (0,0), 'LEFT'),
+        ('ALIGN', (1,0), (1,0), 'CENTER'),
+        ('ALIGN', (2,0), (2,0), 'RIGHT'),
+    ]))
+    story.append(t_cabecalho_capa)
+    story.append(Spacer(1, 30))
+    
+    story.append(Paragraph("POLÍCIA FEDERAL", style_titulo_capa))
+    story.append(Paragraph("DIRETORIA DE INVESTIGAÇÃO E COMBATE AO CRIME ORGANIZADO - DICOR", style_sub_capa))
+    story.append(Spacer(1, 35))
+    
+    # Box Informativo Centralizado na Capa
+    proc_num = dados_mesa.get('processo', 'PROC-' + datetime.now().strftime('%Y/%M%S'))
+    inv_num = dados_mesa.get('numero', 'INV-' + datetime.now().strftime('%d%m%Y'))
+    op_nome = dados_mesa.get('nome', 'OPERAÇÃO PADRÃO').upper()
+    
+    capa_dados = [
+        [Paragraph("<b>DOSSIÊ DE INTELIGÊNCIA OPERACIONAL</b>", ParagraphStyle('CI', alignment=1, fontSize=14, textColor=colors.white))],
+        [Paragraph(f"<b>OPERAÇÃO:</b> {op_nome}", ParagraphStyle('CI2', fontSize=11, spaceBefore=10))],
+        [Paragraph(f"<b>PROCESSO Nº:</b> {proc_num} | <b>INVESTIGAÇÃO Nº:</b> {inv_num}", ParagraphStyle('CI3', fontSize=10))],
+        [Paragraph(f"<b>ALVO / COMUNIDADE:</b> {dados_mesa.get('comunidade', 'Em levantamento')}", ParagraphStyle('CI4', fontSize=10))],
+        [Paragraph(f"<b>DELEGADO RESPONSÁVEL:</b> {dados_mesa.get('delegado', 'Superintendência DICOR')}", ParagraphStyle('CI5', fontSize=10, spaceAfter=10))]
+    ]
+    t_capa = Table(capa_dados, colWidths=[450])
+    t_capa.setStyle(TableStyle([
+        ('BACKGROUND', (0,0), (-1,0), colors.HexColor("#002B5B")),
+        ('BOX', (0,0), (-1,-1), 1.5, colors.HexColor("#D4AF37")),
+        ('PADDING', (0,0), (-1,-1), 12),
+        ('ALIGN', (0,0), (-1,-1), 'CENTER'),
+    ]))
+    story.append(t_capa)
+    
+    story.append(Spacer(1, 130))
+    story.append(Paragraph(f"<b>Data de Abertura:</b> {dados_mesa.get('data_abertura', datetime.now().strftime('%d/%m/%Y'))}", ParagraphStyle('R', alignment=2)))
+    story.append(Paragraph(f"<b>Data de Encerramento:</b> {datetime.now().strftime('%d/%m/%Y às %H:%M')}", ParagraphStyle('R2', alignment=2)))
+    story.append(PageBreak())
+
+    # =====================================================
+    # PÁGINA 2: RESUMO EXECUTIVO & ÍNDICE
+    # =====================================================
+    story.append(Paragraph("1. RESUMO EXECUTIVO", style_h1))
+    story.append(Paragraph(f"<b>Objetivo Geral:</b> {dados_mesa.get('objetivo', 'Desarticulação de infraestruturas criminosas e identificação de lideranças estruturadas na região.')}", style_body))
+    story.append(Paragraph("O presente relatório técnico-operacional consolida o levantamento de inteligência computacional, monitoramento de campo e análise de dados realizado pelos agentes designados a esta mesa tática. Os dados coletados servem como base probatória material para o prosseguimento das ações penais de competência desta diretoria.", style_body))
+    story.append(Spacer(1, 15))
+    
+    # Tabela com Metadados da Investigação
+    meta_dados = [
+        [Paragraph("Status Final", style_meta_label), Paragraph("CONCLUÍDO / ARQUIVADO", style_body)],
+        [Paragraph("Prioridade Tática", style_meta_label), Paragraph(dados_mesa.get('prioridade', 'ALTA'), style_body)],
+        [Paragraph("Organização Alvo", style_meta_label), Paragraph(dados_mesa.get('faccao', 'Facção Não Especificada'), style_body)],
+    ]
+    t_meta = Table(meta_dados, colWidths=[150, 300])
+    t_meta.setStyle(TableStyle([
+        ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor("#CCCCCC")),
+        ('BACKGROUND', (0,0), (0,-1), colors.HexColor("#F5F7FA")),
+        ('PADDING', (0,0), (-1,-1), 6),
+    ]))
+    story.append(t_meta)
+    story.append(PageBreak())
+
+    # =====================================================
+    # PÁGINAS 3 A 9: SEÇÕES CONSOLIDADAS DE INTELIGÊNCIA
+    # =====================================================
+    secoes = [
+        ("2. LIDERANÇAS E INTEGRANTES IDENTIFICADOS", "Mapeamento tático dos indivíduos que exercem comando, gerência ou atividades logísticas ativas na organização investigada."),
+        ("3. PAINEL DA ORGANIZAÇÃO E INFRAESTRUTURA", "Análise estrutural da facção, incluindo organogramas, símbolos utilizados e divisão interna de responsabilidades financeiras."),
+        ("4. LOCALIZAÇÃO E MAPEAMENTO DE BASES", "Geolocalização estratégica, pontos de observação qualificados, foto aérea de satélite e coordenadas táticas de aproximação."),
+        ("5. PRODUÇÃO, FABRICAÇÃO E ARMAZENAMENTO", "Mapeamento das rotas de suprimentos, laboratórios de refino, locais de estocagem de armamento pesado e baús de reabastecimento logístico."),
+        ("6. INFORMANTES E DADOS DE INTELIGÊNCIA VINCULADOS", "Compilado de relatórios de informantes infiltrados, denúncias anônimas triadas e procurados capturados associados.")
+    ]
+    
+    for titulo, desc in secoes:
+        story.append(Paragraph(titulo, style_h1))
+        story.append(Paragraph(desc, style_body))
+        story.append(Spacer(1, 10))
+        story.append(Paragraph("<i>Nenhum registro fotográfico ou dado nominal estático prévio catalogado nesta seção. Toda a base factual encontra-se anexada na seção de evidências cronológicas.</i>", ParagraphStyle('Italic', fontName='Helvetica-Oblique', fontSize=9, textColor=colors.gray)))
+        story.append(PageBreak())
+
+    # =====================================================
+    # PÁGINA 10 E 11: EVIDÊNCIAS & MATERIAIS APREENDIDOS
+    # =====================================================
+    story.append(Paragraph("7. LOG DE EVIDÊNCIAS E REGISTROS COLETADOS", style_h1))
+    story.append(Paragraph("Abaixo constam de forma cronológica as evidências materiais recolhidas do canal de texto durante a vigência desta mesa de investigação:", style_body))
+    story.append(Spacer(1, 10))
+
+    if mensagens_provas:
+        for idx, link in enumerate(mensagens_provas[:10], start=1):
+            story.append(Paragraph(f"• <b>Evidência Material #{idx:02d}:</b> <font color='#002B5B'><u>{link}</u></font>", ParagraphStyle('LinkS', fontSize=9, leading=12)))
+    else:
+        story.append(Paragraph("Nenhuma imagem ou link externo foi anexado ao histórico de registros desta mesa.", style_body))
+        
+    story.append(Spacer(1, 20))
+    story.append(Paragraph("8. RESULTADOS OPERACIONAIS E ESTATÍSTICAS", style_h1))
+    
+    res_dados = [
+        ["Categoria", "Indicador Operacional", "Métricas Estimadas"],
+        ["Prisões", "Indivíduos Capturados", "Conforme catálogo ativo"],
+        ["Apreensões", "Armamentos e Entorpecentes", "Registrado em auto próprio"],
+        ["Patrimônio", "Veículos e Valores Retidos", "Bloqueio preventivo efetuado"]
+    ]
+    t_res = Table(res_dados, colWidths=[120, 200, 130])
+    t_res.setStyle(TableStyle([
+        ('BACKGROUND', (0,0), (-1,0), colors.HexColor("#002B5B")),
+        ('TEXTCOLOR', (0,0), (-1,0), colors.white),
+        ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor("#CCCCCC")),
+        ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
+        ('PADDING', (0,0), (-1,-1), 6),
+    ]))
+    story.append(t_res)
+    story.append(PageBreak())
+
+    # =====================================================
+    # PÁGINA 12: CONCLUSÃO & AUTENTICAÇÃO DIGITAL
+    # =====================================================
+    story.append(Paragraph("9. CONCLUSÃO E ENCERRAMENTO DO INQUÉRITO", style_h1))
+    story.append(Paragraph("Com a reunião dos elementos informativos descritos neste relatório, dá-se por encerrada a fase de inteligência tática nesta mesa setorial. Os dados aqui expostos guardam total integridade jurídica e lógica, sendo recomendada a remessa imediata ao Ministério Público e às equipes de operações táticas especiais para cumprimento dos mandados expedidos.", style_body))
+    story.append(Spacer(1, 40))
+    
+    # Assinaturas
+    story.append(Paragraph("____________________________________________________________", ParagraphStyle('Line', alignment=1)))
+    story.append(Paragraph("<b>DIRETORIA DE INVESTIGAÇÃO E COMBATE AO CRIME ORGANIZADO</b>", ParagraphStyle('Ass1', alignment=1, fontSize=9)))
+    story.append(Paragraph("POLÍCIA FEDERAL - ASSINATURA DIGITAL SISTÊMICA", ParagraphStyle('Ass2', alignment=1, fontSize=8, textColor=colors.gray)))
+    
+    story.append(Spacer(1, 40))
+    
+    # Geração de QR Code de validação do arquivo
+    qr = qrcode.QRCode(version=1, box_size=3, border=1)
+    qr.add_data(f"DICOR-PF-VALIDATION-{inv_num}")
+    qr.make(fit=True)
+    img_qr = qr.make_image(fill_color="black", back_color="white")
+    
+    buf_qr = io.BytesIO()
+    img_qr.save(buf_qr, format='PNG')
+    buf_qr.seek(0)
+    
+    story.append(Paragraph("<b>AUTENTICIDADE DO DOSSIÊ:</b>", ParagraphStyle('QRT', fontName='Helvetica-Bold', fontSize=9, alignment=1)))
+    story.append(Spacer(1, 5))
+    story.append(Image(buf_qr, width=80, height=80, hAlign='CENTER'))
+    
+    doc.build(story, canvasmaker=NumberedCanvas)
 
 # =====================================================
 # MAIN
