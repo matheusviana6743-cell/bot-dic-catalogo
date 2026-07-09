@@ -1835,7 +1835,7 @@ async def criar_mesa_core(interaction: discord.Interaction, apelido: str, famili
     topicos_ids = await criar_topicos_reais_mesa(canal)
     await canal.send(
         "🔒 Para encerrar esta mesa, clique no botão abaixo.",
-        view=FecharMesaView(),
+        view=FecharMesaView()
     )
 
     registrar_mesa({
@@ -4597,130 +4597,6 @@ async def criar_mesa_por_texto(ctx: commands.Context, apelido: str, familia: str
         f"➕ Mesa criada por comando de texto: {canal.mention} | Família: {familia} | Por: {ctx.author.mention}"
     )
     await ctx.reply(f"✅ Mesa criada: {canal.mention}")
-
-async def fechar_mesa_core(interaction: discord.Interaction, motivo: str = "Fechada"):
-    canal = interaction.channel
-    if not isinstance(canal, discord.TextChannel):
-        return
-
-    # 1. Responde imediatamente para o Discord não dar timeout
-    try:
-        if not interaction.response.is_done():
-            await interaction.response.defer(ephemeral=True)
-    except Exception:
-        pass
-
-    msg_aviso = await canal.send("⏳ **[DICOR] Iniciando arquivamento e gerando Dossiê Oficial...**")
-
-    # 2. Busca no banco de forma segura
-    mesa = None
-    try:
-        mesa = buscar_mesa_por_canal(canal.id)
-    except Exception as e:
-        print(f"[DICOR LOG] Aviso banco: {e}")
-
-    # 3. Move o canal de categoria
-    guild = interaction.guild
-    categoria_fechada = guild.get_channel(CATEGORIA_MESAS_FECHADAS_ID) if 'CATEGORIA_MESAS_FECHADAS_ID' in globals() else None
-    try:
-        novo_nome = canal.name if canal.name.startswith("🔒") else f"🔒-{canal.name}"
-        if categoria_fechada:
-            await canal.edit(category=categoria_fechada, name=novo_nome)
-        else:
-            await canal.edit(name=novo_nome)
-    except Exception as e:
-        print(f"[DICOR LOG] Erro categoria: {e}")
-
-    # 4. Salva status no histórico local
-    try:
-        mesas = carregar_mesas()
-        for m in mesas:
-            if int(m.get("canal_id", 0)) == canal.id:
-                m["status"] = "FECHADA"
-                m["fechada_em"] = agora_br() if 'agora_br' in globals() else "Agora"
-        salvar_mesas(mesas)
-    except Exception as e:
-        print(f"[DICOR LOG] Erro salvar histórico: {e}")
-
-    # 5. Organiza os metadados usando a variável 'mesa'
-    dados_relatorio = {
-        "nome": f"OPERACAO {mesa.get('familia', 'PADRAO').upper()}" if (mesa and isinstance(mesa, dict)) else f"OPERACAO {canal.name.upper()}",
-        "comunidade": mesa.get('familia', 'Setor Operacional') if (mesa and isinstance(mesa, dict)) else "Mapeamento Logs",
-        "delegado": mesa.get('autor_name', str(interaction.user.display_name)) if (mesa and isinstance(mesa, dict)) else str(interaction.user.display_name),
-        "data_abertura": mesa.get('criada_em', 'Nao Informada') if (mesa and isinstance(mesa, dict)) else "Recente",
-        "processo": str(canal.id)[-6:]
-    }
-
-    # 6. Coleta automática de mídias/provas
-    mensagens_provas = []
-    try:
-        async for msg in canal.history(limit=200, oldest_first=True):
-            if "http" in msg.content or "https://" in msg.content:
-                mensagens_provas.append(msg.content)
-            for attachment in msg.attachments:
-                mensagens_provas.append(attachment.url)
-    except Exception as e:
-        print(f"[DICOR LOG] Erro histórico: {e}")
-
-    # 7. Geração paralela dos relatórios locais
-    import asyncio
-    from pathlib import Path
-    nome_pdf = f"DOSSIE_OPERACIONAL_{dados_relatorio['processo']}.pdf"
-    nome_docx = f"DOSSIE_OPERACIONAL_{dados_relatorio['processo']}.docx"
-    pasta_saida = Path("data/dossies")
-    pasta_saida.mkdir(parents=True, exist_ok=True)
-    
-    try:
-        if 'gerar_pdf_dossie' in globals():
-            await asyncio.to_thread(gerar_pdf_dossie, dados_relatorio, mensagens_provas, pasta_saida / nome_pdf)
-        if 'gerar_docx_dossie' in globals():
-            await asyncio.to_thread(gerar_docx_dossie, dados_relatorio, mensagens_provas, pasta_saida / nome_docx)
-    except Exception as e:
-        print(f"[DICOR LOG] Erro arquivos dossiê: {e}")
-
-    # 8. Envio automático para o canal central de arquivos da PF
-    try:
-        CANAL_DOSSIES_OFICIAL = 1490200477248520333
-        canal_dest = interaction.guild.get_channel(CANAL_DOSSIES_OFICIAL)
-        if canal_dest:
-            embed_oficial = discord.Embed(
-                title="DIRETORIA DE INVESTIGACAO E COMBATE AO CRIME ORGANIZADO",
-                description=f"Um novo Dossiê Operacional foi gerado a partir do encerramento da mesa.",
-                color=discord.Color.from_rgb(0, 43, 91)
-            )
-            embed_oficial.add_field(name="Operacao / Alvo", value=dados_relatorio["nome"], inline=True)
-            embed_oficial.add_field(name="Identificacao", value=f"№ {dados_relatorio['processo']}", inline=True)
-            
-            files_to_send = []
-            if (pasta_saida / nome_pdf).exists():
-                files_to_send.append(discord.File(str(pasta_saida / nome_pdf), filename=nome_pdf))
-            if (pasta_saida / nome_docx).exists():
-                files_to_send.append(discord.File(str(pasta_saida / nome_docx), filename=nome_docx))
-                
-            if files_to_send:
-                await canal_dest.send(embed=embed_oficial, files=files_to_send)
-    except Exception as e:
-        print(f"[DICOR LOG] Erro envio logs centrais: {e}")
-
-    # 9. Finalização visual da interface
-    try:
-        await msg_aviso.delete()
-    except Exception:
-        pass
-
-    embed_sucesso = discord.Embed(
-        title="DIRETORIA DE INVESTIGACAO E COMBATE AO CRIME ORGANIZADO",
-        description="Esta mesa foi encerrada e o Dossie Oficial foi arquivado.",
-        color=discord.Color.red()
-    )
-    
-    try:
-        await canal.send(content="Esta mesa encontra-se arquivada.", embed=embed_sucesso, view=ReabrirMesaView())
-        if interaction.message:
-            await interaction.message.delete()
-    except Exception:
-        await canal.send(content="Esta mesa encontra-se arquivada.", embed=embed_sucesso, view=ReabrirMesaView())
-
 
 @bot.command(name="painelorganizacoes")
 async def cmd_painelorganizacoes(ctx: commands.Context):
