@@ -1280,6 +1280,63 @@ async def postar_procurado_oficial(registro: Dict[str, Any]) -> Optional[discord
     return msg
 
 
+async def atualizar_post_procurado_discord(registro: Dict[str, Any]) -> bool:
+    """Atualiza o texto do procurado no canal oficial ou no histórico."""
+    status = str(registro.get("status", "A PROCURAR") or "A PROCURAR").upper()
+
+    alvos = []
+    if status == "RETIRADO":
+        alvos.append((HISTORICO_PROCURADOS_ID, registro.get("mensagem_arquivada_id")))
+        alvos.append((PROCURADOS_CHANNEL_ID, registro.get("mensagem_id")))
+    else:
+        alvos.append((PROCURADOS_CHANNEL_ID, registro.get("mensagem_id")))
+        alvos.append((HISTORICO_PROCURADOS_ID, registro.get("mensagem_arquivada_id")))
+
+    texto = cortar_discord(criar_texto_procurado(registro), 1900)
+
+    for canal_id, mensagem_id in alvos:
+        if not canal_id or not mensagem_id:
+            continue
+
+        canal = await obter_canal_por_id(int(canal_id))
+        if canal is None or not hasattr(canal, "fetch_message"):
+            continue
+
+        try:
+            mensagem = await canal.fetch_message(int(mensagem_id))
+            await mensagem.edit(content=texto)
+            registro["mensagem_url"] = mensagem.jump_url
+            return True
+        except discord.NotFound:
+            continue
+        except Exception as erro:
+            await enviar_log(
+                f"⚠️ Não foi possível editar a mensagem do procurado "
+                f"`{registro.get('nome')}` / RG `{registro.get('rg')}`: {erro}"
+            )
+            continue
+
+    return False
+
+
+def juntar_crimes_procurado(crimes_atuais: str, novos_crimes: str) -> str:
+    atual = str(crimes_atuais or "").strip()
+    novos = str(novos_crimes or "").strip()
+
+    if not atual:
+        return novos or "Não informado"
+    if not novos:
+        return atual
+
+    atual_norm = atual.casefold()
+    novos_norm = novos.casefold()
+    if novos_norm in atual_norm:
+        return atual
+
+    separador = "\n" if atual.endswith(("\n", ";", ",")) else "\n"
+    return (atual + separador + novos).strip()
+
+
 def arquivos_locais_procurado(
     registro: Dict[str, Any],
 ) -> List[discord.File]:
@@ -1538,6 +1595,148 @@ class RetirarProcuradoModal(Modal, title="Retirar Procurado"):
         await retirar_procurado(interaction, str(self.rg.value), str(self.motivo.value or "Não informado"))
 
 
+class BuscarModificarProcuradoModal(Modal, title="Modificar Procurado"):
+    rg = TextInput(
+        label="RG do procurado",
+        placeholder="Digite o RG para localizar o cadastro",
+        max_length=50,
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if not isinstance(interaction.user, discord.Member) or not usuario_tem_equipe(interaction.user):
+            await interaction.response.send_message(
+                "❌ Apenas a equipe DICOR pode modificar procurados.",
+                ephemeral=True,
+            )
+            return
+
+        alvo = limpar_rg(str(self.rg.value))
+        encontrado = None
+        for registro in carregar_procurados():
+            if limpar_rg(registro.get("rg", "")) == alvo:
+                encontrado = registro
+                break
+
+        if not encontrado:
+            await interaction.response.send_message(
+                "❌ Não encontrei procurado com esse RG no catálogo.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.send_modal(EditarCrimesProcuradoModal(encontrado))
+
+
+class EditarCrimesProcuradoModal(Modal):
+    def __init__(self, registro: Dict[str, Any]):
+        nome = str(registro.get("nome", "Procurado") or "Procurado")
+        rg = str(registro.get("rg", "") or "")
+        super().__init__(title="Editar Crimes do Procurado")
+
+        self.rg_registro = rg
+        self.nome_registro = nome
+
+        crimes_atuais = valor_crimes_registro(registro)
+        if len(crimes_atuais) > 3300:
+            crimes_atuais = crimes_atuais[:3300].rstrip() + "\n..."
+
+        self.crimes_cadastrados = TextInput(
+            label=f"Crimes já cadastrados - {nome[:35]}",
+            placeholder="Crimes atuais do procurado",
+            style=discord.TextStyle.paragraph,
+            default=crimes_atuais,
+            required=False,
+            max_length=3500,
+        )
+        self.novos_crimes = TextInput(
+            label="Adicionar mais crimes",
+            placeholder="Digite aqui somente os novos crimes que serão adicionados",
+            style=discord.TextStyle.paragraph,
+            required=False,
+            max_length=1000,
+        )
+
+        self.add_item(self.crimes_cadastrados)
+        self.add_item(self.novos_crimes)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if not isinstance(interaction.user, discord.Member) or not usuario_tem_equipe(interaction.user):
+            await interaction.response.send_message(
+                "❌ Apenas a equipe DICOR pode modificar procurados.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
+
+        lista = carregar_procurados()
+        alvo = limpar_rg(self.rg_registro)
+        encontrado = None
+
+        for registro in lista:
+            if limpar_rg(registro.get("rg", "")) == alvo:
+                encontrado = registro
+                break
+
+        if not encontrado:
+            await interaction.followup.send(
+                "❌ Esse procurado não existe mais no catálogo.",
+                ephemeral=True,
+            )
+            return
+
+        crimes_antigos = valor_crimes_registro(encontrado)
+        crimes_editados = str(self.crimes_cadastrados.value or "").strip()
+        crimes_adicionados = str(self.novos_crimes.value or "").strip()
+        crimes_finais = juntar_crimes_procurado(crimes_editados, crimes_adicionados)
+
+        if crimes_finais.strip() == crimes_antigos.strip():
+            await interaction.followup.send(
+                "⚠️ Nenhum crime novo foi adicionado ou alterado.",
+                ephemeral=True,
+            )
+            return
+
+        encontrado["crimes"] = crimes_finais
+        encontrado.setdefault("historico_edicoes", []).append({
+            "data": agora_br(),
+            "tipo": "ALTERAÇÃO DE CRIMES",
+            "campo": "crimes",
+            "usuario": str(interaction.user),
+            "usuario_id": interaction.user.id,
+            "valor_anterior": crimes_antigos,
+            "valor_novo": crimes_finais,
+            "acrescimo": crimes_adicionados,
+        })
+
+        salvar_procurados(lista)
+        gerar_catalogo_html()
+        post_atualizado = await atualizar_post_procurado_discord(encontrado)
+
+        await enviar_log(
+            "✏️ **Procurado modificado**\n"
+            f"Nome: {encontrado.get('nome')}\n"
+            f"RG: {encontrado.get('rg')}\n"
+            f"Alterado por: {interaction.user.mention}\n"
+            f"Post Discord atualizado: {'sim' if post_atualizado else 'não'}"
+        )
+
+        aviso_post = (
+            "✅ Post oficial atualizado."
+            if post_atualizado
+            else "⚠️ Catálogo atualizado, mas não encontrei o post antigo no Discord para editar."
+        )
+
+        await interaction.followup.send(
+            f"✅ **Procurado atualizado com sucesso.**\n"
+            f"👤 **Nome:** {encontrado.get('nome')}\n"
+            f"🪪 **RG:** `{encontrado.get('rg')}`\n"
+            f"{aviso_post}\n"
+            f"🔗 {CATALOG_PUBLIC_URL}",
+            ephemeral=True,
+        )
+
+
 class PainelProcuradosView(View):
     def __init__(self):
         super().__init__(timeout=None)
@@ -1562,6 +1761,16 @@ class PainelProcuradosView(View):
     @discord.ui.button(label="Retirar Procurado", emoji="❌", style=discord.ButtonStyle.gray, custom_id="dic_retirar_procurado")
     async def retirar(self, interaction: discord.Interaction, button: Button):
         await interaction.response.send_modal(RetirarProcuradoModal())
+
+    @discord.ui.button(label="Modificar Procurado", emoji="✏️", style=discord.ButtonStyle.primary, custom_id="dic_modificar_procurado", row=1)
+    async def modificar(self, interaction: discord.Interaction, button: Button):
+        if not isinstance(interaction.user, discord.Member) or not usuario_tem_equipe(interaction.user):
+            await interaction.response.send_message(
+                "❌ Apenas a equipe DICOR pode modificar procurados.",
+                ephemeral=True,
+            )
+            return
+        await interaction.response.send_modal(BuscarModificarProcuradoModal())
 
     @discord.ui.button(label="Abrir Catálogo", emoji="📄", style=discord.ButtonStyle.green, custom_id="dic_abrir_catalogo")
     async def abrir_catalogo(self, interaction: discord.Interaction, button: Button):
@@ -5805,6 +6014,7 @@ def embed_painel_procurados_padrao() -> discord.Embed:
             "➕ **Novo Procurado** — Cadastrar um novo procurado.\n"
             "📋 **Lista de Procurados** — Ver procurados ativos.\n"
             "❌ **Retirar Procurado** — Retirar um procurado pelo RG.\n"
+            "✏️ **Modificar Procurado** — Buscar pelo RG e adicionar novos crimes.\n"
             "📄 **Abrir Catálogo** — Abrir o catálogo HTML.\n"
             "🔄 **Sincronizar Antigos** — Importar procurados antigos do canal oficial."
         ),
