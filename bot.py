@@ -2508,6 +2508,51 @@ def normalizar_busca(texto: Any) -> str:
     return valor
 
 
+DOSSIE_CIDADE_OPERACIONAL = os.getenv("DOSSIE_CIDADE_OPERACIONAL", "Capital Morada do Valley").strip() or "Capital Morada do Valley"
+DOSSIE_INSTITUICAO_CABECALHO = os.getenv(
+    "DOSSIE_INSTITUICAO_CABECALHO",
+    "POLÍCIA FEDERAL DE CAPITAL MORADA DO VALLEY\nDIRETORIA DE INVESTIGAÇÃO E COMBATE AO CRIME ORGANIZADO\nCENTRO DE INTELIGÊNCIA OPERACIONAL - DICOR",
+).strip()
+
+
+def nome_operacional_dossie(usuario: Any) -> str:
+    """Extrai o nome operacional do Discord, ex: '[INSP.DIC] Baiano | 6027' -> 'Baiano'."""
+    bruto = ""
+    try:
+        bruto = str(getattr(usuario, "display_name", "") or getattr(usuario, "name", "") or usuario or "")
+    except Exception:
+        bruto = str(usuario or "")
+
+    texto = re.sub(r"<@!?\d+>", "", bruto).strip()
+    texto = texto.replace("＠", "@").strip()
+
+    # Remove prefixos de cargo em colchetes/parênteses, ficando só o que vem depois.
+    for sep in ("]", ")"):
+        if sep in texto:
+            texto = texto.split(sep, 1)[1].strip()
+
+    # Mantém somente o que está antes da barra vertical.
+    if "|" in texto:
+        texto = texto.split("|", 1)[0].strip()
+
+    # Limpeza final de marcações comuns.
+    texto = re.sub(r"^[\s@•\-–—:]+", "", texto).strip()
+    texto = re.sub(r"\s+", " ", texto).strip()
+    return texto or bruto or "Não informado"
+
+
+def integrantes_mesa_dossie(mesa: Optional[Dict[str, Any]], autores: Dict[int, str], interaction: discord.Interaction) -> List[str]:
+    """No dossiê, o campo Integrantes da Investigação usa o apelido cadastrado na criação da mesa."""
+    apelido = ""
+    if mesa and isinstance(mesa, dict):
+        apelido = str(mesa.get("apelido") or "").strip()
+    if apelido:
+        return [apelido]
+    if autores:
+        return [nome_operacional_dossie(nome) for nome in autores.values()]
+    return [nome_operacional_dossie(interaction.user)]
+
+
 def nome_arquivo_seguro(nome: str, limite: int = 90) -> str:
     base = slugify(Path(nome or "arquivo").stem)[:limite] or "arquivo"
     ext = Path(nome or "").suffix.lower()
@@ -3008,10 +3053,12 @@ async def coletar_dados_operacionais_mesa(
         "guild_nome": canal.guild.name,
         "data_abertura": (mesa or {}).get("criada_em") or dados_base.get("data_abertura") or "Não informado",
         "data_encerramento": agora_br(),
-        "delegado_responsavel": dados_base.get("delegado") or (mesa or {}).get("autor_nome") or "Superintendência DICOR",
-        "agente_encerramento": str(interaction.user),
+        "delegado_responsavel": nome_operacional_dossie(dados_base.get("delegado") or (mesa or {}).get("autor_nome") or "Superintendência DICOR"),
+        "agente_encerramento": nome_operacional_dossie(interaction.user),
         "agente_encerramento_id": interaction.user.id,
-        "integrantes_investigacao": list(autores.values()) or [str(interaction.user)],
+        "integrantes_investigacao": integrantes_mesa_dossie(mesa, autores, interaction),
+        "cidade_operacional": DOSSIE_CIDADE_OPERACIONAL,
+        "cabecalho_institucional": DOSSIE_INSTITUICAO_CABECALHO,
         "comunidade": comunidade,
         "faccao": faccao,
         "objetivo": objetivo,
@@ -6914,8 +6961,9 @@ def montar_conclusao_dossie(dados: Dict[str, Any]) -> str:
     est = dados.get("estatisticas", {}) or {}
     res = dados.get("resultados", {}) or {}
     return (
-        f"A mesa de investigação referente ao processo {dados.get('processo')} foi encerrada após a consolidação "
-        f"dos registros operacionais vinculados à operação {dados.get('nome_operacao')}. Durante a análise, foram "
+        f"A mesa de investigação referente ao processo {dados.get('processo')} foi encerrada na circunscrição operacional de "
+        f"{dados.get('cidade_operacional', DOSSIE_CIDADE_OPERACIONAL)}, após a consolidação dos registros vinculados "
+        f"à operação {dados.get('nome_operacao')}. Durante a análise, foram "
         f"verificadas {est.get('mensagens_analisadas', 0)} mensagens, {est.get('evidencias', 0)} evidências anexadas, "
         f"{est.get('imagens', 0)} imagens, {est.get('videos', 0)} vídeos e {est.get('links', 0)} links registrados. "
         f"Os elementos reunidos indicam a necessidade de preservação integral do material para consulta posterior, "
@@ -6928,7 +6976,8 @@ def montar_conclusao_dossie(dados: Dict[str, Any]) -> str:
 
 def resumo_contexto_operacional(dados: Dict[str, Any]) -> str:
     return (
-        f"A investigação teve como alvo a comunidade/organização {dados.get('comunidade', 'Não informado')}, "
+        f"A investigação foi conduzida pela Polícia Federal de {dados.get('cidade_operacional', DOSSIE_CIDADE_OPERACIONAL)}, "
+        f"tendo como alvo a comunidade/organização {dados.get('comunidade', 'Não informado')}, "
         f"com possível vínculo à facção ou estrutura {dados.get('faccao', 'Não informado')}. O objetivo operacional foi: "
         f"{dados.get('objetivo', 'Não informado')} O material abaixo foi extraído automaticamente da mesa de investigação, "
         f"incluindo tópicos, anexos, links, registros textuais e dados enviados pelos integrantes autorizados."
@@ -6976,38 +7025,59 @@ def pdf_add_header_footer(c, doc, dados: Dict[str, Any]):
     largura, altura = A4
     pagina = c.getPageNumber()
 
-    # Marca d'água discreta
-    c.setFont("Helvetica-Bold", 54)
-    c.setFillColor(colors.Color(0.85, 0.88, 0.92, alpha=0.18))
+    # Marca d'água dupla e discreta
+    c.setFont("Helvetica-Bold", 58)
+    c.setFillColor(colors.Color(0.82, 0.86, 0.91, alpha=0.16))
     c.translate(largura / 2, altura / 2)
     c.rotate(35)
     c.drawCentredString(0, 0, "DICOR")
+    c.setFont("Helvetica-Bold", 18)
+    c.drawCentredString(0, -1.05 * cm, "INTELIGÊNCIA OPERACIONAL")
     c.rotate(-35)
     c.translate(-largura / 2, -altura / 2)
 
-    # Cabeçalho
+    # Faixa superior azul + linha dourada
+    c.setFillColor(colors.HexColor(f"#{DICOR_AZUL}"))
+    c.rect(0, altura - 0.62 * cm, largura, 0.18 * cm, stroke=0, fill=1)
     c.setStrokeColor(colors.HexColor(f"#{DICOR_DOURADO}"))
     c.setLineWidth(1)
-    c.line(1.5 * cm, altura - 1.35 * cm, largura - 1.5 * cm, altura - 1.35 * cm)
+    c.line(1.45 * cm, altura - 1.35 * cm, largura - 1.45 * cm, altura - 1.35 * cm)
+
     c.setFillColor(colors.HexColor(f"#{DICOR_AZUL}"))
-    c.setFont("Helvetica-Bold", 8.5)
-    c.drawString(1.5 * cm, altura - 1.1 * cm, "POLÍCIA FEDERAL • DICOR")
+    c.setFont("Helvetica-Bold", 8.7)
+    c.drawString(1.5 * cm, altura - 1.1 * cm, f"POLÍCIA FEDERAL • DICOR • {dados.get('cidade_operacional', DOSSIE_CIDADE_OPERACIONAL).upper()}")
     c.setFont("Helvetica", 8)
     c.drawRightString(largura - 1.5 * cm, altura - 1.1 * cm, f"Processo: {dados.get('processo', 'N/I')}")
 
+    # Selo lateral reservado
+    c.setFillColor(colors.HexColor(f"#{DICOR_DOURADO}"))
+    c.roundRect(largura - 4.0 * cm, altura - 1.75 * cm, 2.45 * cm, 0.36 * cm, 4, stroke=0, fill=1)
+    c.setFillColor(colors.HexColor(f"#{DICOR_AZUL}"))
+    c.setFont("Helvetica-Bold", 6.8)
+    c.drawCentredString(largura - 2.78 * cm, altura - 1.62 * cm, "DOCUMENTO RESERVADO")
+
     # Rodapé
     c.setStrokeColor(colors.HexColor("#C7CCD4"))
-    c.line(1.5 * cm, 1.25 * cm, largura - 1.5 * cm, 1.25 * cm)
+    c.line(1.45 * cm, 1.25 * cm, largura - 1.45 * cm, 1.25 * cm)
+    c.setFillColor(colors.HexColor(f"#{DICOR_AZUL}"))
+    c.rect(0, 0, largura, 0.20 * cm, stroke=0, fill=1)
     c.setFont("Helvetica", 8)
     c.setFillColor(colors.HexColor("#555555"))
-    c.drawString(1.5 * cm, 0.85 * cm, "Documento gerado automaticamente pelo Sistema DICOR • Uso interno GTA RP")
+    c.drawString(1.5 * cm, 0.85 * cm, f"Polícia Federal de {dados.get('cidade_operacional', DOSSIE_CIDADE_OPERACIONAL)} • Sistema DICOR • Uso interno GTA RP")
     c.drawRightString(largura - 1.5 * cm, 0.85 * cm, f"Página {pagina}")
     c.restoreState()
 
 
 def pdf_add_secao_titulo(story: List[Any], titulo: str, estilo_h1) -> None:
-    story.append(Paragraph(titulo, estilo_h1))
-    story.append(Spacer(1, 8))
+    faixa = Table([[Paragraph(titulo, estilo_h1)]], colWidths=[16.5 * cm], hAlign="LEFT")
+    faixa.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#F7F9FC")),
+        ("LINEBEFORE", (0, 0), (0, 0), 4, colors.HexColor(f"#{DICOR_DOURADO}")),
+        ("LINEBELOW", (0, 0), (-1, -1), 0.8, colors.HexColor(f"#{DICOR_DOURADO}")),
+        ("PADDING", (0, 0), (-1, -1), 7),
+    ]))
+    story.append(faixa)
+    story.append(Spacer(1, 10))
 
 
 def pdf_add_imagens_evidencias(story: List[Any], evidencias: List[Dict[str, Any]], estilo_body, limite: int = 6) -> None:
@@ -7130,12 +7200,12 @@ def gerar_pdf_dossie(dados: Dict[str, Any], caminho_pdf: Path) -> None:
     brasao_dicor = caminho_brasao_dicor()
     img_pf = pdf_img_fit(str(brasao_pf), 3.45 * cm, 3.45 * cm) if brasao_pf else pdf_paragrafo("PF", style_center)
     img_dicor = pdf_img_fit(str(brasao_dicor), 3.45 * cm, 3.45 * cm) if brasao_dicor else pdf_paragrafo("DICOR", style_center)
-    cab = Table([[img_pf, pdf_paragrafo("REPÚBLICA FEDERATIVA DO BRASIL\nMINISTÉRIO DA JUSTIÇA E SEGURANÇA PÚBLICA\nPOLÍCIA FEDERAL", style_center), img_dicor]], colWidths=[4.05 * cm, 9.3 * cm, 4.05 * cm])
+    cab = Table([[img_pf, pdf_paragrafo(dados.get("cabecalho_institucional") or DOSSIE_INSTITUICAO_CABECALHO, style_center), img_dicor]], colWidths=[4.05 * cm, 9.3 * cm, 4.05 * cm])
     cab.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "MIDDLE"), ("ALIGN", (0, 0), (-1, -1), "CENTER")]))
     story.append(cab)
     story.append(Spacer(1, 0.75 * cm))
     story.append(Paragraph("POLÍCIA FEDERAL", style_title))
-    story.append(Paragraph("DIRETORIA DE INVESTIGAÇÃO E COMBATE AO CRIME ORGANIZADO - DICOR", style_subtitle))
+    story.append(Paragraph(f"CAPITAL MORADA DO VALLEY • DIRETORIA DE INVESTIGAÇÃO E COMBATE AO CRIME ORGANIZADO - DICOR", style_subtitle))
     faixa = Table([[pdf_paragrafo("DOCUMENTO RESERVADO • INTELIGÊNCIA • INVESTIGAÇÃO • RESULTADO", style_center)]], colWidths=[16 * cm])
     faixa.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor(f"#{DICOR_AZUL}")),
@@ -7145,16 +7215,32 @@ def gerar_pdf_dossie(dados: Dict[str, Any], caminho_pdf: Path) -> None:
         ("ALIGN", (0, 0), (-1, -1), "CENTER"),
     ]))
     story.append(faixa)
-    story.append(Spacer(1, 0.8 * cm))
+    story.append(Spacer(1, 0.25 * cm))
+    selo_operacional = Table([[
+        pdf_paragrafo("UNIDADE OPERACIONAL", style_center),
+        pdf_paragrafo(dados.get("cidade_operacional", DOSSIE_CIDADE_OPERACIONAL).upper(), style_center),
+        pdf_paragrafo("ARQUIVO DICOR", style_center),
+    ]], colWidths=[5.33 * cm, 5.33 * cm, 5.33 * cm], hAlign="CENTER")
+    selo_operacional.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#F7F9FC")),
+        ("BOX", (0, 0), (-1, -1), 0.6, colors.HexColor(f"#{DICOR_DOURADO}")),
+        ("INNERGRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#C7CCD4")),
+        ("PADDING", (0, 0), (-1, -1), 7),
+        ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+    ]))
+    story.append(selo_operacional)
+    story.append(Spacer(1, 0.55 * cm))
     capa_rows = [
         ["DOSSIÊ DE INTELIGÊNCIA OPERACIONAL", ""],
         ["Processo Nº", dados.get("processo")],
         ["Investigação Nº", dados.get("numero_investigacao")],
         ["Nome da Operação", dados.get("nome_operacao")],
         ["Comunidade Investigada", dados.get("comunidade")],
+        ["Cidade Operacional", dados.get("cidade_operacional", DOSSIE_CIDADE_OPERACIONAL)],
         ["Data de Abertura", dados.get("data_abertura")],
         ["Data de Encerramento", dados.get("data_encerramento")],
         ["Delegado Responsável", dados.get("delegado_responsavel")],
+        ["Integrantes da Investigação", ", ".join(dados.get("integrantes_investigacao", []))],
     ]
     capa = []
     for i, row in enumerate(capa_rows):
@@ -7186,6 +7272,7 @@ def gerar_pdf_dossie(dados: Dict[str, Any], caminho_pdf: Path) -> None:
         ["Campo", "Informação"],
         ["Status da Investigação", dados.get("status")],
         ["Prioridade", dados.get("prioridade")],
+        ["Cidade Operacional", dados.get("cidade_operacional", DOSSIE_CIDADE_OPERACIONAL)],
         ["Facção Investigada", dados.get("faccao")],
         ["Agente Responsável pelo Encerramento", dados.get("agente_encerramento")],
         ["Integrantes da Investigação", ", ".join(dados.get("integrantes_investigacao", []))],
@@ -7316,6 +7403,15 @@ def docx_add_heading(doc, texto: str, level: int = 1):
     try:
         p.runs[0].font.color.rgb = RGBColor.from_string(DICOR_AZUL)
         p.runs[0].font.name = "Arial"
+        p.runs[0].font.bold = True
+    except Exception:
+        pass
+    try:
+        barra = doc.add_paragraph("▔" * 48)
+        barra.alignment = WD_ALIGN_PARAGRAPH.LEFT
+        run = barra.runs[0]
+        run.font.color.rgb = RGBColor.from_string(DICOR_DOURADO)
+        run.font.size = Pt(6)
     except Exception:
         pass
     return p
@@ -7414,7 +7510,7 @@ def configurar_docx(doc: Any, dados: Dict[str, Any]) -> None:
     section.left_margin = Inches(0.7)
     section.right_margin = Inches(0.7)
     header = section.header.paragraphs[0]
-    header.text = f"POLÍCIA FEDERAL • DICOR • Processo {dados.get('processo', 'N/I')}"
+    header.text = f"POLÍCIA FEDERAL • DICOR • {dados.get('cidade_operacional', DOSSIE_CIDADE_OPERACIONAL)} • Processo {dados.get('processo', 'N/I')}"
     try:
         header.alignment = WD_ALIGN_PARAGRAPH.CENTER
         header.runs[0].font.bold = True
@@ -7423,7 +7519,7 @@ def configurar_docx(doc: Any, dados: Dict[str, Any]) -> None:
     except Exception:
         pass
     footer = section.footer.paragraphs[0]
-    footer.text = "Documento gerado automaticamente pelo Sistema DICOR • Uso interno GTA RP"
+    footer.text = f"Polícia Federal de {dados.get('cidade_operacional', DOSSIE_CIDADE_OPERACIONAL)} • Sistema DICOR • Documento reservado • Uso interno GTA RP"
     try:
         footer.alignment = WD_ALIGN_PARAGRAPH.CENTER
         footer.runs[0].font.size = Pt(8)
@@ -7495,8 +7591,9 @@ def gerar_docx_dossie(dados: Dict[str, Any], caminho_docx: Path) -> None:
                 p.add_run("   ")
             except Exception:
                 pass
+    docx_add_paragraph(doc, dados.get("cabecalho_institucional") or DOSSIE_INSTITUICAO_CABECALHO, bold=True, align=WD_ALIGN_PARAGRAPH.CENTER)
     docx_add_paragraph(doc, "POLÍCIA FEDERAL", bold=True, align=WD_ALIGN_PARAGRAPH.CENTER)
-    docx_add_paragraph(doc, "DIRETORIA DE INVESTIGAÇÃO E COMBATE AO CRIME ORGANIZADO - DICOR", bold=True, align=WD_ALIGN_PARAGRAPH.CENTER)
+    docx_add_paragraph(doc, "CAPITAL MORADA DO VALLEY • DIRETORIA DE INVESTIGAÇÃO E COMBATE AO CRIME ORGANIZADO - DICOR", bold=True, align=WD_ALIGN_PARAGRAPH.CENTER)
     docx_add_paragraph(doc, "DOCUMENTO RESERVADO • INTELIGÊNCIA • INVESTIGAÇÃO • RESULTADO", bold=True, align=WD_ALIGN_PARAGRAPH.CENTER)
     doc.add_paragraph()
     docx_add_info_table(doc, [
@@ -7505,9 +7602,11 @@ def gerar_docx_dossie(dados: Dict[str, Any], caminho_docx: Path) -> None:
         ["Investigação Nº", dados.get("numero_investigacao")],
         ["Nome da Operação", dados.get("nome_operacao")],
         ["Comunidade Investigada", dados.get("comunidade")],
+        ["Cidade Operacional", dados.get("cidade_operacional", DOSSIE_CIDADE_OPERACIONAL)],
         ["Data de Abertura", dados.get("data_abertura")],
         ["Data de Encerramento", dados.get("data_encerramento")],
         ["Delegado Responsável", dados.get("delegado_responsavel")],
+        ["Integrantes da Investigação", ", ".join(dados.get("integrantes_investigacao", []))],
     ])
     docx_add_paragraph(doc, "Documento gerado automaticamente a partir do encerramento da mesa de investigação.", align=WD_ALIGN_PARAGRAPH.CENTER)
     doc.add_page_break()
@@ -7520,6 +7619,7 @@ def gerar_docx_dossie(dados: Dict[str, Any], caminho_docx: Path) -> None:
         ["Campo", "Informação"],
         ["Status da Investigação", dados.get("status")],
         ["Prioridade", dados.get("prioridade")],
+        ["Cidade Operacional", dados.get("cidade_operacional", DOSSIE_CIDADE_OPERACIONAL)],
         ["Facção Investigada", dados.get("faccao")],
         ["Agente Responsável pelo Encerramento", dados.get("agente_encerramento")],
         ["Integrantes da Investigação", ", ".join(dados.get("integrantes_investigacao", []))],
