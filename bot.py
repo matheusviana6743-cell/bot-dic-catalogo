@@ -6601,7 +6601,16 @@ async def estatisticas(interaction: discord.Interaction):
 # PAINEL ADMINISTRATIVO / ESTATÍSTICAS POR AGENTE
 # =====================================================
 
-ADMIN_STATS_HISTORY_LIMIT = int(os.getenv("ADMIN_STATS_HISTORY_LIMIT", "1500") or 1500)
+ADMIN_STATS_HISTORY_LIMIT = int(os.getenv("ADMIN_STATS_HISTORY_LIMIT", "0") or 0)
+
+
+def limite_historico_admin():
+    """0 ou negativo = varrer tudo que o Discord permitir no canal."""
+    try:
+        limite = int(ADMIN_STATS_HISTORY_LIMIT or 0)
+    except Exception:
+        limite = 0
+    return None if limite <= 0 else limite
 
 
 def usuario_pode_painel_adm(member: discord.Member) -> bool:
@@ -6749,14 +6758,86 @@ def add_item_estatistica(agentes: Dict[str, Dict[str, Any]], usuario_id: Any, no
     agentes[uid]["itens"].setdefault(categoria, []).append(item)
 
 
+def normalizar_texto_admin_bruto(texto: Any) -> str:
+    """Limpa markdown sem destruir menções, mantendo quebras de linha para extração."""
+    texto = str(texto or "")
+    texto = texto.replace("**", "").replace("__", "").replace("`", "")
+    texto = texto.replace("｜", "|").replace("–", "-").replace("—", "-")
+    return texto
+
+
 def extrair_label_admin(texto: str, rotulos: List[str]) -> str:
+    """Extrator reforçado: pega labels com emoji, markdown e variações de pontuação."""
+    texto_limpo = normalizar_texto_admin_bruto(texto)
+
     for rotulo in rotulos:
-        padrao = rf"(?:{rotulo})\s*[:\-]\s*([^\n]+)"
-        m = re.search(padrao, texto, flags=re.I)
+        # Ex.: 🆔 RG: 123 | **RG:** 123 | RG - 123
+        padrao = rf"(?:^|\n)\s*(?:[\W_]*\s*)?(?:{rotulo})\s*(?:[:\-])\s*(.+?)(?=\n|$)"
+        m = re.search(padrao, texto_limpo, flags=re.I)
         if m:
-            valor = m.group(1).strip()
-            valor = re.sub(r"[*_`]+", "", valor).strip()
-            return valor[:160]
+            valor = re.sub(r"[*_`]+", "", m.group(1).strip())
+            return valor[:220]
+
+    # Segunda tentativa: procura o rótulo no meio da linha e corta depois dos dois pontos.
+    for linha in texto_limpo.splitlines():
+        linha_s = linha.strip()
+        if not linha_s:
+            continue
+        for rotulo in rotulos:
+            if re.search(rotulo, linha_s, flags=re.I):
+                partes = re.split(r"[:\-]", linha_s, maxsplit=1)
+                if len(partes) == 2:
+                    valor = re.sub(r"[*_`]+", "", partes[1].strip())
+                    return valor[:220]
+    return ""
+
+
+def identificar_autor_admin(guild: Optional[discord.Guild], texto: str, *fallbacks: Any) -> tuple[str, str]:
+    """Tenta descobrir o agente responsável por menção, label textual ou nome."""
+    texto_limpo = normalizar_texto_admin_bruto(texto)
+
+    # Prioriza labels de responsabilidade para não pegar menções aleatórias.
+    labels = [
+        r"Respons[áa]vel", r"Perito respons[áa]vel", r"Perito", r"Comunicante",
+        r"Cadastrado por", r"Publicado por", r"Autor", r"Agente", r"Criado por",
+    ]
+    for label in labels:
+        padrao = rf"{label}\s*[:\-]\s*(<@!?(\d+)>)"
+        m = re.search(padrao, texto_limpo, flags=re.I)
+        if m:
+            uid = m.group(2)
+            return uid, nome_usuario_relatorio(guild, uid, m.group(1))
+
+    for label in labels:
+        valor = extrair_label_admin(texto_limpo, [label])
+        if valor:
+            uid, nome = resolver_autor_admin(guild, None, valor)
+            if uid != "sem_autor":
+                return uid, nome
+
+    # Se não encontrou label, usa a primeira menção do texto.
+    m_mention = re.search(r"<@!?(\d+)>", texto_limpo)
+    if m_mention:
+        uid = m_mention.group(1)
+        return uid, nome_usuario_relatorio(guild, uid, m_mention.group(0))
+
+    # Fallbacks do banco interno.
+    for fb in fallbacks:
+        uid, nome = resolver_autor_admin(guild, None, fb)
+        if uid != "sem_autor":
+            return uid, nome
+
+    return "sem_autor", "Sem autor identificado"
+
+
+def extrair_numero_relatorio_admin(texto: str) -> str:
+    texto_limpo = normalizar_texto_admin_bruto(texto)
+    m = re.search(r"N[ºO]?\s*([0-9]{1,6})", texto_limpo, flags=re.I)
+    if m:
+        return m.group(1).zfill(3)
+    m = re.search(r"RELAT[ÓO]RIO.*?(\d{1,6})", texto_limpo, flags=re.I | re.S)
+    if m:
+        return m.group(1).zfill(3)
     return ""
 
 
@@ -6783,7 +6864,9 @@ async def obter_canal_texto_admin(guild: discord.Guild, canal_id: int) -> Option
 
 
 async def coletar_procurados_discord(guild: discord.Guild) -> List[Dict[str, Any]]:
-    """Varre os canais de procurados para incluir registros antigos já enviados."""
+    """Varre canais de procurados para contar registros antigos e atuais.
+    Quando o autor não existir no texto/banco, entra como Sem autor identificado.
+    """
     registros: List[Dict[str, Any]] = []
     canais = [PROCURADOS_CHANNEL_ID, HISTORICO_PROCURADOS_ID]
     vistos = set()
@@ -6793,31 +6876,30 @@ async def coletar_procurados_discord(guild: discord.Guild) -> List[Dict[str, Any
         if not canal:
             continue
         try:
-            async for msg in canal.history(limit=ADMIN_STATS_HISTORY_LIMIT, oldest_first=False):
+            async for msg in canal.history(limit=limite_historico_admin(), oldest_first=False):
                 texto = conteudo_mensagem_admin(msg)
                 if not texto:
                     continue
                 upper = texto.upper()
-                if "MANDADO" not in upper and "PROCURADO" not in upper:
+                if not any(p in upper for p in ["MANDADO", "PROCURADO", "PROCURAÇÃO INVESTIGATIVA", "PROCURACAO INVESTIGATIVA"]):
                     continue
 
                 rg = extrair_label_admin(texto, [r"RG", r"🆔\s*RG"])
-                nome = extrair_label_admin(texto, [r"Nome", r"👤\s*Nome"])
-                if not rg and not nome:
-                    continue
+                nome = extrair_label_admin(texto, [r"Nome", r"👤\s*Nome", r"Identifica[çc][ãa]o do procurado"])
+                numero_boletim = extrair_label_admin(texto, [r"N[úu]mero do boletim", r"Boletim vinculado", r"Boletim"])
+                if numero_boletim:
+                    try:
+                        numero_boletim = normalizar_boletim_procurado(numero_boletim) or numero_boletim
+                    except Exception:
+                        pass
 
-                key = f"procurado-rg-{limpar_rg(rg) or msg.id}"
+                key_base = limpar_rg(rg) or str(msg.id)
+                key = f"procurado-rg-{key_base}"
                 if key in vistos:
                     continue
                 vistos.add(key)
 
-                numero_boletim = extrair_label_admin(texto, [r"N[úu]mero do boletim", r"Boletim vinculado", r"Boletim"])
-                if numero_boletim:
-                    numero_boletim = normalizar_boletim_procurado(numero_boletim) or numero_boletim
-
-                m_user = re.search(r"(?:Cadastrado por|Respons[áa]vel|Autor)\s*[:\-]\s*(<@!?\d+>)", texto, flags=re.I)
-                uid, autor_nome = resolver_autor_admin(guild, None, m_user.group(1) if m_user else "")
-
+                uid, autor_nome = identificar_autor_admin(guild, texto)
                 registros.append({
                     "key": key,
                     "autor_id": uid,
@@ -6842,7 +6924,7 @@ async def coletar_boletins_discord(guild: discord.Guild) -> List[Dict[str, Any]]
 
     vistos = set()
     try:
-        async for msg in canal.history(limit=ADMIN_STATS_HISTORY_LIMIT, oldest_first=False):
+        async for msg in canal.history(limit=limite_historico_admin(), oldest_first=False):
             texto = conteudo_mensagem_admin(msg)
             if not texto:
                 continue
@@ -6850,7 +6932,7 @@ async def coletar_boletins_discord(guild: discord.Guild) -> List[Dict[str, Any]]
             if "BOLETIM" not in upper and "BO-DICOR" not in upper:
                 continue
 
-            numero = extrair_numero_boletim_texto(texto) or extrair_label_admin(texto, [r"Boletim", r"Número", r"Nº"])
+            numero = extrair_numero_boletim_texto(texto) or extrair_label_admin(texto, [r"Boletim", r"N[úu]mero", r"Nº", r"NO"])
             if not numero:
                 numero = f"MSG-{msg.id}"
             key = f"boletim-{str(numero).upper()}"
@@ -6858,10 +6940,9 @@ async def coletar_boletins_discord(guild: discord.Guild) -> List[Dict[str, Any]]
                 continue
             vistos.add(key)
 
-            comunicante = extrair_label_admin(texto, [r"Comunicante"])
-            m_user = re.search(r"(?:Comunicante|Respons[áa]vel|Autor)\s*[:\-]\s*(<@!?\d+>)", texto, flags=re.I)
-            uid, nome = resolver_autor_admin(guild, None, m_user.group(1) if m_user else comunicante)
-            local = extrair_label_admin(texto, [r"Local", r"Local dos fatos"])
+            comunicante = extrair_label_admin(texto, [r"Comunicante", r"Respons[áa]vel", r"Autor"])
+            uid, nome = identificar_autor_admin(guild, texto, comunicante)
+            local = extrair_label_admin(texto, [r"Local dos fatos", r"Local", r"Localiza[çc][ãa]o"])
 
             registros.append({
                 "key": key,
@@ -6888,23 +6969,21 @@ async def coletar_relatorios_operacionais_discord(guild: discord.Guild) -> List[
             continue
 
         try:
-            async for msg in canal.history(limit=ADMIN_STATS_HISTORY_LIMIT, oldest_first=False):
+            async for msg in canal.history(limit=limite_historico_admin(), oldest_first=False):
                 conteudo = conteudo_mensagem_admin(msg)
                 if not conteudo:
                     continue
                 upper = conteudo.upper()
-                if "RELATÓRIO" not in upper and "RELATORIO" not in upper and "PERÍCIA" not in upper and "PERICIA" not in upper and "OLB" not in upper and "TOCAIA" not in upper:
+                if not any(p in upper for p in ["RELATÓRIO", "RELATORIO", "PERÍCIA", "PERICIA", "OLB", "TOCAIA"]):
                     continue
 
-                m_user = re.search(r"<@!?(\d+)>", conteudo)
-                if not m_user:
-                    continue
-                uid = m_user.group(1)
-                m_num = re.search(r"N[ºO]?\s*([0-9]+)", conteudo, flags=re.I)
                 key = f"relatorio-discord-{msg.id}"
                 if key in vistos:
                     continue
                 vistos.add(key)
+
+                uid, autor_nome = identificar_autor_admin(guild, conteudo)
+                numero = extrair_numero_relatorio_admin(conteudo)
                 categoria = categoria_relatorio_admin(tipo, conteudo)
                 registros.append({
                     "key": key,
@@ -6912,12 +6991,12 @@ async def coletar_relatorios_operacionais_discord(guild: discord.Guild) -> List[
                     "tipo": tipo,
                     "categoria": categoria,
                     "tipo_nome": nome_tipo_relatorio(tipo),
-                    "numero": m_num.group(1) if m_num else "",
-                    "autor_id": int(uid),
-                    "autor_nome": nome_usuario_relatorio(guild, uid),
+                    "numero": numero,
+                    "autor_id": uid,
+                    "autor_nome": autor_nome,
                     "data": data_msg_br(msg),
                     "mensagem_url": msg.jump_url,
-                    "titulo": f"{categoria[:-1] if categoria.endswith('s') else categoria} Nº {m_num.group(1) if m_num else 'sem número'}",
+                    "titulo": f"{categoria[:-1] if categoria.endswith('s') else categoria} Nº {numero or 'sem número'}",
                 })
         except Exception as erro:
             await enviar_log(f"⚠️ Estatística ADM: não consegui varrer relatórios do canal `{canal_id}`: {erro}")
@@ -6941,14 +7020,15 @@ async def coletar_mesas_discord(guild: discord.Guild) -> List[Dict[str, Any]]:
                 continue
             vistos.add(canal.id)
             try:
-                async for msg in canal.history(limit=20, oldest_first=True):
+                achou_mensagem = False
+                async for msg in canal.history(limit=60, oldest_first=True):
                     texto = conteudo_mensagem_admin(msg)
-                    if "Mesa de Investigação" not in texto and "Mesa de Investigacao" not in texto:
+                    if "Mesa de Investigação" not in texto and "Mesa de Investigacao" not in texto and "Investigação" not in texto and "Investigacao" not in texto:
                         continue
-                    m_user = re.search(r"(?:Agente|Respons[áa]vel)\s*[:\-]\s*(<@!?\d+>)", texto, flags=re.I)
-                    uid, nome = resolver_autor_admin(guild, None, m_user.group(1) if m_user else "")
-                    familia = extrair_label_admin(texto, [r"Organiza[çc][ãa]o/Fam[íi]lia", r"Fam[íi]lia", r"Organiza[çc][ãa]o"])
-                    apelido = extrair_label_admin(texto, [r"Apelido"])
+                    achou_mensagem = True
+                    uid, nome = identificar_autor_admin(guild, texto)
+                    familia = extrair_label_admin(texto, [r"Organiza[çc][ãa]o/Fam[íi]lia", r"Fam[íi]lia", r"Organiza[çc][ãa]o", r"Comunidade"])
+                    apelido = extrair_label_admin(texto, [r"Apelido", r"Agente"])
                     registros.append({
                         "key": f"mesa-canal-{canal.id}",
                         "autor_id": uid,
@@ -6957,6 +7037,14 @@ async def coletar_mesas_discord(guild: discord.Guild) -> List[Dict[str, Any]]:
                         "titulo": f"{familia or canal.name} | Apelido: {apelido or 'Não informado'}",
                     })
                     break
+                if not achou_mensagem:
+                    registros.append({
+                        "key": f"mesa-canal-{canal.id}",
+                        "autor_id": "sem_autor",
+                        "autor_nome": "Sem autor identificado",
+                        "data": "Não informado",
+                        "titulo": f"{canal.name} | Apelido: Não informado",
+                    })
             except Exception:
                 continue
 
@@ -7118,7 +7206,7 @@ async def montar_estatisticas_administrativas(guild: discord.Guild, alvo_id: Opt
     linhas.append("RELATÓRIO ADMINISTRATIVO DICOR")
     linhas.append("Polícia Federal de Capital Morada do Valley")
     linhas.append(f"Gerado em: {agora_br()}")
-    linhas.append("Modelo: auditoria por agente, contabilizando registros do banco interno e canais oficiais.")
+    linhas.append("Modelo: auditoria por agente, com varredura reforçada do banco interno e dos canais oficiais.")
     linhas.append("=" * 78)
     linhas.append("")
 
@@ -7165,7 +7253,7 @@ async def montar_estatisticas_administrativas(guild: discord.Guild, alvo_id: Opt
         linhas.append("Nenhum registro encontrado para esta consulta.")
 
     linhas.append("=" * 78)
-    linhas.append("Observação: registros antigos sem autor salvo aparecem como 'Sem autor identificado'.")
+    linhas.append("Observação: registros antigos sem autor salvo ou sem responsável escrito na mensagem entram como 'Sem autor identificado'. Para contar no nome certo, o registro precisa ter menção/autor salvo no bot.")
     return "\n".join(linhas)
 
 
