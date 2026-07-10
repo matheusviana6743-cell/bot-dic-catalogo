@@ -6601,11 +6601,11 @@ async def estatisticas(interaction: discord.Interaction):
 # PAINEL ADMINISTRATIVO / ESTATÍSTICAS POR AGENTE
 # =====================================================
 
-ADMIN_STATS_HISTORY_LIMIT = int(os.getenv("ADMIN_STATS_HISTORY_LIMIT", "600") or 600)
+ADMIN_STATS_HISTORY_LIMIT = int(os.getenv("ADMIN_STATS_HISTORY_LIMIT", "1500") or 1500)
 
 
 def usuario_pode_painel_adm(member: discord.Member) -> bool:
-    """Mesmo padrão de permissão: Inspetor DICOR para cima."""
+    """Painel restrito para Inspetor DICOR para cima."""
     return isinstance(member, discord.Member) and usuario_pode_fechar_mesa(member)
 
 
@@ -6613,7 +6613,27 @@ def texto_sem_markdown_admin(texto: Any) -> str:
     texto = str(texto or "")
     texto = texto.replace("**", "").replace("__", "").replace("`", "")
     texto = re.sub(r"<@!?(\d+)>", r"ID:\1", texto)
-    return texto.strip()
+    return re.sub(r"\s+", " ", texto).strip()
+
+
+def conteudo_mensagem_admin(msg: discord.Message) -> str:
+    partes = [msg.content or ""]
+    for embed in msg.embeds:
+        if embed.title:
+            partes.append(str(embed.title))
+        if embed.description:
+            partes.append(str(embed.description))
+        for field in embed.fields:
+            partes.append(f"{field.name}: {field.value}")
+    return "\n".join([p for p in partes if p]).strip()
+
+
+def data_msg_br(msg: discord.Message) -> str:
+    try:
+        tz = datetime.timezone(datetime.timedelta(hours=-3))
+        return msg.created_at.astimezone(tz).strftime("%d/%m/%Y %H:%M")
+    except Exception:
+        return agora_br()
 
 
 def nome_usuario_relatorio(guild: Optional[discord.Guild], usuario_id: str, fallback: str = "") -> str:
@@ -6625,7 +6645,6 @@ def nome_usuario_relatorio(guild: Optional[discord.Guild], usuario_id: str, fall
 
 
 def limpar_nome_admin_stats(nome: Any) -> str:
-    """Normaliza nomes para tentar ligar registros antigos ao membro certo."""
     texto = nome_operacional_dossie(nome)
     texto = texto.lower()
     texto = unicodedata.normalize("NFKD", texto).encode("ascii", "ignore").decode("ascii")
@@ -6636,6 +6655,13 @@ def limpar_nome_admin_stats(nome: Any) -> str:
 def localizar_membro_por_nome_admin(guild: Optional[discord.Guild], nome: Any) -> Optional[discord.Member]:
     if guild is None or not nome:
         return None
+
+    texto_original = str(nome or "")
+    m_mention = re.search(r"<@!?(\d+)>", texto_original)
+    if m_mention:
+        membro = guild.get_member(int(m_mention.group(1)))
+        if membro:
+            return membro
 
     alvo = limpar_nome_admin_stats(nome)
     if not alvo:
@@ -6661,14 +6687,20 @@ def localizar_membro_por_nome_admin(guild: Optional[discord.Guild], nome: Any) -
 
 def resolver_autor_admin(guild: Optional[discord.Guild], usuario_id: Any = None, nome: Any = "", *extras: Any) -> tuple[str, str]:
     """
-    Resolve quem mandou o bot criar/publicar algo.
-    Usa ID quando existir; se registro antigo não tiver ID, tenta ligar pelo nome do Discord.
+    Resolve quem acionou o bot.
+    Prioridade: ID salvo > menção em texto > nome salvo > Sem autor.
     """
     candidatos_nome = [nome, *extras]
 
     if usuario_id is not None and str(usuario_id).strip().isdigit() and str(usuario_id).strip() not in {"0", ""}:
         uid = str(usuario_id).strip()
         return uid, nome_usuario_relatorio(guild, uid, str(nome or ""))
+
+    for candidato in candidatos_nome:
+        m_mention = re.search(r"<@!?(\d+)>", str(candidato or ""))
+        if m_mention:
+            uid = m_mention.group(1)
+            return uid, nome_usuario_relatorio(guild, uid, str(candidato or ""))
 
     for candidato in candidatos_nome:
         membro = localizar_membro_por_nome_admin(guild, candidato)
@@ -6687,68 +6719,205 @@ def resolver_autor_admin(guild: Optional[discord.Guild], usuario_id: Any = None,
     return "sem_autor", "Sem autor identificado"
 
 
-def categoria_relatorio_admin(tipo: Any) -> str:
-    tipo = str(tipo or "").lower().strip()
-    return {
-        "tocaia": "Tocaias",
-        "olb": "OLBs",
-        "pericia_externa": "Perícias externas",
-        "pericia": "Perícias externas",
-        "diario": "Relatórios diários",
-        "relatorio_diario": "Relatórios diários",
-    }.get(tipo, "Relatórios operacionais")
+def categoria_relatorio_admin(tipo: Any, texto: str = "") -> str:
+    tipo_txt = str(tipo or "").lower().strip()
+    texto_upper = str(texto or "").upper()
+    if "TOCAIA" in texto_upper or tipo_txt == "tocaia":
+        return "Tocaias"
+    if "OLB" in texto_upper or tipo_txt == "olb":
+        return "OLBs"
+    if "PERÍCIA EXTERNA" in texto_upper or "PERICIA EXTERNA" in texto_upper or tipo_txt in {"pericia_externa", "pericia", "pericia_ext"}:
+        return "Perícias externas"
+    if "RELATÓRIO DIÁRIO" in texto_upper or "RELATORIO DIARIO" in texto_upper or "PERÍCIA INVESTIGATIVA" in texto_upper or "PERICIA INVESTIGATIVA" in texto_upper or tipo_txt in {"diario", "relatorio_diario"}:
+        return "Relatórios diários"
+    return "Relatórios operacionais"
 
 
 def add_item_estatistica(agentes: Dict[str, Dict[str, Any]], usuario_id: Any, nome: str, categoria: str, item: Dict[str, Any]) -> None:
     if usuario_id is None or str(usuario_id).strip() in {"", "0", "None"}:
         return
     uid = str(usuario_id)
-    agentes.setdefault(uid, {"id": uid, "nome": nome or f"Usuário {uid}", "itens": {}})
+    agentes.setdefault(uid, {"id": uid, "nome": nome or f"Usuário {uid}", "itens": {}, "_vistos": set()})
     if nome and (not agentes[uid].get("nome") or agentes[uid]["nome"].startswith("Usuário ")):
         agentes[uid]["nome"] = nome
+
+    chave = str(item.get("key") or item.get("titulo") or item.get("data") or "")
+    chave = f"{categoria}:{chave}"
+    if chave in agentes[uid].setdefault("_vistos", set()):
+        return
+    agentes[uid]["_vistos"].add(chave)
     agentes[uid]["itens"].setdefault(categoria, []).append(item)
+
+
+def extrair_label_admin(texto: str, rotulos: List[str]) -> str:
+    for rotulo in rotulos:
+        padrao = rf"(?:{rotulo})\s*[:\-]\s*([^\n]+)"
+        m = re.search(padrao, texto, flags=re.I)
+        if m:
+            valor = m.group(1).strip()
+            valor = re.sub(r"[*_`]+", "", valor).strip()
+            return valor[:160]
+    return ""
+
+
+def extrair_numero_boletim_texto(texto: str) -> str:
+    m = re.search(r"\bBO\s*-?\s*DICOR\s*-?\s*(\d{1,6})\b", texto, flags=re.I)
+    if m:
+        return f"BO-DICOR-{int(m.group(1)):03d}"
+    m = re.search(r"BOLETIM(?:\s+DE\s+OCORR[ÊE]NCIA)?\s*[—\-–:]\s*(\d{1,6})", texto, flags=re.I)
+    if m:
+        return f"BO-DICOR-{int(m.group(1)):03d}"
+    return ""
+
+
+async def obter_canal_texto_admin(guild: discord.Guild, canal_id: int) -> Optional[discord.TextChannel]:
+    if not canal_id:
+        return None
+    canal = guild.get_channel(int(canal_id))
+    if canal is None:
+        try:
+            canal = await bot.fetch_channel(int(canal_id))
+        except Exception:
+            canal = None
+    return canal if isinstance(canal, discord.TextChannel) else None
+
+
+async def coletar_procurados_discord(guild: discord.Guild) -> List[Dict[str, Any]]:
+    """Varre os canais de procurados para incluir registros antigos já enviados."""
+    registros: List[Dict[str, Any]] = []
+    canais = [PROCURADOS_CHANNEL_ID, HISTORICO_PROCURADOS_ID]
+    vistos = set()
+
+    for canal_id in canais:
+        canal = await obter_canal_texto_admin(guild, int(canal_id or 0))
+        if not canal:
+            continue
+        try:
+            async for msg in canal.history(limit=ADMIN_STATS_HISTORY_LIMIT, oldest_first=False):
+                texto = conteudo_mensagem_admin(msg)
+                if not texto:
+                    continue
+                upper = texto.upper()
+                if "MANDADO" not in upper and "PROCURADO" not in upper:
+                    continue
+
+                rg = extrair_label_admin(texto, [r"RG", r"🆔\s*RG"])
+                nome = extrair_label_admin(texto, [r"Nome", r"👤\s*Nome"])
+                if not rg and not nome:
+                    continue
+
+                key = f"procurado-rg-{limpar_rg(rg) or msg.id}"
+                if key in vistos:
+                    continue
+                vistos.add(key)
+
+                numero_boletim = extrair_label_admin(texto, [r"N[úu]mero do boletim", r"Boletim vinculado", r"Boletim"])
+                if numero_boletim:
+                    numero_boletim = normalizar_boletim_procurado(numero_boletim) or numero_boletim
+
+                m_user = re.search(r"(?:Cadastrado por|Respons[áa]vel|Autor)\s*[:\-]\s*(<@!?\d+>)", texto, flags=re.I)
+                uid, autor_nome = resolver_autor_admin(guild, None, m_user.group(1) if m_user else "")
+
+                registros.append({
+                    "key": key,
+                    "autor_id": uid,
+                    "autor_nome": autor_nome,
+                    "data": data_msg_br(msg),
+                    "titulo": f"{nome or 'Procurado sem nome'} | RG {rg or 'Não informado'} | Boletim: {numero_boletim or 'Não informado'}",
+                    "rg": rg,
+                    "nome": nome,
+                })
+        except Exception as erro:
+            await enviar_log(f"⚠️ Estatística ADM: não consegui varrer procurados do canal `{canal_id}`: {erro}")
+
+    return registros
+
+
+async def coletar_boletins_discord(guild: discord.Guild) -> List[Dict[str, Any]]:
+    """Varre o canal oficial de boletins para contar boletins antigos e futuros."""
+    registros: List[Dict[str, Any]] = []
+    canal = await obter_canal_texto_admin(guild, int(BOLETINS_CHANNEL_ID or 0))
+    if not canal:
+        return registros
+
+    vistos = set()
+    try:
+        async for msg in canal.history(limit=ADMIN_STATS_HISTORY_LIMIT, oldest_first=False):
+            texto = conteudo_mensagem_admin(msg)
+            if not texto:
+                continue
+            upper = texto.upper()
+            if "BOLETIM" not in upper and "BO-DICOR" not in upper:
+                continue
+
+            numero = extrair_numero_boletim_texto(texto) or extrair_label_admin(texto, [r"Boletim", r"Número", r"Nº"])
+            if not numero:
+                numero = f"MSG-{msg.id}"
+            key = f"boletim-{str(numero).upper()}"
+            if key in vistos:
+                continue
+            vistos.add(key)
+
+            comunicante = extrair_label_admin(texto, [r"Comunicante"])
+            m_user = re.search(r"(?:Comunicante|Respons[áa]vel|Autor)\s*[:\-]\s*(<@!?\d+>)", texto, flags=re.I)
+            uid, nome = resolver_autor_admin(guild, None, m_user.group(1) if m_user else comunicante)
+            local = extrair_label_admin(texto, [r"Local", r"Local dos fatos"])
+
+            registros.append({
+                "key": key,
+                "autor_id": uid,
+                "autor_nome": nome,
+                "data": data_msg_br(msg),
+                "titulo": f"{numero} | {local or 'Local não informado'}",
+            })
+    except Exception as erro:
+        await enviar_log(f"⚠️ Estatística ADM: não consegui varrer boletins do canal `{BOLETINS_CHANNEL_ID}`: {erro}")
+
+    return registros
 
 
 async def coletar_relatorios_operacionais_discord(guild: discord.Guild) -> List[Dict[str, Any]]:
     """Lê os canais oficiais de relatórios para pegar registros antigos que não existiam no JSON."""
     registros: List[Dict[str, Any]] = []
     vistos = set()
+    canais_map = globals().get("CANAIS_RELATORIOS", {}) or {}
 
-    for tipo, canal_id in CANAIS_RELATORIOS.items():
-        canal = guild.get_channel(canal_id)
-        if canal is None:
-            try:
-                canal = await bot.fetch_channel(canal_id)
-            except Exception:
-                canal = None
-        if not isinstance(canal, discord.TextChannel):
+    for tipo, canal_id in canais_map.items():
+        canal = await obter_canal_texto_admin(guild, int(canal_id or 0))
+        if not canal:
             continue
 
         try:
             async for msg in canal.history(limit=ADMIN_STATS_HISTORY_LIMIT, oldest_first=False):
-                conteudo = msg.content or ""
-                if "RELATÓRIO" not in conteudo.upper():
+                conteudo = conteudo_mensagem_admin(msg)
+                if not conteudo:
                     continue
+                upper = conteudo.upper()
+                if "RELATÓRIO" not in upper and "RELATORIO" not in upper and "PERÍCIA" not in upper and "PERICIA" not in upper and "OLB" not in upper and "TOCAIA" not in upper:
+                    continue
+
                 m_user = re.search(r"<@!?(\d+)>", conteudo)
                 if not m_user:
                     continue
                 uid = m_user.group(1)
-                m_num = re.search(r"Nº\s+([0-9]+)", conteudo, flags=re.I)
-                chave = f"discord-{msg.id}"
-                if chave in vistos:
+                m_num = re.search(r"N[ºO]?\s*([0-9]+)", conteudo, flags=re.I)
+                key = f"relatorio-discord-{msg.id}"
+                if key in vistos:
                     continue
-                vistos.add(chave)
+                vistos.add(key)
+                categoria = categoria_relatorio_admin(tipo, conteudo)
                 registros.append({
-                    "id": chave,
+                    "key": key,
+                    "id": key,
                     "tipo": tipo,
+                    "categoria": categoria,
                     "tipo_nome": nome_tipo_relatorio(tipo),
                     "numero": m_num.group(1) if m_num else "",
                     "autor_id": int(uid),
                     "autor_nome": nome_usuario_relatorio(guild, uid),
-                    "data": msg.created_at.astimezone(datetime.timezone(datetime.timedelta(hours=-3))).strftime("%d/%m/%Y %H:%M"),
+                    "data": data_msg_br(msg),
                     "mensagem_url": msg.jump_url,
-                    "resumo": texto_sem_markdown_admin(conteudo[:700]),
-                    "origem": "canal oficial",
+                    "titulo": f"{categoria[:-1] if categoria.endswith('s') else categoria} Nº {m_num.group(1) if m_num else 'sem número'}",
                 })
         except Exception as erro:
             await enviar_log(f"⚠️ Estatística ADM: não consegui varrer relatórios do canal `{canal_id}`: {erro}")
@@ -6756,105 +6925,184 @@ async def coletar_relatorios_operacionais_discord(guild: discord.Guild) -> List[
     return registros
 
 
+async def coletar_mesas_discord(guild: discord.Guild) -> List[Dict[str, Any]]:
+    """Varre categorias de mesas para contar mesas antigas mesmo quando faltarem no JSON."""
+    registros: List[Dict[str, Any]] = []
+    vistos = set()
+    categorias_ids = [CATEGORIA_MESAS_ABERTAS_ID, CATEGORIA_MESAS_FECHADAS_ID]
+
+    for categoria_id in categorias_ids:
+        categoria = guild.get_channel(int(categoria_id or 0))
+        if not isinstance(categoria, discord.CategoryChannel):
+            continue
+
+        for canal in categoria.text_channels:
+            if canal.id in vistos:
+                continue
+            vistos.add(canal.id)
+            try:
+                async for msg in canal.history(limit=20, oldest_first=True):
+                    texto = conteudo_mensagem_admin(msg)
+                    if "Mesa de Investigação" not in texto and "Mesa de Investigacao" not in texto:
+                        continue
+                    m_user = re.search(r"(?:Agente|Respons[áa]vel)\s*[:\-]\s*(<@!?\d+>)", texto, flags=re.I)
+                    uid, nome = resolver_autor_admin(guild, None, m_user.group(1) if m_user else "")
+                    familia = extrair_label_admin(texto, [r"Organiza[çc][ãa]o/Fam[íi]lia", r"Fam[íi]lia", r"Organiza[çc][ãa]o"])
+                    apelido = extrair_label_admin(texto, [r"Apelido"])
+                    registros.append({
+                        "key": f"mesa-canal-{canal.id}",
+                        "autor_id": uid,
+                        "autor_nome": nome,
+                        "data": data_msg_br(msg),
+                        "titulo": f"{familia or canal.name} | Apelido: {apelido or 'Não informado'}",
+                    })
+                    break
+            except Exception:
+                continue
+
+    return registros
+
+
 async def montar_estatisticas_administrativas(guild: discord.Guild, alvo_id: Optional[int] = None) -> str:
     agentes: Dict[str, Dict[str, Any]] = {}
+    vistos_globais = set()
 
-    # Procurados cadastrados: conta pelo usuário que iniciou o cadastro no bot.
+    def marcar(chave: str) -> bool:
+        if chave in vistos_globais:
+            return False
+        vistos_globais.add(chave)
+        return True
+
+    # Procurados cadastrados pelo bot.
     for p in carregar_procurados():
+        rg_limpo = limpar_rg(p.get("rg", ""))
+        key = f"procurado-rg-{rg_limpo or p.get('id') or p.get('caso') or p.get('mensagem_id')}"
+        if not marcar(key):
+            continue
         uid, nome = resolver_autor_admin(
             guild,
             p.get("criado_por_id") or p.get("autor_id"),
             p.get("criado_por_nome") or p.get("autor_nome", ""),
         )
         add_item_estatistica(agentes, uid, nome, "Procurados cadastrados", {
+            "key": key,
             "data": p.get("data", "Não informado"),
             "titulo": (
                 f"{p.get('nome', 'Sem nome')} | RG {p.get('rg', 'Não informado')} | "
-                f"Boletim: {p.get('numero_boletim') or p.get('informacoes') or 'Não informado'}"
+                f"Boletim: {p.get('numero_boletim') or p.get('boletim') or 'Não informado'}"
             ),
         })
 
-    # Boletins publicados: conta pelo usuário que abriu/publicou o boletim pelo bot.
+    # Procurados antigos varridos no Discord. Quando não der para descobrir autor, cai em Sem autor identificado.
+    for p in await coletar_procurados_discord(guild):
+        if not marcar(str(p.get("key"))):
+            continue
+        add_item_estatistica(agentes, p.get("autor_id"), p.get("autor_nome", ""), "Procurados cadastrados", p)
+
+    # Boletins publicados pelo bot.
     for b in carregar_boletins():
+        numero = str(b.get("numero") or b.get("id") or b.get("mensagem_id") or "").upper()
+        key = f"boletim-{numero or data_caso()}"
+        if not marcar(key):
+            continue
         uid, nome = resolver_autor_admin(
             guild,
-            b.get("criado_por_id") or b.get("comunicante_id") or b.get("autor_id"),
-            b.get("criado_por_nome") or b.get("comunicante_nome", "") or b.get("autor_nome", ""),
+            b.get("criado_por_id") or b.get("comunicante_id") or b.get("autor_id") or b.get("publicado_por_id"),
+            b.get("criado_por_nome") or b.get("comunicante_nome", "") or b.get("autor_nome", "") or b.get("publicado_por_nome", ""),
             b.get("comunicante_mention", ""),
         )
         add_item_estatistica(agentes, uid, nome, "Boletins publicados", {
-            "data": b.get("data_criacao") or b.get("data_registro") or "Não informado",
+            "key": key,
+            "data": b.get("data_criacao") or b.get("data_registro") or b.get("criado_em") or "Não informado",
             "titulo": f"{b.get('numero', 'BO sem número')} | {b.get('local', 'Local não informado')}",
         })
 
-    # Mesas criadas e encerradas
+    # Boletins antigos já enviados no canal oficial.
+    for b in await coletar_boletins_discord(guild):
+        if not marcar(str(b.get("key"))):
+            continue
+        add_item_estatistica(agentes, b.get("autor_id"), b.get("autor_nome", ""), "Boletins publicados", b)
+
+    # Mesas registradas no JSON.
     for m in carregar_mesas():
-        uid, nome = resolver_autor_admin(
-            guild,
-            m.get("autor_id"),
-            m.get("autor_nome", ""),
-            m.get("apelido", ""),
-        )
-        add_item_estatistica(agentes, uid, nome, "Mesas criadas", {
-            "data": m.get("criada_em", "Não informado"),
-            "titulo": f"{m.get('familia', 'Sem organização')} | Apelido: {m.get('apelido', 'Não informado')}",
-        })
+        key = f"mesa-canal-{m.get('canal_id') or m.get('nome_canal')}"
+        if marcar(key):
+            uid, nome = resolver_autor_admin(
+                guild,
+                m.get("autor_id"),
+                m.get("autor_nome", ""),
+                m.get("apelido", ""),
+            )
+            add_item_estatistica(agentes, uid, nome, "Mesas criadas", {
+                "key": key,
+                "data": m.get("criada_em", "Não informado"),
+                "titulo": f"{m.get('familia', 'Sem organização')} | Apelido: {m.get('apelido', 'Não informado')}",
+            })
 
         uid_fechou_val = m.get("fechada_por_id")
         if uid_fechou_val:
-            uid_fechou, nome_fechou = resolver_autor_admin(
-                guild,
-                uid_fechou_val,
-                m.get("fechada_por_nome", ""),
-            )
-            add_item_estatistica(agentes, uid_fechou, nome_fechou, "Mesas encerradas", {
-                "data": m.get("fechada_em", "Não informado"),
-                "titulo": f"{m.get('familia', 'Sem organização')} | Processo: {(m.get('dossie') or {}).get('processo', 'Não informado')}",
-            })
+            key_fechou = f"mesa-fechada-{m.get('canal_id') or m.get('nome_canal')}"
+            if marcar(key_fechou):
+                uid_fechou, nome_fechou = resolver_autor_admin(
+                    guild,
+                    uid_fechou_val,
+                    m.get("fechada_por_nome", ""),
+                )
+                add_item_estatistica(agentes, uid_fechou, nome_fechou, "Mesas encerradas", {
+                    "key": key_fechou,
+                    "data": m.get("fechada_em", "Não informado"),
+                    "titulo": f"{m.get('familia', 'Sem organização')} | Processo: {(m.get('dossie') or {}).get('processo', 'Não informado')}",
+                })
 
-    # Dossiês gerados
+    # Mesas antigas lidas nas categorias.
+    for m in await coletar_mesas_discord(guild):
+        if not marcar(str(m.get("key"))):
+            continue
+        add_item_estatistica(agentes, m.get("autor_id"), m.get("autor_nome", ""), "Mesas criadas", m)
+
+    # Dossiês gerados.
     for d in carregar_dossies():
+        key = f"dossie-{d.get('processo') or d.get('arquivo_pdf') or d.get('gerado_em')}"
+        if not marcar(key):
+            continue
         uid, nome = resolver_autor_admin(
             guild,
-            d.get("encerrado_por_id"),
-            d.get("encerrado_por", ""),
+            d.get("encerrado_por_id") or d.get("agente_encerramento_id"),
+            d.get("encerrado_por", "") or d.get("agente_encerramento", ""),
         )
         add_item_estatistica(agentes, uid, nome, "Dossiês gerados", {
+            "key": key,
             "data": d.get("gerado_em", "Não informado"),
             "titulo": f"{d.get('processo', 'Sem processo')} | {d.get('nome_operacao', 'Operação não informada')}",
         })
 
     # Relatórios operacionais do JSON, separados por tipo.
-    vistos_relatorios = set()
     for r in carregar_relatorios_operacionais():
+        key = f"relatorio-{r.get('id') or r.get('mensagem_url') or r.get('tipo') or r.get('numero') or r.get('data')}"
+        if not marcar(key):
+            continue
         uid, nome = resolver_autor_admin(
             guild,
             r.get("autor_id") or r.get("criado_por_id"),
             r.get("autor_nome", "") or r.get("criado_por_nome", ""),
+            r.get("autor_mention", ""),
         )
-        url = r.get("mensagem_url", "")
-        if url:
-            vistos_relatorios.add(url)
-        categoria = categoria_relatorio_admin(r.get("tipo"))
+        categoria = categoria_relatorio_admin(r.get("tipo"), r.get("resumo", ""))
         add_item_estatistica(agentes, uid, nome, categoria, {
+            "key": key,
             "data": r.get("data", "Não informado"),
             "titulo": f"{r.get('tipo_nome') or nome_tipo_relatorio(r.get('tipo'))} Nº {r.get('numero', '')}".strip(),
         })
 
-    # Varredura dos canais oficiais de relatórios para pegar registros antigos.
+    # Relatórios antigos varridos nos canais oficiais.
     for r in await coletar_relatorios_operacionais_discord(guild):
-        url = r.get("mensagem_url", "")
-        if url in vistos_relatorios:
+        key = str(r.get("key") or r.get("mensagem_url"))
+        if not marcar(key):
             continue
-        uid, nome = resolver_autor_admin(
-            guild,
-            r.get("autor_id"),
-            r.get("autor_nome", ""),
-        )
-        categoria = categoria_relatorio_admin(r.get("tipo"))
-        add_item_estatistica(agentes, uid, nome, categoria, {
+        add_item_estatistica(agentes, r.get("autor_id"), r.get("autor_nome", ""), r.get("categoria") or categoria_relatorio_admin(r.get("tipo")), {
+            "key": key,
             "data": r.get("data", "Não informado"),
-            "titulo": f"{r.get('tipo_nome') or nome_tipo_relatorio(r.get('tipo'))} Nº {r.get('numero', '')}".strip(),
+            "titulo": r.get("titulo") or f"{r.get('tipo_nome') or nome_tipo_relatorio(r.get('tipo'))} Nº {r.get('numero', '')}".strip(),
         })
 
     if alvo_id is not None:
@@ -6862,7 +7110,7 @@ async def montar_estatisticas_administrativas(guild: discord.Guild, alvo_id: Opt
         agentes = {
             chave: agentes.get(
                 chave,
-                {"id": chave, "nome": nome_usuario_relatorio(guild, chave), "itens": {}},
+                {"id": chave, "nome": nome_usuario_relatorio(guild, chave), "itens": {}, "_vistos": set()},
             )
         }
 
@@ -6870,7 +7118,7 @@ async def montar_estatisticas_administrativas(guild: discord.Guild, alvo_id: Opt
     linhas.append("RELATÓRIO ADMINISTRATIVO DICOR")
     linhas.append("Polícia Federal de Capital Morada do Valley")
     linhas.append(f"Gerado em: {agora_br()}")
-    linhas.append("Modelo: auditoria por agente, contabilizando quem acionou o bot.")
+    linhas.append("Modelo: auditoria por agente, contabilizando registros do banco interno e canais oficiais.")
     linhas.append("=" * 78)
     linhas.append("")
 
@@ -6916,6 +7164,8 @@ async def montar_estatisticas_administrativas(guild: discord.Guild, alvo_id: Opt
     if total_itens == 0:
         linhas.append("Nenhum registro encontrado para esta consulta.")
 
+    linhas.append("=" * 78)
+    linhas.append("Observação: registros antigos sem autor salvo aparecem como 'Sem autor identificado'.")
     return "\n".join(linhas)
 
 
@@ -6938,7 +7188,7 @@ async def enviar_relatorio_estatistica(interaction: discord.Interaction, membro:
         return
 
     if not interaction.response.is_done():
-        await interaction.response.defer(ephemeral=True, thinking=True)
+        await interaction.response.defer(thinking=True)
 
     caminho = await gerar_arquivo_estatistica_admin(guild, membro)
 
@@ -6947,172 +7197,36 @@ async def enviar_relatorio_estatistica(interaction: discord.Interaction, membro:
         resumo += f"Agente analisado: {membro.mention}\n"
     else:
         resumo += "Tipo: varredura geral, nome por nome.\n"
-    resumo += "O TXT mostra só quantidade e o que foi criado, sem exibir mensagens completas."
+    resumo += "O TXT mostra apenas quantidades e o que foi criado."
 
-    await interaction.followup.send(resumo, file=discord.File(str(caminho), filename=caminho.name), ephemeral=True)
-
-
-async def criar_ticket_admin(interaction: discord.Interaction, modo: str) -> Optional[discord.TextChannel]:
-    if not isinstance(interaction.user, discord.Member) or not usuario_pode_painel_adm(interaction.user):
-        await interaction.response.send_message("❌ Apenas Inspetor DICOR para cima pode usar este painel.", ephemeral=True)
-        return None
-
-    guild = interaction.guild
-    if guild is None:
-        await interaction.response.send_message("❌ Use dentro de um servidor.", ephemeral=True)
-        return None
-
-    await interaction.response.defer(ephemeral=True, thinking=True)
-
-    overwrites: Dict[Any, discord.PermissionOverwrite] = {
-        guild.default_role: discord.PermissionOverwrite(view_channel=False),
-        interaction.user: discord.PermissionOverwrite(
-            view_channel=True,
-            send_messages=True,
-            read_message_history=True,
-            attach_files=True,
-        ),
-    }
-
-    if guild.me:
-        overwrites[guild.me] = discord.PermissionOverwrite(
-            view_channel=True,
-            send_messages=True,
-            manage_channels=True,
-            read_message_history=True,
-            attach_files=True,
-        )
-
-    for cargo_id in set(CARGOS_ADMIN_IDS + CARGOS_EQUIPE_IDS):
-        cargo = guild.get_role(cargo_id)
-        if cargo:
-            overwrites[cargo] = discord.PermissionOverwrite(
-                view_channel=True,
-                send_messages=True,
-                read_message_history=True,
-                attach_files=True,
-            )
-
-    categoria = interaction.channel.category if isinstance(interaction.channel, discord.TextChannel) else None
-    nome_ticket = f"📊・auditoria-{slugify(nome_operacional_dossie(interaction.user))}"
-    canal = await guild.create_text_channel(
-        name=nome_ticket,
-        category=categoria,
-        overwrites=overwrites,
-        reason="Ticket administrativo DICOR",
-    )
-
-    await interaction.followup.send(f"✅ Ticket administrativo criado: {canal.mention}", ephemeral=True)
-    return canal
-
-
-async def enviar_relatorio_estatistica_canal(canal: discord.TextChannel, guild: discord.Guild, membro: Optional[discord.Member] = None) -> None:
-    aviso = await canal.send("⏳ **Gerando relatório administrativo...** Aguarde a varredura.")
-    try:
-        caminho = await gerar_arquivo_estatistica_admin(guild, membro)
-        if membro:
-            texto = f"👤 **Relatório por agente gerado:** {membro.mention}\nO arquivo abaixo mostra quantidades e o que ele criou."
-        else:
-            texto = "📊 **Varredura geral gerada.**\nO arquivo abaixo mostra todos os agentes, quantidades e o que cada um criou."
-        await canal.send(texto, file=discord.File(str(caminho), filename=caminho.name))
-        try:
-            await aviso.delete()
-        except Exception:
-            pass
-    except Exception as erro:
-        await canal.send(f"❌ Não consegui gerar o relatório: `{erro}`")
-        await enviar_log(f"❌ Erro na estatística administrativa: {erro}")
+    await interaction.followup.send(resumo, file=discord.File(str(caminho), filename=caminho.name))
 
 
 class AdminAgenteSelect(discord.ui.UserSelect):
     def __init__(self):
         super().__init__(
-            placeholder="Selecione o agente que será analisado",
+            placeholder="Selecionar agente para auditoria individual",
             min_values=1,
             max_values=1,
-            custom_id="dic_adm_select_agente",
+            custom_id="dic_adm_select_agente_painel",
         )
 
     async def callback(self, interaction: discord.Interaction):
         if not isinstance(interaction.user, discord.Member) or not usuario_pode_painel_adm(interaction.user):
-            await interaction.response.send_message("❌ Apenas Inspetor DICOR para cima pode usar este ticket.", ephemeral=True)
+            await interaction.response.send_message("❌ Apenas Inspetor DICOR para cima pode usar este painel.", ephemeral=True)
             return
         membro = self.values[0]
-        if not isinstance(interaction.channel, discord.TextChannel) or interaction.guild is None:
-            await interaction.response.send_message("❌ Canal inválido.", ephemeral=True)
-            return
-        await interaction.response.defer(ephemeral=True, thinking=True)
-        await enviar_relatorio_estatistica_canal(interaction.channel, interaction.guild, membro)
-        await interaction.followup.send(f"✅ Relatório de {membro.mention} gerado no ticket.", ephemeral=True)
-
-
-class TicketEstatisticaAgenteView(View):
-    def __init__(self):
-        super().__init__(timeout=None)
-        self.add_item(AdminAgenteSelect())
-
-    @discord.ui.button(label="Fechar Ticket", emoji="🔒", style=discord.ButtonStyle.red, custom_id="dic_adm_fechar_ticket")
-    async def fechar_ticket(self, interaction: discord.Interaction, button: Button):
-        if not isinstance(interaction.user, discord.Member) or not usuario_pode_painel_adm(interaction.user):
-            await interaction.response.send_message("❌ Apenas a ADM DICOR pode fechar este ticket.", ephemeral=True)
-            return
-        await interaction.response.send_message("🔒 Fechando ticket administrativo em 5 segundos...", ephemeral=True)
-        await asyncio.sleep(5)
-        if isinstance(interaction.channel, discord.TextChannel):
-            try:
-                await interaction.channel.delete(reason="Ticket administrativo DICOR fechado")
-            except Exception:
-                pass
-
-
-class AdminTicketFecharView(View):
-    def __init__(self):
-        super().__init__(timeout=None)
-
-    @discord.ui.button(label="Fechar Ticket", emoji="🔒", style=discord.ButtonStyle.red, custom_id="dic_adm_fechar_ticket_simples")
-    async def fechar_ticket(self, interaction: discord.Interaction, button: Button):
-        if not isinstance(interaction.user, discord.Member) or not usuario_pode_painel_adm(interaction.user):
-            await interaction.response.send_message("❌ Apenas a ADM DICOR pode fechar este ticket.", ephemeral=True)
-            return
-        await interaction.response.send_message("🔒 Fechando ticket administrativo em 5 segundos...", ephemeral=True)
-        await asyncio.sleep(5)
-        if isinstance(interaction.channel, discord.TextChannel):
-            try:
-                await interaction.channel.delete(reason="Ticket administrativo DICOR fechado")
-            except Exception:
-                pass
+        await enviar_relatorio_estatistica(interaction, membro)
 
 
 class PainelAdministrativoView(View):
     def __init__(self):
         super().__init__(timeout=None)
+        self.add_item(AdminAgenteSelect())
 
     @discord.ui.button(label="Varredura Geral", emoji="📊", style=discord.ButtonStyle.blurple, custom_id="dic_adm_varredura_geral")
     async def varredura_geral(self, interaction: discord.Interaction, button: Button):
-        canal = await criar_ticket_admin(interaction, "geral")
-        if canal and interaction.guild:
-            await canal.send(
-                "🏛️ **Ticket Administrativo DICOR**\n"
-                "Modo: **Varredura Geral**\n"
-                "O bot vai gerar um relatório com todos os agentes, sem exibir mensagens completas.",
-                view=AdminTicketFecharView(),
-            )
-            await enviar_relatorio_estatistica_canal(canal, interaction.guild, None)
-
-    @discord.ui.button(label="Ver Agente", emoji="👤", style=discord.ButtonStyle.secondary, custom_id="dic_adm_ver_agente")
-    async def ver_agente(self, interaction: discord.Interaction, button: Button):
-        canal = await criar_ticket_admin(interaction, "agente")
-        if canal:
-            embed = discord.Embed(
-                title="👤 Auditoria por Agente",
-                description=(
-                    "Selecione o membro no menu abaixo.\n\n"
-                    "O bot vai contar procurados, boletins, tocaias, OLBs, perícias, relatórios, mesas e dossiês vinculados a esse agente.\n"
-                    "O arquivo mostra apenas **quantidade** e **o que foi criado**, sem puxar o texto das mensagens."
-                ),
-                color=discord.Color.dark_blue(),
-            )
-            await canal.send(embed=embed, view=TicketEstatisticaAgenteView())
+        await enviar_relatorio_estatistica(interaction, None)
 
 
 @bot.tree.command(name="paineladministrativo", description="Envia o painel administrativo da DICOR.")
@@ -7125,22 +7239,21 @@ async def paineladministrativo(interaction: discord.Interaction):
         title="🏛️ Painel Administrativo DICOR",
         description=(
             "Área restrita para Inspetor DICOR para cima.\n\n"
-            "📊 **Varredura Geral:** abre um ticket e gera o relatório de todos os agentes.\n"
-            "👤 **Ver Agente:** abre um ticket para escolher o membro pelo painel.\n\n"
-            "Os relatórios mostram apenas quantidade e o que foi criado, sem exibir mensagens completas."
+            "📊 **Varredura Geral:** gera um relatório com todos os agentes, nome por nome.\n"
+            "👤 **Selecionar agente:** escolha um membro no menu abaixo para gerar o relatório individual.\n\n"
+            "O relatório conta procurados, boletins, tocaias, OLBs, perícias externas, relatórios diários, mesas e dossiês.\n"
+            "Ele mostra apenas **quantidades** e **o que foi criado**, sem exibir o texto completo das mensagens."
         ),
         color=discord.Color.dark_blue(),
     )
     embed.set_footer(text="DICOR • Estatística operacional e auditoria interna")
-    await interaction.response.send_message(embed=embed, view=PainelAdministrativoView(), ephemeral=True)
+    await interaction.response.send_message(embed=embed, view=PainelAdministrativoView())
 
 
 @bot.tree.command(name="estatisticaagente", description="Gera relatório completo de atividade de um agente.")
 @app_commands.describe(agente="Agente que será analisado. Se vazio, gera varredura geral.")
 async def estatisticaagente(interaction: discord.Interaction, agente: Optional[discord.Member] = None):
     await enviar_relatorio_estatistica(interaction, agente)
-
-
 # =====================================================
 # EVENTOS
 # =====================================================
@@ -7190,8 +7303,6 @@ async def on_ready():
         bot.add_view(ReabrirMesaView())
         bot.add_view(PainelOrganizacoesView())
         bot.add_view(PainelAdministrativoView())
-        bot.add_view(AdminTicketFecharView())
-        bot.add_view(TicketEstatisticaAgenteView())
         
         print("✅ Todas as persistências de botões (Relatórios com Tickets, Boletins e Sistemas) foram carregadas!")
     except Exception as e:
