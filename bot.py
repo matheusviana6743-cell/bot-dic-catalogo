@@ -160,8 +160,10 @@ DOSSIES_DIR = DATA_DIR / "dossies"
 DOSSIE_ASSETS_DIR = DATA_DIR / "assets_dossie"
 ASSINATURAS_DOSSIE_JSON = DATA_DIR / "assinaturas_dossie.json"
 ASSINATURAS_DOSSIE_DIR = DOSSIE_ASSETS_DIR / "assinaturas"
+RELATORIOS_OPERACIONAIS_JSON = DATA_DIR / "relatorios_operacionais.json"
+ADMIN_REPORTS_DIR = DATA_DIR / "relatorios_administrativos"
 
-for pasta in [DATA_DIR, PUBLIC_DIR, UPLOADS_DIR, BACKUP_DIR, DOSSIES_DIR, DOSSIE_ASSETS_DIR, ASSINATURAS_DOSSIE_DIR]:
+for pasta in [DATA_DIR, PUBLIC_DIR, UPLOADS_DIR, BACKUP_DIR, DOSSIES_DIR, DOSSIE_ASSETS_DIR, ASSINATURAS_DOSSIE_DIR, ADMIN_REPORTS_DIR]:
     pasta.mkdir(exist_ok=True)
 
 # =====================================================
@@ -658,7 +660,7 @@ def gerar_catalogo_html() -> None:
                     <div class="linha"><b>RG</b><p>{escape(registro.get('rg'))}</p></div>
                     <div class="box crimes"><b>Crimes Cometidos</b><p>{escape(crimes)}</p></div>
                     <div class="box destaque"><b>Último Avistamento</b><p>{escape(registro.get('ultimo_avistamento'))}</p></div>
-                    <div class="box"><b>Informações</b><p>{escape(registro.get('informacoes'))}</p></div>
+                    <div class="box"><b>Número do Boletim</b><p>{escape(registro.get('numero_boletim') or registro.get('informacoes') or 'Não informado')}</p></div>
                     {f'<a class="msg" href="{escape(link_msg)}" target="_blank" rel="noopener noreferrer">Abrir mensagem no Discord</a>' if link_msg else ''}
                     {f'<div class="motivo"><b>Motivo da retirada:</b> {escape(registro.get("motivo_retirada"))}</div>' if registro.get('motivo_retirada') else ''}
                     <button class="apagar-registro" type="button" onclick='abrirExclusao({registro_id_js}, {nome_js})'>
@@ -1235,6 +1237,8 @@ As investigações apontam seu envolvimento em atividades criminosas, havendo ma
 ⚠️ **CRIMES IMPUTADOS:**
 {registro.get('crimes', 'Não informado')}
 
+📋 **NÚMERO DO BOLETIM:** {registro.get('numero_boletim') or registro.get('informacoes') or 'Não informado'}
+
 ━━━━━━━━━━━━━━━━━━━━━━━
 
 🆔 **IDENTIFICAÇÃO DO PROCURADO**
@@ -1452,17 +1456,44 @@ async def arquivar_procurado_discord(
     return mensagem_arquivada
 
 
+def normalizar_boletim_procurado(valor: str) -> Optional[str]:
+    """Aceita 1, 01, 001 ou BO-DICOR-001 e salva no padrão BO-DICOR-001."""
+    texto = str(valor or "").strip().upper()
+    texto = texto.replace(" ", "")
+
+    if not texto:
+        return None
+
+    m = re.fullmatch(r"(?:BO[-_ ]?DICOR[-_ ]?)?(\d{1,6})", texto, flags=re.I)
+    if not m:
+        return None
+
+    numero = int(m.group(1))
+    if numero <= 0:
+        return None
+
+    return f"BO-DICOR-{numero:03d}"
+
+
 class NovoProcuradoModal(Modal, title="Cadastrar Novo Procurado"):
     nome = TextInput(label="Nome", placeholder="Nome do procurado", max_length=100)
     rg = TextInput(label="RG", placeholder="RG do procurado", max_length=50)
     crimes = TextInput(label="Crimes Cometidos", placeholder="Ex: Art. 8.3\nFormação de Quadrilha", style=discord.TextStyle.paragraph, max_length=1000)
     ultimo = TextInput(label="Último Avistamento", placeholder="Ex: Caixa d'água", style=discord.TextStyle.paragraph, max_length=600)
-    informacoes = TextInput(label="Informações", placeholder="Detalhes extras da investigação", style=discord.TextStyle.paragraph, max_length=1200, required=False)
+    numero_boletim = TextInput(label="Número do boletim", placeholder="Ex: 1, 01 ou 001", max_length=20, required=True)
 
     async def on_submit(self, interaction: discord.Interaction):
         guild = interaction.guild
         if guild is None:
             await interaction.response.send_message("❌ Use isso dentro de um servidor.", ephemeral=True)
+            return
+
+        numero_boletim = normalizar_boletim_procurado(str(self.numero_boletim.value))
+        if not numero_boletim:
+            await interaction.response.send_message(
+                "❌ O número do boletim é obrigatório. Use apenas número, exemplo: `1`, `01` ou `001`.",
+                ephemeral=True,
+            )
             return
 
         categoria = guild.get_channel(PROCURADOS_TEMP_CATEGORY_ID) if PROCURADOS_TEMP_CATEGORY_ID else None
@@ -1485,7 +1516,7 @@ class NovoProcuradoModal(Modal, title="Cadastrar Novo Procurado"):
             "rg": str(self.rg.value),
             "crimes": str(self.crimes.value),
             "ultimo_avistamento": str(self.ultimo.value),
-            "informacoes": str(self.informacoes.value or ""),
+            "numero_boletim": numero_boletim,
             "autor_id": interaction.user.id,
             "autor_nome": str(interaction.user),
         }
@@ -1493,7 +1524,8 @@ class NovoProcuradoModal(Modal, title="Cadastrar Novo Procurado"):
         await canal.send(
             f"🚨 **Cadastro de Procurado — DICOR**\n\n"
             f"👤 **Nome:** {self.nome.value}\n"
-            f"🪪 **RG:** {self.rg.value}\n\n"
+            f"🪪 **RG:** {self.rg.value}\n"
+            f"📋 **Boletim vinculado:** {numero_boletim}\n\n"
             f"📸 Envie aqui **2 imagens obrigatórias**:\n"
             f"**1. Foto do indivíduo**\n"
             f"**2. Foto do RG**\n\n"
@@ -1519,6 +1551,13 @@ class FinalizarProcuradoView(View):
         dados = cadastros_pendentes.get(canal.id)
         if not dados:
             await interaction.response.send_message("❌ Não encontrei os dados desse cadastro. Crie novamente pelo painel.", ephemeral=True)
+            return
+
+        if not normalizar_boletim_procurado(str(dados.get("numero_boletim", ""))):
+            await interaction.response.send_message(
+                "❌ Esse cadastro está sem número de boletim válido. Cancele e cadastre novamente usando `1`, `01` ou `001`.",
+                ephemeral=True,
+            )
             return
 
         if interaction.user.id != dados.get("autor_id") and isinstance(interaction.user, discord.Member) and not usuario_tem_admin(interaction.user):
@@ -1548,7 +1587,8 @@ class FinalizarProcuradoView(View):
             "rg": dados["rg"],
             "crimes": dados["crimes"],
             "ultimo_avistamento": dados["ultimo_avistamento"],
-            "informacoes": dados["informacoes"],
+            "numero_boletim": dados.get("numero_boletim", ""),
+            "informacoes": dados.get("numero_boletim", ""),
             "foto_individuo": foto_ind,
             "foto_rg": foto_rg,
             "autor_id": dados["autor_id"],
@@ -1565,7 +1605,7 @@ class FinalizarProcuradoView(View):
         await salvar_procurado_catalogo(registro)
         cadastros_pendentes.pop(canal.id, None)
 
-        await enviar_log(f"✅ Procurado cadastrado: {registro['nome']} | RG {registro['rg']} | Catálogo: {CATALOG_PUBLIC_URL}")
+        await enviar_log(f"✅ Procurado cadastrado: {registro['nome']} | RG {registro['rg']} | Boletim {registro.get('numero_boletim')} | Catálogo: {CATALOG_PUBLIC_URL}")
         await interaction.followup.send(f"✅ Procurado cadastrado e enviado ao catálogo: {CATALOG_PUBLIC_URL}", ephemeral=True)
         await canal.send("✅ Cadastro finalizado. Este canal será apagado em 5 segundos.")
         await asyncio.sleep(5)
@@ -3102,6 +3142,8 @@ async def atualizar_status_mesa_fechada(canal_id: int, dados_dossie: Dict[str, A
             if int(m.get("canal_id", 0)) == int(canal_id):
                 m["status"] = "FECHADA"
                 m["fechada_em"] = dados_dossie.get("data_encerramento", agora_br())
+                m["fechada_por_id"] = dados_dossie.get("agente_encerramento_id")
+                m["fechada_por_nome"] = dados_dossie.get("agente_encerramento")
                 m["dossie"] = {
                     "processo": dados_dossie.get("processo"),
                     "numero_investigacao": dados_dossie.get("numero_investigacao"),
@@ -3296,6 +3338,7 @@ async def fechar_mesa_core(
         "guild_id": guild.id,
         "gerado_em": agora_br(),
         "encerrado_por": str(interaction.user),
+        "encerrado_por_id": interaction.user.id,
         "pdf": arquivos.get("pdf"),
         "docx": arquivos.get("docx"),
         "mensagem_dossie_url": mensagem_dossie_url,
@@ -3665,36 +3708,66 @@ def remover_rg_usuario(usuario_id: int) -> bool:
 
 
 def gerar_numero_boletim() -> str:
-    agora = agora_datetime_br()
-    chave_data = agora.strftime("%Y%m%d")
+    """Gera numeração global e crescente para todos os boletins.
+    Exemplo: BO-DICOR-001, BO-DICOR-002, BO-DICOR-003.
+    Não reinicia por dia nem por usuário.
+
+    Também olha boletins já publicados para evitar repetir número caso o bot
+    tenha usado o modelo antigo por data.
+    """
     contador = carregar_json(BOLETINS_CONTADOR_JSON, {})
     if not isinstance(contador, dict):
         contador = {}
 
-    if contador.get("data") == chave_data:
-        ultimo = int(contador.get("ultimo", 0) or 0) + 1
-    else:
-        ultimo = 1
+    ultimo_contador = int(contador.get("ultimo", 0) or 0)
+    maior_existente = 0
+    boletins = carregar_boletins()
+    for boletim in boletins:
+        numero_salvo = str(boletim.get("numero", "") or "")
+        m = re.search(r"(\d+)$", numero_salvo)
+        if m:
+            try:
+                maior_existente = max(maior_existente, int(m.group(1)))
+            except Exception:
+                pass
+
+    # len(boletins) ajuda a não voltar para 001 quando existiam boletins antigos
+    # com numeração diária repetida.
+    ultimo = max(ultimo_contador, maior_existente, len(boletins)) + 1
 
     salvar_json(
         BOLETINS_CONTADOR_JSON,
-        {"data": chave_data, "ultimo": ultimo},
+        {
+            "ultimo": ultimo,
+            "modelo": "global_crescente",
+            "atualizado_em": agora_br(),
+        },
     )
-    return f"BO-DICOR-{chave_data}-{ultimo:03d}"
-
+    return f"BO-DICOR-{ultimo:03d}"
 
 def numero_curto_boletim(numero: str) -> str:
     parte = str(numero or "").rsplit("-", 1)[-1]
     return parte.zfill(3) if parte.isdigit() else parte
 
 
+def normalizar_numero_boletim_consulta(numero: str) -> List[str]:
+    texto = str(numero or "").strip().upper()
+    candidatos = {texto}
+    m = re.search(r"(\d+)$", texto)
+    if m:
+        curto = m.group(1).zfill(3)
+        candidatos.add(curto)
+        candidatos.add(f"BO-DICOR-{curto}")
+    return [c for c in candidatos if c]
+
+
 def buscar_boletim_numero(numero: str) -> Optional[Dict[str, Any]]:
-    alvo = str(numero or "").strip().upper()
+    candidatos = normalizar_numero_boletim_consulta(numero)
     for boletim in carregar_boletins():
-        if str(boletim.get("numero", "")).strip().upper() == alvo:
+        numero_salvo = str(boletim.get("numero", "")).strip().upper()
+        if numero_salvo in candidatos or numero_curto_boletim(numero_salvo) in candidatos:
             return boletim
     return None
-
 
 def obter_rascunho_boletim(
     interaction: discord.Interaction,
@@ -6517,6 +6590,310 @@ async def estatisticas(interaction: discord.Interaction):
     await estatisticas_core(interaction)
 
 # =====================================================
+# PAINEL ADMINISTRATIVO / ESTATÍSTICAS POR AGENTE
+# =====================================================
+
+ADMIN_STATS_HISTORY_LIMIT = int(os.getenv("ADMIN_STATS_HISTORY_LIMIT", "600") or 600)
+
+
+def usuario_pode_painel_adm(member: discord.Member) -> bool:
+    """Mesmo padrão de permissão: Inspetor DICOR para cima."""
+    return isinstance(member, discord.Member) and usuario_pode_fechar_mesa(member)
+
+
+def texto_sem_markdown_admin(texto: Any) -> str:
+    texto = str(texto or "")
+    texto = texto.replace("**", "").replace("__", "").replace("`", "")
+    texto = re.sub(r"<@!?(\d+)>", r"ID:\1", texto)
+    return texto.strip()
+
+
+def nome_usuario_relatorio(guild: Optional[discord.Guild], usuario_id: str, fallback: str = "") -> str:
+    if guild and str(usuario_id).isdigit():
+        membro = guild.get_member(int(usuario_id))
+        if membro:
+            return str(membro.display_name or membro.name)
+    return str(fallback or f"Usuário {usuario_id}").strip()
+
+
+def add_item_estatistica(agentes: Dict[str, Dict[str, Any]], usuario_id: Any, nome: str, categoria: str, item: Dict[str, Any]) -> None:
+    if usuario_id is None or str(usuario_id).strip() in {"", "0", "None"}:
+        return
+    uid = str(usuario_id)
+    agentes.setdefault(uid, {"id": uid, "nome": nome or f"Usuário {uid}", "itens": {}})
+    if nome and (not agentes[uid].get("nome") or agentes[uid]["nome"].startswith("Usuário ")):
+        agentes[uid]["nome"] = nome
+    agentes[uid]["itens"].setdefault(categoria, []).append(item)
+
+
+async def coletar_relatorios_operacionais_discord(guild: discord.Guild) -> List[Dict[str, Any]]:
+    """Lê os canais oficiais de relatórios para pegar registros antigos que não existiam no JSON."""
+    registros: List[Dict[str, Any]] = []
+    vistos = set()
+
+    for tipo, canal_id in CANAIS_RELATORIOS.items():
+        canal = guild.get_channel(canal_id)
+        if canal is None:
+            try:
+                canal = await bot.fetch_channel(canal_id)
+            except Exception:
+                canal = None
+        if not isinstance(canal, discord.TextChannel):
+            continue
+
+        try:
+            async for msg in canal.history(limit=ADMIN_STATS_HISTORY_LIMIT, oldest_first=False):
+                conteudo = msg.content or ""
+                if "RELATÓRIO" not in conteudo.upper():
+                    continue
+                m_user = re.search(r"<@!?(\d+)>", conteudo)
+                if not m_user:
+                    continue
+                uid = m_user.group(1)
+                m_num = re.search(r"Nº\s+([0-9]+)", conteudo, flags=re.I)
+                chave = f"discord-{msg.id}"
+                if chave in vistos:
+                    continue
+                vistos.add(chave)
+                registros.append({
+                    "id": chave,
+                    "tipo": tipo,
+                    "tipo_nome": nome_tipo_relatorio(tipo),
+                    "numero": m_num.group(1) if m_num else "",
+                    "autor_id": int(uid),
+                    "autor_nome": nome_usuario_relatorio(guild, uid),
+                    "data": msg.created_at.astimezone(datetime.timezone(datetime.timedelta(hours=-3))).strftime("%d/%m/%Y %H:%M"),
+                    "mensagem_url": msg.jump_url,
+                    "resumo": texto_sem_markdown_admin(conteudo[:700]),
+                    "origem": "canal oficial",
+                })
+        except Exception as erro:
+            await enviar_log(f"⚠️ Estatística ADM: não consegui varrer relatórios do canal `{canal_id}`: {erro}")
+
+    return registros
+
+
+async def montar_estatisticas_administrativas(guild: discord.Guild, alvo_id: Optional[int] = None) -> str:
+    agentes: Dict[str, Dict[str, Any]] = {}
+
+    # Procurados cadastrados
+    for p in carregar_procurados():
+        uid = p.get("autor_id")
+        nome = nome_usuario_relatorio(guild, str(uid), p.get("autor_nome", ""))
+        add_item_estatistica(agentes, uid, nome, "Procurados cadastrados", {
+            "data": p.get("data", "Não informado"),
+            "titulo": f"{p.get('nome', 'Sem nome')} | RG {p.get('rg', 'Não informado')}",
+            "detalhe": f"Crimes: {valor_crimes_registro(p)} | Boletim: {p.get('numero_boletim') or p.get('informacoes') or 'Não informado'}",
+            "url": p.get("mensagem_url", ""),
+        })
+
+    # Boletins publicados
+    for b in carregar_boletins():
+        uid = b.get("comunicante_id")
+        nome = nome_usuario_relatorio(guild, str(uid), b.get("comunicante_nome", ""))
+        add_item_estatistica(agentes, uid, nome, "Boletins publicados", {
+            "data": b.get("data_criacao") or b.get("data_registro") or "Não informado",
+            "titulo": f"{b.get('numero', 'BO sem número')} | {b.get('local', 'Local não informado')}",
+            "detalhe": texto_sem_markdown_admin(b.get("relato", ""))[:300] or "Sem relato resumido.",
+            "url": b.get("mensagem_url", ""),
+        })
+
+    # Mesas criadas e fechadas
+    for m in carregar_mesas():
+        uid = m.get("autor_id")
+        nome = nome_usuario_relatorio(guild, str(uid), m.get("autor_nome", ""))
+        add_item_estatistica(agentes, uid, nome, "Mesas criadas", {
+            "data": m.get("criada_em", "Não informado"),
+            "titulo": f"{m.get('familia', 'Sem organização')} | {m.get('nome_canal', 'Canal não informado')}",
+            "detalhe": f"Apelido: {m.get('apelido', 'Não informado')} | Status: {m.get('status', 'Não informado')}",
+            "url": "",
+        })
+
+        uid_fechou = m.get("fechada_por_id")
+        if uid_fechou:
+            nome_fechou = nome_usuario_relatorio(guild, str(uid_fechou), m.get("fechada_por_nome", ""))
+            add_item_estatistica(agentes, uid_fechou, nome_fechou, "Mesas encerradas", {
+                "data": m.get("fechada_em", "Não informado"),
+                "titulo": f"{m.get('familia', 'Sem organização')} | {m.get('nome_canal', 'Canal não informado')}",
+                "detalhe": f"Processo: {(m.get('dossie') or {}).get('processo', 'Não informado')}",
+                "url": "",
+            })
+
+    # Dossiês gerados
+    for d in carregar_dossies():
+        uid = d.get("encerrado_por_id")
+        nome = nome_usuario_relatorio(guild, str(uid), d.get("encerrado_por", ""))
+        add_item_estatistica(agentes, uid, nome, "Dossiês gerados", {
+            "data": d.get("gerado_em", "Não informado"),
+            "titulo": f"{d.get('processo', 'Sem processo')} | {d.get('nome_operacao', 'Operação não informada')}",
+            "detalhe": f"Mesa: {d.get('canal_nome', 'Não informado')} | Investigação: {d.get('numero_investigacao', 'Não informado')}",
+            "url": d.get("mensagem_dossie_url", ""),
+        })
+
+    # Relatórios operacionais do JSON
+    vistos_relatorios = set()
+    for r in carregar_relatorios_operacionais():
+        uid = r.get("autor_id")
+        nome = nome_usuario_relatorio(guild, str(uid), r.get("autor_nome", ""))
+        url = r.get("mensagem_url", "")
+        if url:
+            vistos_relatorios.add(url)
+        add_item_estatistica(agentes, uid, nome, "Relatórios operacionais", {
+            "data": r.get("data", "Não informado"),
+            "titulo": f"{r.get('tipo_nome') or nome_tipo_relatorio(r.get('tipo'))} Nº {r.get('numero', '')}".strip(),
+            "detalhe": texto_sem_markdown_admin(r.get("resumo", ""))[:350],
+            "url": url,
+        })
+
+    # Varredura dos canais oficiais de relatórios para registros antigos
+    for r in await coletar_relatorios_operacionais_discord(guild):
+        url = r.get("mensagem_url", "")
+        if url in vistos_relatorios:
+            continue
+        uid = r.get("autor_id")
+        nome = nome_usuario_relatorio(guild, str(uid), r.get("autor_nome", ""))
+        add_item_estatistica(agentes, uid, nome, "Relatórios operacionais", {
+            "data": r.get("data", "Não informado"),
+            "titulo": f"{r.get('tipo_nome') or nome_tipo_relatorio(r.get('tipo'))} Nº {r.get('numero', '')}".strip(),
+            "detalhe": texto_sem_markdown_admin(r.get("resumo", ""))[:350],
+            "url": url,
+        })
+
+    # Filtro de agente, se informado
+    if alvo_id is not None:
+        agentes = {str(alvo_id): agentes.get(str(alvo_id), {"id": str(alvo_id), "nome": nome_usuario_relatorio(guild, str(alvo_id)), "itens": {}})}
+
+    linhas: List[str] = []
+    linhas.append("RELATÓRIO ADMINISTRATIVO DICOR")
+    linhas.append("Polícia Federal de Capital Morada do Valley")
+    linhas.append(f"Gerado em: {agora_br()}")
+    linhas.append("Varredura: procurados, boletins, mesas, dossiês e relatórios operacionais.")
+    linhas.append("=" * 78)
+    linhas.append("")
+
+    total_agentes = len([a for a in agentes.values() if any(a.get("itens", {}).values())])
+    total_itens = sum(len(v) for a in agentes.values() for v in a.get("itens", {}).values())
+    linhas.append(f"Agentes com registro: {total_agentes}")
+    linhas.append(f"Registros encontrados: {total_itens}")
+    linhas.append("")
+
+    ordem_categorias = [
+        "Procurados cadastrados",
+        "Boletins publicados",
+        "Relatórios operacionais",
+        "Mesas criadas",
+        "Mesas encerradas",
+        "Dossiês gerados",
+    ]
+
+    agentes_ordenados = sorted(agentes.values(), key=lambda a: (a.get("nome") or "").lower())
+    for agente in agentes_ordenados:
+        itens = agente.get("itens", {})
+        total = sum(len(itens.get(cat, [])) for cat in ordem_categorias)
+        if alvo_id is None and total == 0:
+            continue
+        linhas.append("-" * 78)
+        linhas.append(f"AGENTE: {agente.get('nome', 'Sem nome')} | ID: {agente.get('id')}")
+        linhas.append(f"TOTAL DE ATIVIDADES: {total}")
+        linhas.append("")
+
+        for categoria in ordem_categorias:
+            registros = itens.get(categoria, [])
+            linhas.append(f"{categoria.upper()} ({len(registros)})")
+            if not registros:
+                linhas.append("  Nenhum registro encontrado.")
+                linhas.append("")
+                continue
+            for idx, item in enumerate(registros, 1):
+                linhas.append(f"  {idx}. {item.get('data', 'Sem data')} — {item.get('titulo', 'Sem título')}")
+                detalhe = str(item.get("detalhe", "")).strip()
+                if detalhe:
+                    linhas.append(f"     {detalhe}")
+                if item.get("url"):
+                    linhas.append(f"     Link: {item.get('url')}")
+            linhas.append("")
+
+    if total_itens == 0:
+        linhas.append("Nenhum registro encontrado para esta consulta.")
+
+    return "\n".join(linhas)
+
+
+async def enviar_relatorio_estatistica(interaction: discord.Interaction, membro: Optional[discord.Member] = None) -> None:
+    if not isinstance(interaction.user, discord.Member) or not usuario_pode_painel_adm(interaction.user):
+        await responder_interacao(interaction, "❌ Apenas Inspetor DICOR para cima pode usar este comando.", ephemeral=True)
+        return
+
+    guild = interaction.guild
+    if guild is None:
+        await responder_interacao(interaction, "❌ Use dentro de um servidor.", ephemeral=True)
+        return
+
+    if not interaction.response.is_done():
+        await interaction.response.defer(ephemeral=True, thinking=True)
+
+    texto = await montar_estatisticas_administrativas(guild, membro.id if membro else None)
+    nome_base = f"relatorio_agente_{membro.id}" if membro else "relatorio_geral_dicor"
+    caminho = ADMIN_REPORTS_DIR / f"{nome_base}_{data_caso()}.txt"
+    caminho.write_text(texto, encoding="utf-8")
+
+    resumo = "📊 **Relatório administrativo gerado.**\n"
+    if membro:
+        resumo += f"Agente analisado: {membro.mention}\n"
+    else:
+        resumo += "Tipo: varredura geral, nome por nome.\n"
+    resumo += "O arquivo TXT foi anexado abaixo."
+
+    await interaction.followup.send(resumo, file=discord.File(str(caminho), filename=caminho.name), ephemeral=True)
+
+
+class PainelAdministrativoView(View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Varredura Geral", emoji="📊", style=discord.ButtonStyle.blurple, custom_id="dic_adm_varredura_geral")
+    async def varredura_geral(self, interaction: discord.Interaction, button: Button):
+        await enviar_relatorio_estatistica(interaction, None)
+
+    @discord.ui.button(label="Como ver um agente", emoji="👤", style=discord.ButtonStyle.secondary, custom_id="dic_adm_como_agente")
+    async def como_agente(self, interaction: discord.Interaction, button: Button):
+        if not isinstance(interaction.user, discord.Member) or not usuario_pode_painel_adm(interaction.user):
+            await interaction.response.send_message("❌ Apenas Inspetor DICOR para cima pode usar este painel.", ephemeral=True)
+            return
+        await interaction.response.send_message(
+            "👤 Para gerar o relatório de uma pessoa específica, use:\n"
+            "`/estatisticaagente agente:@membro`\n\n"
+            "O bot vai puxar procurados, boletins, relatórios, mesas e dossiês vinculados a esse agente.",
+            ephemeral=True,
+        )
+
+
+@bot.tree.command(name="paineladministrativo", description="Envia o painel administrativo da DICOR.")
+async def paineladministrativo(interaction: discord.Interaction):
+    if not isinstance(interaction.user, discord.Member) or not usuario_pode_painel_adm(interaction.user):
+        await interaction.response.send_message("❌ Apenas Inspetor DICOR para cima pode usar este comando.", ephemeral=True)
+        return
+
+    embed = discord.Embed(
+        title="🏛️ Painel Administrativo DICOR",
+        description=(
+            "Área restrita para Inspetor DICOR para cima.\n\n"
+            "📊 **Varredura Geral:** gera um arquivo com o relatório de todos os agentes, nome por nome.\n"
+            "👤 **Relatório por agente:** use `/estatisticaagente agente:@membro` para analisar uma pessoa específica."
+        ),
+        color=discord.Color.dark_blue(),
+    )
+    embed.set_footer(text="DICOR • Estatística operacional e auditoria interna")
+    await interaction.response.send_message(embed=embed, view=PainelAdministrativoView(), ephemeral=True)
+
+
+@bot.tree.command(name="estatisticaagente", description="Gera relatório completo de atividade de um agente.")
+@app_commands.describe(agente="Agente que será analisado. Se vazio, gera varredura geral.")
+async def estatisticaagente(interaction: discord.Interaction, agente: Optional[discord.Member] = None):
+    await enviar_relatorio_estatistica(interaction, agente)
+
+
+# =====================================================
 # EVENTOS
 # =====================================================
 
@@ -6564,6 +6941,7 @@ async def on_ready():
         bot.add_view(FecharMesaView())
         bot.add_view(ReabrirMesaView())
         bot.add_view(PainelOrganizacoesView())
+        bot.add_view(PainelAdministrativoView())
         
         print("✅ Todas as persistências de botões (Relatórios com Tickets, Boletins e Sistemas) foram carregadas!")
     except Exception as e:
@@ -6596,6 +6974,37 @@ async def on_ready():
 
     print('VERSAO COMPLETA: mesas | procurados | catalogo | boletins | organizacoes | relatorios')
     print(f"Bot online como {bot.user}")
+
+# =====================================================
+# REGISTRO LOCAL DE RELATÓRIOS OPERACIONAIS
+# =====================================================
+
+def carregar_relatorios_operacionais() -> List[Dict[str, Any]]:
+    dados = carregar_json(RELATORIOS_OPERACIONAIS_JSON, [])
+    return dados if isinstance(dados, list) else []
+
+
+def salvar_relatorios_operacionais(lista: List[Dict[str, Any]]) -> None:
+    salvar_json(RELATORIOS_OPERACIONAIS_JSON, lista[-2000:])
+
+
+def registrar_relatorio_operacional(registro: Dict[str, Any]) -> None:
+    lista = carregar_relatorios_operacionais()
+    chave = str(registro.get("id") or registro.get("mensagem_url") or "")
+    if chave and any(str(item.get("id") or item.get("mensagem_url") or "") == chave for item in lista):
+        return
+    lista.append(registro)
+    salvar_relatorios_operacionais(lista)
+
+
+def nome_tipo_relatorio(tipo: str) -> str:
+    return {
+        "tocaia": "Tocaia",
+        "olb": "OLB",
+        "pericia_externa": "Perícia Externa",
+        "diario": "Relatório Diário",
+    }.get(str(tipo or ""), str(tipo or "Relatório"))
+
 
 # =====================================================
 # SISTEMA DE PAINEL DE RELATÓRIOS OPERACIONAIS (ATUALIZADO)
@@ -6734,8 +7143,28 @@ async def finalizar_e_postar_relatorio(interaction: discord.Interaction, tipo: s
     if anexos_encontrados:
         texto_conteudo += "\n\n**🔗 REGISTROS FOTOGRÁFICOS / PROVAS EM ANEXO:**\n" + "\n".join([f"• {url}" for url in anexos_encontrados])
     
+    mensagem_publicada = None
     if canal_destino:
-        await canal_destino.send(texto_conteudo)
+        mensagem_publicada = await canal_destino.send(texto_conteudo)
+
+    try:
+        numero_match = re.search(r"Nº\s+([0-9]+)", texto_conteudo, flags=re.I)
+        registrar_relatorio_operacional({
+            "id": str(mensagem_publicada.id if mensagem_publicada else f"TEMP-{data_caso()}"),
+            "tipo": tipo,
+            "tipo_nome": nome_tipo_relatorio(tipo),
+            "numero": numero_match.group(1) if numero_match else "",
+            "autor_id": interaction.user.id,
+            "autor_nome": str(interaction.user),
+            "autor_mention": interaction.user.mention,
+            "data": agora_br(),
+            "canal_destino_id": canal_id,
+            "mensagem_url": mensagem_publicada.jump_url if mensagem_publicada else "",
+            "resumo": cortar_discord(texto_conteudo.replace("*", ""), 800),
+            "provas": anexos_encontrados,
+        })
+    except Exception as erro:
+        await enviar_log(f"⚠️ Relatório publicado, mas não consegui registrar estatística: {erro}")
     
     if isinstance(canal_atual, discord.TextChannel):
         await canal_atual.send("✅ Relatório enviado com sucesso para o canal oficial! Este canal provisório será apagado em 5 segundos...")
