@@ -83,7 +83,7 @@ GUILD_ID = int(os.getenv("GUILD_ID", "0") or 0)
 # Procurados
 PROCURADOS_CHANNEL_ID = int(os.getenv("PROCURADOS_CHANNEL_ID", "0") or 0)
 HISTORICO_PROCURADOS_ID = int(os.getenv("HISTORICO_PROCURADOS_ID", "1490200536207855857") or 1490200536207855857)
-LOGS_CHANNEL_ID = int(os.getenv("LOGS_CHANNEL_ID", "0") or 0)
+LOGS_CHANNEL_ID = int(os.getenv("LOGS_CHANNEL_ID", "1490205503228477610") or 1490205503228477610)
 PROCURADOS_TEMP_CATEGORY_ID = int(os.getenv("PROCURADOS_TEMP_CATEGORY_ID", "0") or 0)
 
 # Boletins
@@ -473,14 +473,30 @@ def remover_duplicados(lista: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 
 async def enviar_log(texto: str) -> None:
+    """Envia logs operacionais no canal fixo da DICOR.
+
+    Canal padrão: 1490205503228477610.
+    Usa fetch_channel como fallback para não depender apenas do cache do bot.
+    """
     if not LOGS_CHANNEL_ID:
         return
-    canal = bot.get_channel(LOGS_CHANNEL_ID)
-    if canal:
-        try:
-            await canal.send(texto[:1900])
-        except Exception:
-            pass
+
+    try:
+        canal = bot.get_channel(LOGS_CHANNEL_ID)
+        if canal is None:
+            canal = await bot.fetch_channel(LOGS_CHANNEL_ID)
+
+        if not canal or not hasattr(canal, "send"):
+            return
+
+        texto = str(texto or "")
+        if not texto.strip():
+            texto = "Ação registrada sem descrição."
+
+        for parte in [texto[i:i + 1900] for i in range(0, len(texto), 1900)]:
+            await canal.send(parte)
+    except Exception:
+        pass
 
 
 def usuario_tem_admin(member: discord.Member) -> bool:
@@ -7276,7 +7292,7 @@ async def enviar_relatorio_estatistica(interaction: discord.Interaction, membro:
         return
 
     if not interaction.response.is_done():
-        await interaction.response.defer(thinking=True)
+        await interaction.response.defer(thinking=True, ephemeral=True)
 
     caminho = await gerar_arquivo_estatistica_admin(guild, membro)
 
@@ -7287,7 +7303,19 @@ async def enviar_relatorio_estatistica(interaction: discord.Interaction, membro:
         resumo += "Tipo: varredura geral, nome por nome.\n"
     resumo += "O TXT mostra apenas quantidades e o que foi criado."
 
-    await interaction.followup.send(resumo, file=discord.File(str(caminho), filename=caminho.name))
+    await interaction.followup.send(
+        resumo,
+        file=discord.File(str(caminho), filename=caminho.name),
+        ephemeral=True,
+    )
+    await enviar_log(
+        "📊 **Relatório administrativo gerado**\n"
+        f"Solicitante: {interaction.user.mention} (`{interaction.user.id}`)\n"
+        f"Tipo: {'Individual' if membro else 'Varredura Geral'}\n"
+        f"Alvo: {membro.mention if membro else 'Todos os agentes'}\n"
+        f"Arquivo: `{caminho.name}`\n"
+        f"Canal de origem: {getattr(interaction.channel, 'mention', 'Sem canal')}"
+    )
 
 
 class AdminAgenteSelect(discord.ui.UserSelect):
@@ -8585,6 +8613,126 @@ def gerar_docx_dossie(dados: Dict[str, Any], caminho_docx: Path) -> None:
 
     doc.save(str(caminho_docx))
 
+
+
+# =====================================================
+# AUDITORIA GERAL DE AÇÕES DO BOT
+# =====================================================
+
+
+def _nome_interacao_log(interaction: discord.Interaction) -> str:
+    try:
+        if interaction.type == discord.InteractionType.application_command:
+            return f"/{getattr(interaction.command, 'qualified_name', None) or interaction.data.get('name', 'comando')}"
+        if interaction.type == discord.InteractionType.component:
+            custom_id = (interaction.data or {}).get("custom_id", "componente")
+            return f"Botão/Menu `{custom_id}`"
+        if interaction.type == discord.InteractionType.modal_submit:
+            custom_id = (interaction.data or {}).get("custom_id", "modal")
+            return f"Modal `{custom_id}`"
+    except Exception:
+        pass
+    return str(getattr(interaction, "type", "interação"))
+
+
+@bot.listen("on_interaction")
+async def auditoria_todas_interacoes(interaction: discord.Interaction):
+    """Registra todo comando, botão, menu e modal usado no bot."""
+    try:
+        canal_desc = getattr(interaction.channel, "mention", None) or f"ID {getattr(interaction, 'channel_id', 'desconhecido')}"
+        guild_desc = interaction.guild.name if interaction.guild else "DM/sem servidor"
+        acao = _nome_interacao_log(interaction)
+        await enviar_log(
+            "🧾 **Ação executada no bot**\n"
+            f"Ação: {acao}\n"
+            f"Usuário: {interaction.user.mention} (`{interaction.user.id}`)\n"
+            f"Canal: {canal_desc}\n"
+            f"Servidor: {guild_desc}\n"
+            f"Data: {agora_br()}"
+        )
+    except Exception:
+        pass
+
+
+@bot.listen("on_guild_channel_create")
+async def auditoria_canal_criado(canal):
+    """Registra criação de canal quando for possível identificar como ação do bot."""
+    try:
+        await asyncio.sleep(1)
+        autor = None
+        try:
+            async for entry in canal.guild.audit_logs(limit=3, action=discord.AuditLogAction.channel_create):
+                if entry.target and getattr(entry.target, "id", None) == canal.id:
+                    autor = entry.user
+                    break
+        except Exception:
+            autor = None
+
+        if autor and bot.user and autor.id != bot.user.id:
+            return
+
+        await enviar_log(
+            "📁 **Canal criado pelo bot**\n"
+            f"Canal: {getattr(canal, 'mention', canal.name)} (`{canal.id}`)\n"
+            f"Categoria: {getattr(getattr(canal, 'category', None), 'name', 'Sem categoria')}\n"
+            f"Data: {agora_br()}"
+        )
+    except Exception:
+        pass
+
+
+@bot.listen("on_guild_channel_delete")
+async def auditoria_canal_apagado(canal):
+    """Registra exclusão de canal quando for possível identificar como ação do bot."""
+    try:
+        await asyncio.sleep(1)
+        autor = None
+        try:
+            async for entry in canal.guild.audit_logs(limit=3, action=discord.AuditLogAction.channel_delete):
+                if entry.target and getattr(entry.target, "id", None) == canal.id:
+                    autor = entry.user
+                    break
+        except Exception:
+            autor = None
+
+        if autor and bot.user and autor.id != bot.user.id:
+            return
+
+        await enviar_log(
+            "🗑️ **Canal apagado pelo bot**\n"
+            f"Canal: #{canal.name} (`{canal.id}`)\n"
+            f"Categoria: {getattr(getattr(canal, 'category', None), 'name', 'Sem categoria')}\n"
+            f"Data: {agora_br()}"
+        )
+    except Exception:
+        pass
+
+
+@bot.listen("on_message")
+async def auditoria_mensagem_do_bot(message: discord.Message):
+    """Registra mensagens enviadas pelo bot, sem espelhar o próprio canal de logs para evitar loop."""
+    try:
+        if not bot.user or message.author.id != bot.user.id:
+            return
+        if message.channel and getattr(message.channel, "id", 0) == LOGS_CHANNEL_ID:
+            return
+
+        conteudo = (message.content or "").strip().replace("\n", " ")
+        if len(conteudo) > 450:
+            conteudo = conteudo[:450].rstrip() + "..."
+        if not conteudo:
+            conteudo = f"Mensagem com {len(message.attachments)} anexo(s)."
+
+        await enviar_log(
+            "📨 **Mensagem enviada pelo bot**\n"
+            f"Canal: {getattr(message.channel, 'mention', 'Sem canal')} (`{getattr(message.channel, 'id', '0')}`)\n"
+            f"Conteúdo: {conteudo}\n"
+            f"Anexos: {len(message.attachments)}\n"
+            f"Link: {getattr(message, 'jump_url', 'Sem link')}\n"
+            f"Data: {agora_br()}"
+        )
+    except Exception:
+        pass
 
 # =====================================================
 # MAIN
