@@ -31,13 +31,14 @@ from aiohttp import web
 # python-docx
 # qrcode
 # pillow
+# pypdf
 import io
 import math
 from collections import defaultdict
 
 try:
     import qrcode
-    from PIL import Image as PILImage
+    from PIL import Image as PILImage, ImageOps as PILImageOps
     from reportlab.lib import colors
     from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY, TA_LEFT, TA_RIGHT
     from reportlab.lib.pagesizes import A4
@@ -51,6 +52,7 @@ try:
 except Exception:
     qrcode = None
     PILImage = None
+    PILImageOps = None
     colors = None
     TA_CENTER = TA_JUSTIFY = TA_LEFT = TA_RIGHT = 0
     A4 = None
@@ -58,6 +60,15 @@ except Exception:
     canvas = None
     SimpleDocTemplate = Paragraph = Spacer = Table = TableStyle = PageBreak = RLImage = KeepTogether = None
     getSampleStyleSheet = ParagraphStyle = None
+
+try:
+    from pypdf import PdfReader, PdfWriter
+except Exception:
+    try:
+        from PyPDF2 import PdfReader, PdfWriter
+    except Exception:
+        PdfReader = None
+        PdfWriter = None
 
 try:
     from docx import Document
@@ -103,6 +114,13 @@ DOSSIE_HISTORY_LIMIT = int(os.getenv("DOSSIE_HISTORY_LIMIT", "0") or 0)  # 0 = v
 DOSSIE_ENVIAR_NA_MESA = os.getenv("DOSSIE_ENVIAR_NA_MESA", "1").strip().lower() not in {"0", "false", "nao", "não", "off"}
 DOSSIE_SKIP_BOT_BOILERPLATE = os.getenv("DOSSIE_SKIP_BOT_BOILERPLATE", "1").strip().lower() not in {"0", "false", "nao", "não", "off"}
 DOSSIE_PROGRESS_INTERVAL = float(os.getenv("DOSSIE_PROGRESS_INTERVAL", "2") or 2)
+# Otimização e envio seguro dos arquivos do dossiê.
+# As evidências originais continuam preservadas; o PDF/DOCX usa cópias compactadas.
+DOSSIE_IMAGE_MAX_DIM = int(os.getenv("DOSSIE_IMAGE_MAX_DIM", "1400") or 1400)
+DOSSIE_IMAGE_QUALITY = int(os.getenv("DOSSIE_IMAGE_QUALITY", "68") or 68)
+DOSSIE_UPLOAD_SAFETY_BYTES = int(os.getenv("DOSSIE_UPLOAD_SAFETY_BYTES", "524288") or 524288)
+DOSSIE_MAX_IMAGENS_PDF = int(os.getenv("DOSSIE_MAX_IMAGENS_PDF", "6") or 6)
+DOSSIE_MAX_IMAGENS_DOCX = int(os.getenv("DOSSIE_MAX_IMAGENS_DOCX", "8") or 8)
 
 # Controle de quem pode fechar mesas
 # Opção 1: coloque o ID do cargo Inspetor. Quem tiver esse cargo ou cargo acima poderá fechar.
@@ -2742,6 +2760,269 @@ async def editar_progresso_dossie(mensagem: Optional[discord.Message], texto: st
         pass
 
 
+def formatar_tamanho_bytes(valor: int) -> str:
+    tamanho = float(max(0, int(valor or 0)))
+    for unidade in ("B", "KB", "MB", "GB"):
+        if tamanho < 1024 or unidade == "GB":
+            return f"{tamanho:.1f} {unidade}"
+        tamanho /= 1024
+    return f"{tamanho:.1f} GB"
+
+
+def limite_upload_dossie(destino) -> int:
+    """Obtém o limite real do servidor e reserva margem para o multipart do Discord."""
+    limite_padrao = 10 * 1024 * 1024
+    guild = getattr(destino, "guild", None)
+    limite_real = int(getattr(guild, "filesize_limit", limite_padrao) or limite_padrao)
+    margem = min(max(DOSSIE_UPLOAD_SAFETY_BYTES, 128 * 1024), max(128 * 1024, limite_real // 10))
+    return max(1024 * 1024, limite_real - margem)
+
+
+def caminho_evidencia_documento(evidencia: Dict[str, Any]) -> str:
+    return str(evidencia.get("local_documento") or evidencia.get("local") or "")
+
+
+def otimizar_imagem_documento(
+    origem: Path,
+    destino: Path,
+    max_dim: int = DOSSIE_IMAGE_MAX_DIM,
+    qualidade: int = DOSSIE_IMAGE_QUALITY,
+) -> Path:
+    """Cria JPEG compacto para o PDF/DOCX sem alterar a evidência original."""
+    origem = Path(origem)
+    destino = Path(destino)
+    if not origem.exists() or PILImage is None:
+        return origem
+
+    try:
+        destino.parent.mkdir(parents=True, exist_ok=True)
+        with PILImage.open(origem) as img:
+            if PILImageOps is not None:
+                try:
+                    img = PILImageOps.exif_transpose(img)
+                except Exception:
+                    pass
+            try:
+                if getattr(img, "is_animated", False):
+                    img.seek(0)
+            except Exception:
+                pass
+
+            img = img.convert("RGBA")
+            fundo = PILImage.new("RGB", img.size, (255, 255, 255))
+            fundo.paste(img, mask=img.getchannel("A"))
+            img = fundo
+
+            filtro = getattr(getattr(PILImage, "Resampling", PILImage), "LANCZOS", None)
+            if filtro is None:
+                filtro = getattr(PILImage, "LANCZOS", 1)
+            img.thumbnail((max(320, int(max_dim)), max(320, int(max_dim))), filtro)
+            img.save(
+                destino,
+                format="JPEG",
+                quality=max(30, min(88, int(qualidade))),
+                optimize=True,
+                progressive=True,
+            )
+        return destino if destino.exists() else origem
+    except Exception:
+        return origem
+
+
+def reotimizar_imagens_dossie(
+    dados_dossie: Dict[str, Any],
+    max_dim: int,
+    qualidade: int,
+) -> None:
+    for indice, ev in enumerate(dados_dossie.get("evidencias", []) or [], start=1):
+        if ev.get("tipo") != "imagem":
+            continue
+        origem = Path(str(ev.get("local") or ""))
+        if not origem.exists():
+            continue
+        atual_valor = str(ev.get("local_documento") or "").strip()
+        if atual_valor:
+            atual = Path(atual_valor)
+        else:
+            atual = origem.parent.parent / "evidencias_otimizadas" / f"{indice:03d}-{origem.stem}.jpg"
+        if atual.suffix.lower() not in {".jpg", ".jpeg"}:
+            atual = atual.with_suffix(".jpg")
+        otimizado = otimizar_imagem_documento(origem, atual, max_dim, qualidade)
+        ev["local_documento"] = str(otimizado)
+
+
+def _pdf_bytes_paginas(paginas: List[Any], metadados: Optional[Dict[str, Any]] = None) -> bytes:
+    writer = PdfWriter()
+    for pagina in paginas:
+        writer.add_page(pagina)
+    if metadados:
+        try:
+            writer.add_metadata(metadados)
+        except Exception:
+            pass
+    memoria = io.BytesIO()
+    writer.write(memoria)
+    return memoria.getvalue()
+
+
+def dividir_pdf_por_tamanho(caminho_pdf: Path, limite_bytes: int) -> tuple[List[Path], Optional[str]]:
+    """Divide o PDF por páginas para que cada parte caiba no Discord."""
+    caminho_pdf = Path(caminho_pdf)
+    if PdfReader is None or PdfWriter is None:
+        return [], "Instale `pypdf` para permitir a divisão automática de PDFs grandes."
+    if not caminho_pdf.exists():
+        return [], "PDF não encontrado para divisão."
+
+    try:
+        reader = PdfReader(str(caminho_pdf))
+        paginas = list(reader.pages)
+        if not paginas:
+            return [], "O PDF não possui páginas válidas."
+        metadados = None
+        try:
+            metadados = dict(reader.metadata or {})
+        except Exception:
+            metadados = None
+
+        grupos: List[List[Any]] = []
+        grupo_atual: List[Any] = []
+        for pagina in paginas:
+            teste = grupo_atual + [pagina]
+            dados_teste = _pdf_bytes_paginas(teste, metadados)
+            if len(dados_teste) <= limite_bytes:
+                grupo_atual = teste
+                continue
+
+            if grupo_atual:
+                grupos.append(grupo_atual)
+                grupo_atual = [pagina]
+                dados_pagina = _pdf_bytes_paginas(grupo_atual, metadados)
+                if len(dados_pagina) > limite_bytes:
+                    return [], (
+                        "Uma única página do PDF ainda ultrapassa o limite do Discord "
+                        f"({formatar_tamanho_bytes(len(dados_pagina))})."
+                    )
+            else:
+                return [], (
+                    "Uma única página do PDF ultrapassa o limite do Discord "
+                    f"({formatar_tamanho_bytes(len(dados_teste))})."
+                )
+
+        if grupo_atual:
+            grupos.append(grupo_atual)
+
+        pasta_partes = caminho_pdf.parent / "partes_upload"
+        pasta_partes.mkdir(parents=True, exist_ok=True)
+        for antigo in pasta_partes.glob(f"{caminho_pdf.stem}_PARTE_*.pdf"):
+            try:
+                antigo.unlink()
+            except Exception:
+                pass
+
+        partes: List[Path] = []
+        total = len(grupos)
+        for numero, grupo in enumerate(grupos, start=1):
+            destino = pasta_partes / f"{caminho_pdf.stem}_PARTE_{numero:02d}_DE_{total:02d}.pdf"
+            destino.write_bytes(_pdf_bytes_paginas(grupo, metadados))
+            if destino.stat().st_size > limite_bytes:
+                return [], f"A parte {numero} do PDF continuou acima do limite após a divisão."
+            partes.append(destino)
+        return partes, None
+    except Exception as erro:
+        return [], f"Falha ao dividir PDF: {erro}"
+
+
+async def ajustar_arquivos_dossie_ao_limite(
+    dados_dossie: Dict[str, Any],
+    caminho_pdf: Path,
+    caminho_docx: Path,
+    limite_bytes: int,
+) -> List[str]:
+    """Regenera versões progressivamente menores antes de tentar o upload."""
+    avisos: List[str] = []
+
+    def acima(caminho: Path) -> bool:
+        return caminho.exists() and caminho.stat().st_size > limite_bytes
+
+    if not acima(caminho_pdf) and not acima(caminho_docx):
+        return avisos
+
+    tentativas = [
+        (1200, 60, 4, 5),
+        (1000, 52, 3, 3),
+        (800, 44, 2, 2),
+        (640, 38, 1, 1),
+    ]
+
+    for max_dim, qualidade, limite_pdf, limite_docx in tentativas:
+        if not acima(caminho_pdf) and not acima(caminho_docx):
+            break
+
+        await asyncio.to_thread(reotimizar_imagens_dossie, dados_dossie, max_dim, qualidade)
+        dados_dossie["limite_imagens_pdf"] = limite_pdf
+        dados_dossie["limite_imagens_docx"] = limite_docx
+
+        if acima(caminho_pdf):
+            try:
+                await asyncio.to_thread(gerar_pdf_dossie, dados_dossie, caminho_pdf)
+            except Exception as erro:
+                avisos.append(f"Não foi possível regenerar o PDF compacto: {erro}")
+        if acima(caminho_docx):
+            try:
+                await asyncio.to_thread(gerar_docx_dossie, dados_dossie, caminho_docx)
+            except Exception as erro:
+                avisos.append(f"Não foi possível regenerar o DOCX compacto: {erro}")
+
+    if acima(caminho_pdf):
+        avisos.append(
+            f"O PDF permaneceu com {formatar_tamanho_bytes(caminho_pdf.stat().st_size)} e será dividido em partes."
+        )
+    if acima(caminho_docx):
+        avisos.append(
+            f"O DOCX permaneceu acima do limite ({formatar_tamanho_bytes(caminho_docx.stat().st_size)})."
+        )
+    return avisos
+
+
+def preparar_itens_upload_dossie(
+    arquivos: Dict[str, str],
+    nome_pdf: str,
+    nome_docx: str,
+    limite_bytes: int,
+) -> tuple[List[Dict[str, Any]], List[str]]:
+    itens: List[Dict[str, Any]] = []
+    erros: List[str] = []
+
+    def adicionar(caminho: Path, nome: str, tipo: str, parte: Optional[str] = None):
+        itens.append({"caminho": caminho, "nome": nome, "tipo": tipo, "parte": parte})
+
+    caminho_pdf = Path(str(arquivos.get("pdf") or ""))
+    if caminho_pdf.exists():
+        if caminho_pdf.stat().st_size <= limite_bytes:
+            adicionar(caminho_pdf, nome_pdf, "PDF")
+        else:
+            partes, erro = dividir_pdf_por_tamanho(caminho_pdf, limite_bytes)
+            if erro:
+                erros.append(erro)
+            else:
+                for idx, parte in enumerate(partes, start=1):
+                    adicionar(parte, parte.name, "PDF", f"Parte {idx}/{len(partes)}")
+
+    caminho_docx = Path(str(arquivos.get("docx") or ""))
+    if caminho_docx.exists():
+        if caminho_docx.stat().st_size <= limite_bytes:
+            adicionar(caminho_docx, nome_docx, "DOCX")
+        else:
+            erros.append(
+                "DOCX acima do limite mesmo após compactação: "
+                f"{formatar_tamanho_bytes(caminho_docx.stat().st_size)}. O PDF continua sendo enviado normalmente."
+            )
+
+    if not caminho_pdf.exists() and not caminho_docx.exists():
+        erros.append("Nenhum arquivo válido foi encontrado para envio.")
+    return itens, erros
+
+
 async def enviar_arquivos_dossie_destino(
     destino,
     dados_dossie: Dict[str, Any],
@@ -2751,9 +3032,23 @@ async def enviar_arquivos_dossie_destino(
     canal_mesa: discord.TextChannel,
     usuario: discord.abc.User,
     titulo: str = "🏛️ DOSSIÊ OPERACIONAL AUTOMÁTICO DICOR",
-) -> Optional[discord.Message]:
+) -> Dict[str, Any]:
+    resultado: Dict[str, Any] = {
+        "mensagem": None,
+        "mensagem_arquivo": None,
+        "mensagens": [],
+        "enviados": [],
+        "erros": [],
+        "limite_bytes": 0,
+    }
     if not destino or not arquivos or not hasattr(destino, "send"):
-        return None
+        resultado["erros"].append("Destino inválido ou nenhum arquivo disponível.")
+        return resultado
+
+    limite_bytes = limite_upload_dossie(destino)
+    resultado["limite_bytes"] = limite_bytes
+    itens, erros_preparo = preparar_itens_upload_dossie(arquivos, nome_pdf, nome_docx, limite_bytes)
+    resultado["erros"].extend(erros_preparo)
 
     embed_oficial = discord.Embed(
         title=titulo,
@@ -2775,17 +3070,66 @@ async def enviar_arquivos_dossie_destino(
         ),
         inline=False,
     )
+    embed_oficial.add_field(
+        name="Envio seguro",
+        value=f"Os arquivos são enviados separadamente. Limite seguro detectado: `{formatar_tamanho_bytes(limite_bytes)}`.",
+        inline=False,
+    )
     embed_oficial.set_footer(text="Polícia Federal - DICOR • Dossiê gerado automaticamente")
 
-    files_to_send: List[discord.File] = []
-    if "pdf" in arquivos and Path(arquivos["pdf"]).exists():
-        files_to_send.append(discord.File(arquivos["pdf"], filename=nome_pdf))
-    if "docx" in arquivos and Path(arquivos["docx"]).exists():
-        files_to_send.append(discord.File(arquivos["docx"], filename=nome_docx))
+    try:
+        cabecalho = await destino.send(embed=embed_oficial)
+        resultado["mensagem"] = cabecalho
+        resultado["mensagens"].append(cabecalho)
+    except Exception as erro:
+        resultado["erros"].append(f"Falha ao enviar cabeçalho do dossiê: {erro}")
+        return resultado
 
-    if not files_to_send:
-        return None
-    return await destino.send(embed=embed_oficial, files=files_to_send)
+    for item in itens:
+        caminho = Path(item["caminho"])
+        rotulo = item.get("parte") or item["tipo"]
+        try:
+            mensagem = await destino.send(
+                content=(
+                    f"📎 **{rotulo} — {dados_dossie.get('processo')}**\n"
+                    f"Tamanho: `{formatar_tamanho_bytes(caminho.stat().st_size)}`"
+                ),
+                file=discord.File(str(caminho), filename=item["nome"]),
+            )
+            resultado["mensagens"].append(mensagem)
+            resultado["enviados"].append(item["nome"])
+            if resultado["mensagem_arquivo"] is None:
+                resultado["mensagem_arquivo"] = mensagem
+        except discord.HTTPException as erro:
+            # Fallback extra caso o Discord retorne 413 mesmo abaixo do limite informado.
+            if getattr(erro, "status", None) == 413 and caminho.suffix.lower() == ".pdf":
+                partes, erro_divisao = dividir_pdf_por_tamanho(caminho, max(1024 * 1024, int(limite_bytes * 0.72)))
+                if partes and not erro_divisao:
+                    for idx, parte in enumerate(partes, start=1):
+                        try:
+                            mensagem = await destino.send(
+                                content=f"📎 **PDF — Parte extra {idx}/{len(partes)} — {dados_dossie.get('processo')}**",
+                                file=discord.File(str(parte), filename=parte.name),
+                            )
+                            resultado["mensagens"].append(mensagem)
+                            resultado["enviados"].append(parte.name)
+                            if resultado["mensagem_arquivo"] is None:
+                                resultado["mensagem_arquivo"] = mensagem
+                        except Exception as erro_parte:
+                            resultado["erros"].append(f"Falha ao enviar `{parte.name}`: {erro_parte}")
+                    continue
+            resultado["erros"].append(f"Falha ao enviar `{item['nome']}`: {erro}")
+        except Exception as erro:
+            resultado["erros"].append(f"Falha ao enviar `{item['nome']}`: {erro}")
+
+    if resultado["erros"]:
+        try:
+            await destino.send(
+                "⚠️ **Avisos do envio do dossiê:**\n" + cortar_discord("\n".join(f"• {e}" for e in resultado["erros"]), 1800)
+            )
+        except Exception:
+            pass
+    return resultado
 
 
 async def bloquear_mesa_para_novas_mensagens(canal: discord.TextChannel) -> None:
@@ -2984,7 +3328,9 @@ async def coletar_dados_operacionais_mesa(
     dados_confirmacao: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     pasta_evidencias = pasta_dossie / "evidencias"
+    pasta_evidencias_otimizadas = pasta_dossie / "evidencias_otimizadas"
     pasta_evidencias.mkdir(parents=True, exist_ok=True)
+    pasta_evidencias_otimizadas.mkdir(parents=True, exist_ok=True)
 
     limite = DOSSIE_HISTORY_LIMIT if DOSSIE_HISTORY_LIMIT > 0 else None
     threads = await listar_threads_da_mesa(canal, mesa)
@@ -3036,6 +3382,16 @@ async def coletar_dados_operacionais_mesa(
                 for anexo in msg.attachments:
                     tipo = tipo_anexo_dossie(anexo)
                     caminho_local = await salvar_anexo_dossie(anexo, pasta_evidencias, contador_anexo)
+                    caminho_documento = caminho_local
+                    if tipo == "imagem" and caminho_local:
+                        destino_otimizado = pasta_evidencias_otimizadas / f"{contador_anexo:03d}-{Path(caminho_local).stem}.jpg"
+                        caminho_documento = await asyncio.to_thread(
+                            otimizar_imagem_documento,
+                            caminho_local,
+                            destino_otimizado,
+                            DOSSIE_IMAGE_MAX_DIM,
+                            DOSSIE_IMAGE_QUALITY,
+                        )
                     contador_anexo += 1
                     evidencias.append({
                         "tipo": tipo,
@@ -3043,6 +3399,7 @@ async def coletar_dados_operacionais_mesa(
                         "content_type": anexo.content_type or "",
                         "url": anexo.url,
                         "local": str(caminho_local) if caminho_local else "",
+                        "local_documento": str(caminho_documento) if caminho_documento else "",
                         "data": formatar_data_discord(msg.created_at),
                         "autor": str(msg.author),
                         "origem": origem,
@@ -3108,11 +3465,11 @@ async def coletar_dados_operacionais_mesa(
     imgs_integrantes = [ev for ev in evidencias if ev.get("tipo") == "imagem" and ev.get("topico") == "integrantes"]
     imgs_informantes = [ev for ev in evidencias if ev.get("tipo") == "imagem" and ev.get("topico") == "informantes"]
     for pessoa, ev in zip(liderancas, imgs_lideres):
-        pessoa["foto"] = ev.get("local", "")
+        pessoa["foto"] = caminho_evidencia_documento(ev)
     for pessoa, ev in zip(integrantes, imgs_integrantes):
-        pessoa["foto"] = ev.get("local", "")
+        pessoa["foto"] = caminho_evidencia_documento(ev)
     for pessoa, ev in zip(informantes, imgs_informantes):
-        pessoa["foto"] = ev.get("local", "")
+        pessoa["foto"] = caminho_evidencia_documento(ev)
 
     def extrair_resultado(rotulos: List[str]) -> str:
         return extrair_valor_por_rotulos(todos_textos, rotulos, 300)
@@ -3327,18 +3684,28 @@ async def fechar_mesa_core(
         await enviar_log(f"❌ Erro ao gerar DOCX do dossiê da mesa {canal.id}: {erro}")
     tempo_docx = time.monotonic() - t_docx
 
-    await editar_progresso_dossie(
-        msg_aviso,
-        "📤 **[DICOR] Etapa 5/6**\nEnviando PDF e DOCX para o canal oficial de dossiês e deixando uma cópia na própria mesa..."
+    canal_dest = guild.get_channel(DOSSIE_CHANNEL_ID) or guild.get_channel(BACKUP_CHANNEL_ID)
+    limite_preparacao = limite_upload_dossie(canal_dest or canal)
+    avisos_compactacao = await ajustar_arquivos_dossie_ao_limite(
+        dados_dossie,
+        caminho_pdf,
+        caminho_docx,
+        limite_preparacao,
     )
 
-    canal_dest = guild.get_channel(DOSSIE_CHANNEL_ID) or guild.get_channel(BACKUP_CHANNEL_ID)
+    await editar_progresso_dossie(
+        msg_aviso,
+        "📤 **[DICOR] Etapa 5/6**\nEnviando cada arquivo separadamente e dividindo PDFs grandes automaticamente..."
+    )
+
     mensagem_dossie_url = ""
-    erros_envio: List[str] = []
+    erros_envio: List[str] = list(avisos_compactacao)
+    enviados_oficial: List[str] = []
+    enviados_mesa: List[str] = []
 
     try:
         if canal_dest and arquivos:
-            msg_dossie = await enviar_arquivos_dossie_destino(
+            resultado_oficial = await enviar_arquivos_dossie_destino(
                 canal_dest,
                 dados_dossie,
                 arquivos,
@@ -3347,8 +3714,11 @@ async def fechar_mesa_core(
                 canal,
                 interaction.user,
             )
-            if msg_dossie:
-                mensagem_dossie_url = msg_dossie.jump_url
+            enviados_oficial = list(resultado_oficial.get("enviados", []))
+            erros_envio.extend(f"Canal oficial: {e}" for e in resultado_oficial.get("erros", []))
+            msg_arquivo = resultado_oficial.get("mensagem_arquivo")
+            if msg_arquivo:
+                mensagem_dossie_url = msg_arquivo.jump_url
         elif not canal_dest:
             erros_envio.append("Canal de dossiês não encontrado. Configure DOSSIE_CHANNEL_ID ou BACKUP_CHANNEL_ID.")
         elif not arquivos:
@@ -3361,7 +3731,7 @@ async def fechar_mesa_core(
     if DOSSIE_ENVIAR_NA_MESA and arquivos:
         try:
             if not canal_dest or getattr(canal_dest, "id", None) != canal.id:
-                msg_mesa = await enviar_arquivos_dossie_destino(
+                resultado_mesa = await enviar_arquivos_dossie_destino(
                     canal,
                     dados_dossie,
                     arquivos,
@@ -3371,11 +3741,16 @@ async def fechar_mesa_core(
                     interaction.user,
                     titulo="📎 CÓPIA DO DOSSIÊ OPERACIONAL DICOR",
                 )
-                if not mensagem_dossie_url and msg_mesa:
-                    mensagem_dossie_url = msg_mesa.jump_url
+                enviados_mesa = list(resultado_mesa.get("enviados", []))
+                erros_envio.extend(f"Mesa: {e}" for e in resultado_mesa.get("erros", []))
+                msg_arquivo = resultado_mesa.get("mensagem_arquivo")
+                if not mensagem_dossie_url and msg_arquivo:
+                    mensagem_dossie_url = msg_arquivo.jump_url
         except Exception as erro:
             erros_envio.append(f"Envio na mesa: {erro}")
             await enviar_log(f"⚠️ Dossiê gerado, mas não consegui enviar cópia na mesa {canal.id}: {erro}")
+
+    envio_confirmado = bool(enviados_oficial or enviados_mesa)
 
     await atualizar_status_mesa_fechada(canal.id, dados_dossie, arquivos)
 
@@ -3392,6 +3767,9 @@ async def fechar_mesa_core(
         "pdf": arquivos.get("pdf"),
         "docx": arquivos.get("docx"),
         "mensagem_dossie_url": mensagem_dossie_url,
+        "arquivos_enviados_oficial": enviados_oficial,
+        "arquivos_enviados_mesa": enviados_mesa,
+        "envio_confirmado": envio_confirmado,
         "estatisticas": dados_dossie.get("estatisticas", {}),
         "tempos_segundos": {
             "coleta": round(tempo_coleta, 2),
@@ -3428,8 +3806,8 @@ async def fechar_mesa_core(
             "✅ **Mesa encerrada com sucesso.**\n\n"
             "📄 **Dossiê Operacional gerado.**\n"
             "📁 **Arquivos salvos com sucesso.**\n"
-            "📎 **Arquivos enviados na mesa e/ou no canal oficial.**\n"
-            "📚 **Investigação arquivada.**\n"
+            + ("📎 **Arquivos enviados separadamente com sucesso.**\n" if envio_confirmado else "⚠️ **Nenhum arquivo conseguiu ser enviado ao Discord.**\n")
+            + "📚 **Investigação arquivada.**\n"
             "🏛️ **Polícia Federal - DICOR.**"
         ),
         color=discord.Color.from_rgb(0, 43, 91),
@@ -3442,6 +3820,14 @@ async def fechar_mesa_core(
         value=(
             f"Coleta: `{tempo_coleta:.1f}s` • PDF: `{tempo_pdf:.1f}s` • "
             f"DOCX: `{tempo_docx:.1f}s` • Total: `{time.monotonic() - inicio_total:.1f}s`"
+        ),
+        inline=False,
+    )
+    embed_sucesso.add_field(
+        name="Envio dos arquivos",
+        value=(
+            f"Canal oficial: `{len(enviados_oficial)}` arquivo(s)\n"
+            f"Cópia na mesa: `{len(enviados_mesa)}` arquivo(s)"
         ),
         inline=False,
     )
@@ -3475,14 +3861,19 @@ async def fechar_mesa_core(
             f"Arquivos: PDF={'sim' if 'pdf' in arquivos else 'não'} | DOCX={'sim' if 'docx' in arquivos else 'não'}\n"
             f"Evidências: `{stats.get('evidencias', 0)}` | Mensagens: `{stats.get('mensagens_analisadas', 0)}`\n"
             f"Tempo total: `{time.monotonic() - inicio_total:.1f}s`\n"
-            f"Canal dos dossiês: <#{DOSSIE_CHANNEL_ID}>"
+            f"Canal dos dossiês: <#{DOSSIE_CHANNEL_ID}>\n"
+            f"Uploads confirmados: oficial={len(enviados_oficial)} | mesa={len(enviados_mesa)}"
         )
     except Exception:
         pass
 
     try:
         await interaction.followup.send(
-            "✅ Mesa encerrada e Dossiê Operacional gerado com sucesso. Os arquivos foram enviados na mesa/canal oficial.",
+            (
+                "✅ Mesa encerrada e Dossiê Operacional gerado. Os arquivos foram enviados separadamente com sucesso."
+                if envio_confirmado
+                else "⚠️ O dossiê foi gerado e salvo, mas o Discord não confirmou o envio de nenhum arquivo. Veja os avisos na mesa."
+            ),
             ephemeral=True,
         )
     except Exception:
@@ -8125,12 +8516,12 @@ def pdf_add_secao_titulo(story: List[Any], titulo: str, estilo_h1) -> None:
 
 
 def pdf_add_imagens_evidencias(story: List[Any], evidencias: List[Dict[str, Any]], estilo_body, limite: int = 6) -> None:
-    imagens = [ev for ev in evidencias if ev.get("tipo") == "imagem" and ev.get("local")][:limite]
+    imagens = [ev for ev in evidencias if ev.get("tipo") == "imagem" and caminho_evidencia_documento(ev)][:limite]
     if not imagens:
         story.append(pdf_paragrafo("Nenhuma imagem anexada nesta seção.", estilo_body))
         return
     for idx, ev in enumerate(imagens, start=1):
-        img = pdf_img_fit(ev.get("local", ""), 8.5 * cm, 5.5 * cm)
+        img = pdf_img_fit(caminho_evidencia_documento(ev), 8.5 * cm, 5.5 * cm)
         legenda = pdf_paragrafo(
             f"Imagem {idx} • {ev.get('arquivo')} • {ev.get('data')} • Agente: {ev.get('autor')} • Origem: {ev.get('origem')}",
             estilo_body,
@@ -8347,26 +8738,26 @@ def gerar_pdf_dossie(dados: Dict[str, Any], caminho_pdf: Path) -> None:
     # Página 5 — Painel
     pdf_add_secao_titulo(story, "5. PAINEL DA ORGANIZAÇÃO", style_h1)
     story.append(pdf_paragrafo(dados.get("resumos", {}).get("painel"), style_body))
-    pdf_add_imagens_evidencias(story, filtrar_evidencias_por_topico(dados.get("evidencias", []), ["painel"]), style_body, 6)
+    pdf_add_imagens_evidencias(story, filtrar_evidencias_por_topico(dados.get("evidencias", []), ["painel"]), style_body, int(dados.get("limite_imagens_pdf", DOSSIE_MAX_IMAGENS_PDF) or 0))
     story.append(PageBreak())
 
     # Página 6 — Localização
     pdf_add_secao_titulo(story, "6. LOCALIZAÇÃO", style_h1)
     story.append(pdf_paragrafo(dados.get("resumos", {}).get("localizacao"), style_body))
     story.append(pdf_paragrafo(f"Comunidade/Base: {dados.get('comunidade')}\nCanal de reabertura: {dados.get('reabrir_url')}", style_body))
-    pdf_add_imagens_evidencias(story, filtrar_evidencias_por_topico(dados.get("evidencias", []), ["localizacao"]), style_body, 6)
+    pdf_add_imagens_evidencias(story, filtrar_evidencias_por_topico(dados.get("evidencias", []), ["localizacao"]), style_body, int(dados.get("limite_imagens_pdf", DOSSIE_MAX_IMAGENS_PDF) or 0))
     story.append(PageBreak())
 
     # Página 7 — Produção
     pdf_add_secao_titulo(story, "7. PRODUÇÃO E FABRICAÇÃO", style_h1)
     story.append(pdf_paragrafo(dados.get("resumos", {}).get("producao"), style_body))
-    pdf_add_imagens_evidencias(story, filtrar_evidencias_por_topico(dados.get("evidencias", []), ["producao"]), style_body, 6)
+    pdf_add_imagens_evidencias(story, filtrar_evidencias_por_topico(dados.get("evidencias", []), ["producao"]), style_body, int(dados.get("limite_imagens_pdf", DOSSIE_MAX_IMAGENS_PDF) or 0))
     story.append(PageBreak())
 
     # Página 8 — Baús
     pdf_add_secao_titulo(story, "8. BAÚS E ARMAZENAMENTO", style_h1)
     story.append(pdf_paragrafo(dados.get("resumos", {}).get("baus"), style_body))
-    pdf_add_imagens_evidencias(story, filtrar_evidencias_por_topico(dados.get("evidencias", []), ["baus"]), style_body, 6)
+    pdf_add_imagens_evidencias(story, filtrar_evidencias_por_topico(dados.get("evidencias", []), ["baus"]), style_body, int(dados.get("limite_imagens_pdf", DOSSIE_MAX_IMAGENS_PDF) or 0))
     story.append(PageBreak())
 
     # Página 9 — Informantes
@@ -8544,13 +8935,13 @@ def docx_add_pessoas(doc, pessoas: List[Dict[str, str]], vazio: str):
 
 
 def docx_add_imagens_evidencias(doc, evidencias: List[Dict[str, Any]], limite: int = 8):
-    imagens = [ev for ev in evidencias if ev.get("tipo") == "imagem" and ev.get("local")][:limite]
+    imagens = [ev for ev in evidencias if ev.get("tipo") == "imagem" and caminho_evidencia_documento(ev)][:limite]
     if not imagens:
         docx_add_paragraph(doc, "Nenhuma imagem anexada nesta seção.")
         return
     for idx, ev in enumerate(imagens, start=1):
         p = doc.add_paragraph()
-        if docx_add_picture_safe(p, ev.get("local", ""), 4.8):
+        if docx_add_picture_safe(p, caminho_evidencia_documento(ev), 4.8):
             docx_add_paragraph(doc, f"Imagem {idx} • {ev.get('arquivo')} • {ev.get('data')} • Agente: {ev.get('autor')} • Origem: {ev.get('origem')}")
 
 
@@ -8698,23 +9089,23 @@ def gerar_docx_dossie(dados: Dict[str, Any], caminho_docx: Path) -> None:
 
     docx_add_heading(doc, "5. PAINEL DA ORGANIZAÇÃO", 1)
     docx_add_paragraph(doc, dados.get("resumos", {}).get("painel"))
-    docx_add_imagens_evidencias(doc, filtrar_evidencias_por_topico(dados.get("evidencias", []), ["painel"]), 8)
+    docx_add_imagens_evidencias(doc, filtrar_evidencias_por_topico(dados.get("evidencias", []), ["painel"]), int(dados.get("limite_imagens_docx", DOSSIE_MAX_IMAGENS_DOCX) or 0))
     doc.add_page_break()
 
     docx_add_heading(doc, "6. LOCALIZAÇÃO", 1)
     docx_add_paragraph(doc, dados.get("resumos", {}).get("localizacao"))
     docx_add_paragraph(doc, f"Comunidade/Base: {dados.get('comunidade')}\nCanal de reabertura: {dados.get('reabrir_url')}")
-    docx_add_imagens_evidencias(doc, filtrar_evidencias_por_topico(dados.get("evidencias", []), ["localizacao"]), 8)
+    docx_add_imagens_evidencias(doc, filtrar_evidencias_por_topico(dados.get("evidencias", []), ["localizacao"]), int(dados.get("limite_imagens_docx", DOSSIE_MAX_IMAGENS_DOCX) or 0))
     doc.add_page_break()
 
     docx_add_heading(doc, "7. PRODUÇÃO E FABRICAÇÃO", 1)
     docx_add_paragraph(doc, dados.get("resumos", {}).get("producao"))
-    docx_add_imagens_evidencias(doc, filtrar_evidencias_por_topico(dados.get("evidencias", []), ["producao"]), 8)
+    docx_add_imagens_evidencias(doc, filtrar_evidencias_por_topico(dados.get("evidencias", []), ["producao"]), int(dados.get("limite_imagens_docx", DOSSIE_MAX_IMAGENS_DOCX) or 0))
     doc.add_page_break()
 
     docx_add_heading(doc, "8. BAÚS E ARMAZENAMENTO", 1)
     docx_add_paragraph(doc, dados.get("resumos", {}).get("baus"))
-    docx_add_imagens_evidencias(doc, filtrar_evidencias_por_topico(dados.get("evidencias", []), ["baus"]), 8)
+    docx_add_imagens_evidencias(doc, filtrar_evidencias_por_topico(dados.get("evidencias", []), ["baus"]), int(dados.get("limite_imagens_docx", DOSSIE_MAX_IMAGENS_DOCX) or 0))
     doc.add_page_break()
 
     docx_add_heading(doc, "9. INFORMANTES", 1)
