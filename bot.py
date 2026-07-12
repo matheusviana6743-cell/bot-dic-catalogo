@@ -8728,19 +8728,44 @@ def gerar_pdf_dossie(dados: Dict[str, Any], caminho_pdf: Path) -> None:
     def ptxt(txt: Any, style=style_body):
         return pdf_paragrafo(txt, style)
 
-    def secao(titulo: str):
-        faixa = Table([[Paragraph(titulo, style_h1)]], colWidths=[17.0 * cm], hAlign="CENTER")
-        faixa.setStyle(TableStyle([
+    def cabecalho_modelo(pagina_titulo: str = "DOCUMENTO OPERACIONAL", compacto: bool = False):
+        img_pf_h = 2.35 if compacto else 2.75
+        img_pf_w = 2.35 if compacto else 2.75
+        img_dic_h = 2.35 if compacto else 2.75
+        img_dic_w = 2.35 if compacto else 2.75
+        img_pf_local = pdf_img_fit(str(brasao_pf), img_pf_w * cm, img_pf_h * cm) if brasao_pf else ptxt("PF", style_center)
+        img_dicor_local = pdf_img_fit(str(brasao_dicor), img_dic_w * cm, img_dic_h * cm) if brasao_dicor else ptxt("DICOR", style_center)
+        titulo_central = ptxt("POLÍCIA FEDERAL<br/>DO ESTADO DA CAPITAL<br/>MORADA DO VALLEY", style_center)
+        mast = Table([[img_pf_local, titulo_central, img_dicor_local]], colWidths=[3.2 * cm, 10.6 * cm, 3.2 * cm], hAlign="CENTER")
+        mast.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#0B0B0B")),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+            ("TOPPADDING", (0, 0), (-1, -1), 3),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+        ]))
+        story.append(mast)
+        faixa_titulo = Table([[Paragraph(pagina_titulo, style_h1)]], colWidths=[17.0 * cm], hAlign="CENTER")
+        faixa_titulo.setStyle(TableStyle([
             ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#151515")),
             ("BOX", (0, 0), (-1, -1), 0.9, colors.HexColor("#D4AF37")),
-            ("LINEBEFORE", (0, 0), (0, -1), 4.2, colors.HexColor("#8EB8C8")),
-            ("LINEAFTER", (-1, 0), (-1, -1), 0.8, colors.HexColor("#D4AF37")),
-            ("TOPPADDING", (0, 0), (-1, -1), 7),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
-            ("LEFTPADDING", (0, 0), (-1, -1), 8),
+            ("TOPPADDING", (0, 0), (-1, -1), 6),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
         ]))
-        story.append(faixa)
-        story.append(Spacer(1, 8))
+        story.append(faixa_titulo)
+        sub = Table([[Paragraph("DOCUMENTO RESERVADO • INTELIGÊNCIA • INVESTIGAÇÃO • RESULTADO", style_subtitle)]], colWidths=[17.0 * cm], hAlign="CENTER")
+        sub.setStyle(TableStyle([
+            ("BACKGROUND", (0,0), (-1,-1), colors.HexColor("#0E2230")),
+            ("BOX", (0,0), (-1,-1), 0.6, colors.HexColor("#7FA6AF")),
+            ("TOPPADDING", (0,0), (-1,-1), 3),
+            ("BOTTOMPADDING", (0,0), (-1,-1), 3),
+        ]))
+        story.append(sub)
+        story.append(Spacer(1, 7 if compacto else 9))
+
+    def secao(titulo: str):
+        cabecalho_modelo(titulo, compacto=True)
+        story.append(Spacer(1, 2))
 
     def info_table(rows: List[List[Any]], col_widths: Optional[List[float]] = None):
         if not rows:
@@ -8902,22 +8927,8 @@ def gerar_pdf_dossie(dados: Dict[str, Any], caminho_pdf: Path) -> None:
 
     brasao_pf = caminho_brasao_pf()
     brasao_dicor = caminho_brasao_dicor()
-    img_pf = pdf_img_fit(str(brasao_pf), 3.0 * cm, 3.0 * cm) if brasao_pf else ptxt("PF", style_center)
-    img_dicor = pdf_img_fit(str(brasao_dicor), 3.0 * cm, 3.0 * cm) if brasao_dicor else ptxt("DICOR", style_center)
 
-    cab = Table([[img_pf, ptxt("POLÍCIA FEDERAL\nDO ESTADO DA CAPITAL\nMORADA DO VALLEY", style_center), img_dicor]], colWidths=[3.5 * cm, 10.0 * cm, 3.5 * cm], hAlign="CENTER")
-    cab.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#0B0B0B")),
-        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-        ("ALIGN", (0, 0), (-1, -1), "CENTER"),
-        ("TOPPADDING", (0, 0), (-1, -1), 6),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
-    ]))
-    story.append(cab)
-    story.append(Spacer(1, 0.20 * cm))
-    story.append(Paragraph("DOSSIÊ OPERACIONAL DICOR", style_title))
-    story.append(Paragraph("DOCUMENTO RESERVADO • INTELIGÊNCIA • INVESTIGAÇÃO • RESULTADO", style_subtitle))
-    story.append(Spacer(1, 0.12 * cm))
+    cabecalho_modelo("DOSSIÊ OPERACIONAL DICOR", compacto=False)
     badges_estatisticas()
     story.append(info_table([
         ["DADOS DO PROCESSO", "INFORMAÇÕES CONSOLIDADAS"],
