@@ -77,43 +77,63 @@ except Exception:
 
 load_dotenv()
 
+
+def env_int(nome: str, padrao: int = 0) -> int:
+    """Lê ID/contador do Railway sem crashar se ficar placeholder tipo ID_DO_CARGO_INSPETOR."""
+    valor = str(os.getenv(nome, str(padrao)) or "").strip()
+    try:
+        return int(valor)
+    except (TypeError, ValueError):
+        print(f"⚠️ Variável {nome} inválida: {valor!r}. Usando {padrao}.")
+        return int(padrao)
+
+
+def env_float(nome: str, padrao: float = 0.0) -> float:
+    valor = str(os.getenv(nome, str(padrao)) or "").strip().replace(",", ".")
+    try:
+        return float(valor)
+    except (TypeError, ValueError):
+        print(f"⚠️ Variável {nome} inválida: {valor!r}. Usando {padrao}.")
+        return float(padrao)
+
+
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN", "").strip()
-GUILD_ID = int(os.getenv("GUILD_ID", "0") or 0)
+GUILD_ID = env_int("GUILD_ID", 0)
 
 # Procurados
-PROCURADOS_CHANNEL_ID = int(os.getenv("PROCURADOS_CHANNEL_ID", "0") or 0)
-HISTORICO_PROCURADOS_ID = int(os.getenv("HISTORICO_PROCURADOS_ID", "1490200536207855857") or 1490200536207855857)
-LOGS_CHANNEL_ID = int(os.getenv("LOGS_CHANNEL_ID", "1490205503228477610") or 1490205503228477610)
-PROCURADOS_TEMP_CATEGORY_ID = int(os.getenv("PROCURADOS_TEMP_CATEGORY_ID", "0") or 0)
+PROCURADOS_CHANNEL_ID = env_int("PROCURADOS_CHANNEL_ID", 0)
+HISTORICO_PROCURADOS_ID = env_int("HISTORICO_PROCURADOS_ID", 1490200536207855857)
+LOGS_CHANNEL_ID = env_int("LOGS_CHANNEL_ID", 1490205503228477610)
+PROCURADOS_TEMP_CATEGORY_ID = env_int("PROCURADOS_TEMP_CATEGORY_ID", 0)
 
 # Boletins
-BOLETINS_CHANNEL_ID = int(os.getenv("BOLETINS_CHANNEL_ID", "1490200514837745754") or 1490200514837745754)
-BOLETIM_TEMP_CATEGORY_ID = int(os.getenv("BOLETIM_TEMP_CATEGORY_ID", "0") or 0)
+BOLETINS_CHANNEL_ID = env_int("BOLETINS_CHANNEL_ID", 1490200514837745754)
+BOLETIM_TEMP_CATEGORY_ID = env_int("BOLETIM_TEMP_CATEGORY_ID", 0)
 
 # Atendimento automático de boletins
-BOLETIM_ATENDIMENTO_CHANNEL_ID = int(os.getenv("BOLETIM_ATENDIMENTO_CHANNEL_ID", "1525762770253910136") or 1525762770253910136)
+BOLETIM_ATENDIMENTO_CHANNEL_ID = env_int("BOLETIM_ATENDIMENTO_CHANNEL_ID", 1525762770253910136)
 BOLETIM_RODIZIO_CARGOS_IDS = [int(x) for x in os.getenv("BOLETIM_RODIZIO_CARGOS_IDS", "1490200391239864352,1490200390426165290").replace(";", ",").split(",") if x.strip().isdigit()]
 
 # Mesas
-CATEGORIA_MESAS_ABERTAS_ID = int(os.getenv("CATEGORIA_MESAS_ABERTAS_ID", "1490200456855552192") or 1490200456855552192)
-CATEGORIA_MESAS_FECHADAS_ID = int(os.getenv("CATEGORIA_MESAS_FECHADAS_ID", "1515165416815722586") or 1515165416815722586)
-BACKUP_CHANNEL_ID = int(os.getenv("BACKUP_CHANNEL_ID", "1515165673276440677") or 1515165673276440677)
+CATEGORIA_MESAS_ABERTAS_ID = env_int("CATEGORIA_MESAS_ABERTAS_ID", 1490200456855552192)
+CATEGORIA_MESAS_FECHADAS_ID = env_int("CATEGORIA_MESAS_FECHADAS_ID", 1515165416815722586)
+BACKUP_CHANNEL_ID = env_int("BACKUP_CHANNEL_ID", 1515165673276440677)
 
 # Dossiê Operacional Automático DICOR
 # Coloque no .env/Railway para escolher o canal que receberá PDF + DOCX:
 # DOSSIE_CHANNEL_ID=ID_DO_CANAL_DOS_DOSSIES
-DOSSIE_CHANNEL_ID = int(os.getenv("DOSSIE_CHANNEL_ID", str(BACKUP_CHANNEL_ID)) or BACKUP_CHANNEL_ID)
-DOSSIE_HISTORY_LIMIT = int(os.getenv("DOSSIE_HISTORY_LIMIT", "0") or 0)  # 0 = varrer todo o histórico disponível
+DOSSIE_CHANNEL_ID = env_int("DOSSIE_CHANNEL_ID", BACKUP_CHANNEL_ID)
+DOSSIE_HISTORY_LIMIT = env_int("DOSSIE_HISTORY_LIMIT", 0)  # 0 = varrer todo o histórico disponível
 DOSSIE_ENVIAR_NA_MESA = os.getenv("DOSSIE_ENVIAR_NA_MESA", "1").strip().lower() not in {"0", "false", "nao", "não", "off"}
 DOSSIE_SKIP_BOT_BOILERPLATE = os.getenv("DOSSIE_SKIP_BOT_BOILERPLATE", "1").strip().lower() not in {"0", "false", "nao", "não", "off"}
-DOSSIE_PROGRESS_INTERVAL = float(os.getenv("DOSSIE_PROGRESS_INTERVAL", "2") or 2)
+DOSSIE_PROGRESS_INTERVAL = env_float("DOSSIE_PROGRESS_INTERVAL", 2)
 
 # Controle de quem pode fechar mesas
 # Opção 1: coloque o ID do cargo Inspetor. Quem tiver esse cargo ou cargo acima poderá fechar.
 # DOSSIE_CARGO_MINIMO_FECHAR_ID=ID_DO_CARGO_INSPETOR
 # Opção 2: coloque uma lista de cargos autorizados, separados por vírgula.
 # CARGOS_FECHAR_MESA_IDS=ID_INSPETOR,ID_DELEGADO_DICOR,ID_DELEGADO_GERAL
-DOSSIE_CARGO_MINIMO_FECHAR_ID = int(os.getenv("DOSSIE_CARGO_MINIMO_FECHAR_ID", "0") or 0)
+DOSSIE_CARGO_MINIMO_FECHAR_ID = env_int("DOSSIE_CARGO_MINIMO_FECHAR_ID", 0)
 
 # Assinaturas do Dossiê
 ASSINATURA_DELEGADO_GERAL_NOME = os.getenv("ASSINATURA_DELEGADO_GERAL_NOME", "Delegado Geral").strip() or "Delegado Geral"
@@ -128,7 +148,7 @@ ASSINATURA_AGENTE_RESPONSAVEL_TEXTO = os.getenv("ASSINATURA_AGENTE_RESPONSAVEL_T
 # Catalogo
 CATALOG_PUBLIC_URL = os.getenv("CATALOG_PUBLIC_URL", "http://127.0.0.1:8000/").strip()
 CATALOG_ADMIN_PASSWORD = os.getenv("CATALOG_ADMIN_PASSWORD", "").strip()
-PORT = int(os.getenv("PORT", "8000") or 8000)
+PORT = env_int("PORT", 8000)
 
 
 def _ids_env(nome: str) -> List[int]:
@@ -6673,7 +6693,7 @@ async def estatisticas(interaction: discord.Interaction):
 # PAINEL ADMINISTRATIVO / ESTATÍSTICAS POR AGENTE
 # =====================================================
 
-ADMIN_STATS_HISTORY_LIMIT = int(os.getenv("ADMIN_STATS_HISTORY_LIMIT", "0") or 0)
+ADMIN_STATS_HISTORY_LIMIT = env_int("ADMIN_STATS_HISTORY_LIMIT", 0)
 ADMIN_STATS_SCAN_ALL_CHANNELS = str(os.getenv("ADMIN_STATS_SCAN_ALL_CHANNELS", "1") or "1").strip().lower() not in {"0", "false", "nao", "não", "no"}
 
 
@@ -7318,7 +7338,6 @@ async def montar_estatisticas_administrativas(guild: discord.Guild, alvo_id: Opt
         "Tocaias",
         "OLBs",
         "Perícias externas",
-        "Relatórios diários",
         "Relatórios operacionais",
         "Mesas criadas",
         "Mesas encerradas",
