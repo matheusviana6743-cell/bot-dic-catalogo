@@ -225,6 +225,8 @@ ORGANIZACOES_JSON = DATA_DIR / "organizacoes.json"
 HISTORICO_ORGANIZACOES_JSON = DATA_DIR / "historico_organizacoes.json"
 DOSSIES_JSON = DATA_DIR / "dossies_operacionais.json"
 DOSSIES_DIR = DATA_DIR / "dossies"
+COMPARECIMENTOS_JSON = DATA_DIR / "comparecimentos.json"
+COMPARECIMENTOS_DIR = DOSSIES_DIR / "comparecimentos"
 DOSSIE_ASSETS_DIR = DATA_DIR / "assets_dossie"
 ASSINATURAS_DOSSIE_JSON = DATA_DIR / "assinaturas_dossie.json"
 ASSINATURAS_DOSSIE_DIR = DOSSIE_ASSETS_DIR / "assinaturas"
@@ -256,7 +258,7 @@ PROTECAO_CARGOS_RESTRITOS_IDS = {
     ).replace(";", ",").split(",") if x.strip().isdigit()
 }
 
-for pasta in [DATA_DIR, PUBLIC_DIR, UPLOADS_DIR, BACKUP_DIR, PUBLIC_BACKUPS_DIR, DOSSIES_DIR, DOSSIE_ASSETS_DIR, ASSINATURAS_DOSSIE_DIR, ADMIN_REPORTS_DIR, globals().get("BOLETIM_ARQUIVOS_DIR", DATA_DIR / "boletins_arquivos"), globals().get("BACKUP_COMPLETO_TEMP_DIR", BACKUP_DIR / "backup_servidor_temp"), globals().get("MENSAGENS_PROTEGIDAS_DIR", DATA_DIR / "mensagens_protegidas_arquivos")]:
+for pasta in [DATA_DIR, PUBLIC_DIR, UPLOADS_DIR, BACKUP_DIR, PUBLIC_BACKUPS_DIR, DOSSIES_DIR, COMPARECIMENTOS_DIR, DOSSIE_ASSETS_DIR, ASSINATURAS_DOSSIE_DIR, ADMIN_REPORTS_DIR, globals().get("BOLETIM_ARQUIVOS_DIR", DATA_DIR / "boletins_arquivos"), globals().get("BACKUP_COMPLETO_TEMP_DIR", BACKUP_DIR / "backup_servidor_temp"), globals().get("MENSAGENS_PROTEGIDAS_DIR", DATA_DIR / "mensagens_protegidas_arquivos")]:
     pasta.mkdir(exist_ok=True, parents=True)
 
 # =====================================================
@@ -9321,6 +9323,254 @@ def atualizar_atendimento_boletim(chave: str, valor: Any, atualizacoes: Dict[str
     salvar_atendimentos_boletins(lista)
     return alvo
 
+# =====================================================
+# SOLICITAÇÃO / MANDADO DE COMPARECIMENTO - MODELO OFICIAL RP
+# =====================================================
+
+def carregar_comparecimentos() -> List[Dict[str, Any]]:
+    dados = carregar_json(COMPARECIMENTOS_JSON, [])
+    return dados if isinstance(dados, list) else []
+
+
+def salvar_comparecimentos(lista: List[Dict[str, Any]]) -> None:
+    salvar_json(COMPARECIMENTOS_JSON, lista[-5000:])
+
+
+def proximo_numero_comparecimento() -> str:
+    ano = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=-3))).year
+    maior = 0
+    for item in carregar_comparecimentos():
+        m = re.search(r"(\d{1,6})\s*-\s*(\d{4})", str(item.get("numero") or ""))
+        if m and int(m.group(2)) == ano:
+            maior = max(maior, int(m.group(1)))
+    try:
+        for p in COMPARECIMENTOS_DIR.rglob("SOLICITACAO_COMPARECIMENTO_*_*.pdf"):
+            m = re.search(r"SOLICITACAO_COMPARECIMENTO_(\d{1,6})_(\d{4})", p.name)
+            if m and int(m.group(2)) == ano:
+                maior = max(maior, int(m.group(1)))
+    except Exception:
+        pass
+    return f"{maior + 1:05d}-{ano}"
+
+
+def _wrap_pdf(c, texto: str, fonte: str, tamanho: float, largura_max: float) -> List[str]:
+    linhas = []
+    for bloco in str(texto or "").splitlines() or [""]:
+        linha = ""
+        for palavra in bloco.split():
+            teste = (linha + " " + palavra).strip()
+            try:
+                ok = c.stringWidth(teste, fonte, tamanho) <= largura_max
+            except Exception:
+                ok = len(teste) < 85
+            if ok or not linha:
+                linha = teste
+            else:
+                linhas.append(linha)
+                linha = palavra
+        if linha:
+            linhas.append(linha)
+        elif not bloco.strip():
+            linhas.append("")
+    return linhas
+
+
+def _draw_logo_comparecimento(c, caminho: Optional[Path], x: float, y: float, w: float, h: float) -> None:
+    try:
+        if caminho and Path(caminho).exists():
+            c.drawImage(str(caminho), x, y, width=w, height=h, preserveAspectRatio=True, mask="auto")
+    except Exception:
+        pass
+
+
+def gerar_pdf_comparecimento(registro: Dict[str, Any], caminho_pdf: Path) -> None:
+    if canvas is None or A4 is None:
+        raise RuntimeError("Dependência ausente: instale reportlab.")
+    caminho_pdf.parent.mkdir(parents=True, exist_ok=True)
+    c = canvas.Canvas(str(caminho_pdf), pagesize=A4)
+    largura, altura = A4
+    fundo = colors.HexColor("#0B0B0B")
+    branco = colors.HexColor("#FFFFFF")
+    borda = colors.HexColor("#CFE9F2")
+    dourado = colors.HexColor("#D4AF37")
+    c.setFillColor(fundo)
+    c.rect(0, 0, largura, altura, fill=1, stroke=0)
+    m = 0.65 * cm
+    c.setStrokeColor(borda)
+    c.setLineWidth(2)
+    c.rect(m, m, largura-2*m, altura-2*m, fill=0, stroke=1)
+    c.setLineWidth(0.8)
+    c.rect(m+0.18*cm, m+0.18*cm, largura-2*(m+0.18*cm), altura-2*(m+0.18*cm), fill=0, stroke=1)
+    # enfeites pequenos na moldura
+    c.setStrokeColor(colors.HexColor("#8EB8C8"))
+    step = 0.42 * cm
+    x = m + 0.28*cm
+    while x < largura-m-0.28*cm:
+        c.line(x, altura-m-0.25*cm, min(x+0.18*cm, largura-m), altura-m-0.40*cm)
+        c.line(x, m+0.25*cm, min(x+0.18*cm, largura-m), m+0.40*cm)
+        x += step
+    y = m + 0.30*cm
+    while y < altura-m-0.30*cm:
+        c.line(m+0.25*cm, y, m+0.40*cm, min(y+0.18*cm, altura-m))
+        c.line(largura-m-0.25*cm, y, largura-m-0.40*cm, min(y+0.18*cm, altura-m))
+        y += step
+    _draw_logo_comparecimento(c, caminho_brasao_pf(), 1.15*cm, altura-3.55*cm, 2.35*cm, 2.35*cm)
+    _draw_logo_comparecimento(c, caminho_brasao_dicor(), largura-3.55*cm, altura-3.55*cm, 2.35*cm, 2.35*cm)
+    try:
+        c.saveState()
+        c.setFillColor(colors.Color(1, 1, 1, alpha=0.055))
+        c.setFont("Helvetica-Bold", 150)
+        c.translate(largura/2, altura/2)
+        c.rotate(35)
+        c.drawCentredString(0, 0, "DICOR")
+        c.restoreState()
+    except Exception:
+        pass
+    c.setFillColor(branco)
+    c.setFont("Courier-Bold", 15)
+    c.drawCentredString(largura/2, altura-1.65*cm, "POLÍCIA FEDERAL")
+    c.setFont("Courier-Bold", 12.5)
+    c.drawCentredString(largura/2, altura-2.20*cm, "CAPITAL MORADA DO VALLEY")
+    c.setFont("Courier-Bold", 9.6)
+    c.drawCentredString(largura/2, altura-2.75*cm, "DIRETORIA DE INVESTIGAÇÃO E COMBATE AO CRIME ORGANIZADO - DICOR")
+    ypos = altura - 4.85*cm
+    c.setFont("Courier-Bold", 10.6)
+    c.drawString(1.05*cm, ypos, f"SOLICITAÇÃO DE COMPARECIMENTO: {registro.get('numero', '00000-0000')}")
+    ypos -= 0.52*cm
+    c.setFont("Courier", 10)
+    c.drawString(1.05*cm, ypos, f"Data de Expedição: {registro.get('data_expedicao', agora_br())}")
+    ypos -= 0.44*cm
+    c.drawString(1.05*cm, ypos, f"Nº do Processo: {registro.get('processo', 'Não informado')}")
+    ypos -= 0.95*cm
+    c.setFont("Courier-Bold", 10.3)
+    c.drawString(1.05*cm, ypos, f"A(o) Sr.(a): {registro.get('nome', 'Não informado')}")
+    ypos -= 0.47*cm
+    c.drawString(1.05*cm, ypos, f"RG: {registro.get('rg', 'Não informado')}")
+    ypos -= 0.72*cm
+    c.setFont("Courier", 9.55)
+    texto = (
+        "O Departamento de Inteligência e Combate ao Crime Organizado - DICOR, no uso de suas atribuições legais e com fundamento nos procedimentos internos, "
+        "SOLICITA o comparecimento de Vossa Senhoria para prestar esclarecimentos referentes à investigação em curso relacionada ao processo em epígrafe. "
+        f"O comparecimento deverá ocorrer em {registro.get('local', 'Sede da Polícia Federal - DICOR')}, na data/horário {registro.get('data_hora', 'a definir')}. "
+        "Ressalta-se que o não comparecimento injustificado poderá ensejar a adoção das medidas legais cabíveis. "
+        f"Motivo informado: {registro.get('motivo', 'Não informado')}. "
+        "Sem mais para o momento, colocamo-nos à disposição para eventuais esclarecimentos."
+    )
+    for linha in _wrap_pdf(c, texto, "Courier", 9.55, largura-2.1*cm):
+        if ypos < 4.1*cm:
+            break
+        c.drawString(1.05*cm, ypos, linha)
+        ypos -= 0.42*cm
+    c.setStrokeColor(colors.HexColor("#CCCCCC"))
+    c.line(5.8*cm, 2.35*cm, largura-5.8*cm, 2.35*cm)
+    c.setFillColor(branco)
+    c.setFont("Courier-Bold", 9.2)
+    c.drawCentredString(largura/2, 1.9*cm, "POLÍCIA FEDERAL - DICOR")
+    c.setFont("Courier", 8.2)
+    c.drawCentredString(largura/2, 1.52*cm, f"Emitido por: {registro.get('solicitado_por_nome', 'Sistema DICOR')}")
+    c.setFillColor(dourado)
+    c.setFont("Courier-Bold", 7.2)
+    c.drawCentredString(largura/2, 0.88*cm, "DOCUMENTO DE USO INTERNO • GTA RP • CAPITAL MORADA DO VALLEY")
+    c.save()
+
+
+def gerar_docx_comparecimento(registro: Dict[str, Any], caminho_docx: Path) -> None:
+    if Document is None:
+        raise RuntimeError("Dependência ausente: instale python-docx.")
+    caminho_docx.parent.mkdir(parents=True, exist_ok=True)
+    doc = Document()
+    p = doc.add_paragraph()
+    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    run = p.add_run("POLÍCIA FEDERAL\nCAPITAL MORADA DO VALLEY\nDICOR")
+    run.bold = True
+    run.font.size = Pt(16)
+    p = doc.add_paragraph()
+    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    r = p.add_run(f"SOLICITAÇÃO DE COMPARECIMENTO: {registro.get('numero', '00000-0000')}")
+    r.bold = True
+    r.font.size = Pt(13)
+    tabela = doc.add_table(rows=0, cols=2)
+    tabela.style = "Table Grid"
+    for k, v in [("Data de Expedição", registro.get("data_expedicao", agora_br())), ("Nº do Processo", registro.get("processo", "Não informado")), ("Convocado", registro.get("nome", "Não informado")), ("RG", registro.get("rg", "Não informado")), ("Data/Horário", registro.get("data_hora", "Não informado")), ("Local", registro.get("local", "Não informado")), ("Motivo", registro.get("motivo", "Não informado"))]:
+        row = tabela.add_row().cells
+        row[0].text = str(k)
+        row[1].text = str(v)
+    texto = (
+        "O Departamento de Inteligência e Combate ao Crime Organizado - DICOR, no uso de suas atribuições legais e com fundamento nos procedimentos internos, "
+        "SOLICITA o comparecimento de Vossa Senhoria para prestar esclarecimentos referentes à investigação em curso relacionada ao processo em epígrafe. "
+        f"O comparecimento deverá ocorrer em {registro.get('local', 'Sede da Polícia Federal - DICOR')}, na data/horário {registro.get('data_hora', 'a definir')}. "
+        "Ressalta-se que o não comparecimento injustificado poderá ensejar a adoção das medidas legais cabíveis."
+    )
+    p = doc.add_paragraph(texto)
+    p.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+    doc.add_paragraph("\n\n________________________________________")
+    p = doc.add_paragraph("POLÍCIA FEDERAL - DICOR")
+    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    p = doc.add_paragraph(f"Emitido por: {registro.get('solicitado_por_nome', 'Sistema DICOR')}")
+    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    doc.save(str(caminho_docx))
+
+
+def preparar_registro_comparecimento(atendimento: Dict[str, Any], dados: Dict[str, Any], usuario: discord.abc.User) -> Dict[str, Any]:
+    return {
+        "id": f"CMP-{data_caso()}",
+        "numero": proximo_numero_comparecimento(),
+        "boletim": atendimento.get("numero"),
+        "processo": str(atendimento.get("numero") or "Não informado"),
+        "nome": str(dados.get("nome") or "Não informado"),
+        "rg": str(dados.get("rg") or "Não informado"),
+        "motivo": str(dados.get("motivo") or "Não informado"),
+        "data_hora": str(dados.get("data_hora") or "Não informado"),
+        "local": str(dados.get("local") or "Sede da Polícia Federal - DICOR"),
+        "solicitado_por_id": getattr(usuario, "id", None),
+        "solicitado_por_nome": str(usuario),
+        "data_expedicao": agora_br(),
+        "data": agora_br(),
+    }
+
+
+async def gerar_e_enviar_comparecimento(interaction: discord.Interaction, atendimento: Dict[str, Any], registro: Dict[str, Any]) -> Dict[str, Any]:
+    pasta = COMPARECIMENTOS_DIR / slugify(str(registro.get("numero") or registro.get("id") or data_caso()))
+    pasta.mkdir(parents=True, exist_ok=True)
+    numero_limpo = re.sub(r"[^0-9A-Za-z_-]+", "_", str(registro.get("numero", "comparecimento")))
+    nome_pdf = f"SOLICITACAO_COMPARECIMENTO_{numero_limpo}.pdf"
+    nome_docx = f"SOLICITACAO_COMPARECIMENTO_{numero_limpo}.docx"
+    caminho_pdf = pasta / nome_pdf
+    caminho_docx = pasta / nome_docx
+    falhas = []
+    try:
+        gerar_pdf_comparecimento(registro, caminho_pdf)
+    except Exception as erro:
+        falhas.append(f"PDF: {erro}")
+    try:
+        gerar_docx_comparecimento(registro, caminho_docx)
+    except Exception as erro:
+        falhas.append(f"DOCX: {erro}")
+    registro["arquivo_pdf"] = str(caminho_pdf) if caminho_pdf.exists() else ""
+    registro["arquivo_docx"] = str(caminho_docx) if caminho_docx.exists() else ""
+    registro["falhas"] = falhas
+    lista = carregar_comparecimentos()
+    lista.append(registro)
+    salvar_comparecimentos(lista)
+    embed = discord.Embed(title="📩 Solicitação de Comparecimento emitida", description="Documento oficial gerado no modelo DICOR aprovado.", color=discord.Color.from_rgb(0, 43, 91))
+    embed.add_field(name="Solicitação", value=f"`{registro.get('numero')}`", inline=True)
+    embed.add_field(name="Boletim", value=f"`{numero_curto_boletim(atendimento.get('numero'))}`", inline=True)
+    embed.add_field(name="Convocado", value=f"**{registro.get('nome')}**\nRG: `{registro.get('rg')}`", inline=False)
+    embed.add_field(name="Data/Horário", value=str(registro.get("data_hora")), inline=True)
+    embed.add_field(name="Local", value=str(registro.get("local")), inline=True)
+    embed.add_field(name="Emitido por", value=interaction.user.mention, inline=False)
+    view = discord.ui.View(timeout=None)
+    pdf_url = dossie_download_url(caminho_pdf, nome_pdf) if caminho_pdf.exists() else ""
+    docx_url = dossie_download_url(caminho_docx, nome_docx) if caminho_docx.exists() else ""
+    if pdf_url:
+        view.add_item(discord.ui.Button(label="Baixar PDF", emoji="📄", style=discord.ButtonStyle.link, url=pdf_url))
+    if docx_url:
+        view.add_item(discord.ui.Button(label="Baixar DOCX", emoji="📝", style=discord.ButtonStyle.link, url=docx_url))
+    if falhas:
+        embed.add_field(name="Avisos", value="\n".join(falhas)[:900], inline=False)
+    await interaction.channel.send(content="📩 **Mandado/Solicitação de Comparecimento DICOR**", embed=embed, view=view if (pdf_url or docx_url) else None, allowed_mentions=discord.AllowedMentions.none())
+    return registro
+
 def numero_boletim_de_texto(texto: str) -> str:
     texto = str(texto or "")
     for p in [r"BO[- ]?DICOR[- ]?(\d{1,6})", r"BOLETIM\s+DE\s+OCORR[ÊE]NCIA\s*[—\-–]?\s*(?:N[º°O]\.?|Nº|N)?\s*(\d{1,6})", r"N[º°O]\.?\s*(\d{1,6})"]:
@@ -9625,18 +9875,25 @@ class ComparecimentoBoletimModal(Modal, title="Solicitar Comparecimento"):
     rg = TextInput(label="RG", max_length=50)
     motivo = TextInput(label="Motivo do comparecimento", style=discord.TextStyle.paragraph, max_length=900)
     data_hora = TextInput(label="Data e horário", placeholder="Ex: 12/07 às 20h", max_length=120)
-    local = TextInput(label="Local", placeholder="Ex: Sede da Polícia Federal", max_length=160)
+    local = TextInput(label="Local", placeholder="Ex: Sede da Polícia Federal - DICOR", max_length=160)
+
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True, thinking=True)
         atendimento = buscar_atendimento_por_area(interaction.channel.id)
         if not atendimento:
             return await interaction.followup.send("❌ Atendimento não encontrado.", ephemeral=True)
-        registro = {"nome": str(self.nome.value), "rg": str(self.rg.value), "motivo": str(self.motivo.value), "data_hora": str(self.data_hora.value), "local": str(self.local.value), "solicitado_por_id": interaction.user.id, "solicitado_por_nome": str(interaction.user), "data": agora_br()}
-        historico = atendimento.get("historico", []) or []; historico.append({"acao": "Solicitação de comparecimento", "usuario": str(interaction.user), "data": agora_br(), "dados": registro})
+        dados = {"nome": str(self.nome.value), "rg": str(self.rg.value), "motivo": str(self.motivo.value), "data_hora": str(self.data_hora.value), "local": str(self.local.value)}
+        registro = preparar_registro_comparecimento(atendimento, dados, interaction.user)
+        try:
+            registro = await gerar_e_enviar_comparecimento(interaction, atendimento, registro)
+        except Exception as erro:
+            await enviar_log(f"❌ Erro ao gerar solicitação de comparecimento do boletim `{atendimento.get('numero')}`: {erro}\n```{traceback.format_exc()[:1500]}```")
+            return await interaction.followup.send("❌ Não foi possível gerar a solicitação de comparecimento. O erro foi enviado aos logs.", ephemeral=True)
+        historico = atendimento.get("historico", []) or []
+        historico.append({"acao": "Solicitação de comparecimento emitida", "usuario": str(interaction.user), "data": agora_br(), "dados": registro})
         atualizar_atendimento_boletim("id", atendimento.get("id"), {"comparecimento_status": "solicitado", "comparecimento": registro, "historico": historico})
-        await interaction.channel.send(f"📩 **SOLICITAÇÃO DE COMPARECIMENTO REGISTRADA**\n**Boletim:** Nº {numero_curto_boletim(atendimento.get('numero'))}\n**Convocado:** {registro['nome']}\n**RG:** {registro['rg']}\n**Motivo:** {registro['motivo']}\n**Data/Horário:** {registro['data_hora']}\n**Local:** {registro['local']}\n**Solicitado por:** {interaction.user.mention}\n\n⚠️ Documento oficial de comparecimento ainda será configurado.")
-        await enviar_log(f"📩 Comparecimento solicitado no boletim `{atendimento.get('numero')}` por {interaction.user.mention} (`{interaction.user.id}`).")
-        await interaction.followup.send("✅ Solicitação registrada.", ephemeral=True)
+        await enviar_log(f"📩 **Comparecimento emitido**\nBoletim: `{atendimento.get('numero')}`\nSolicitação: `{registro.get('numero')}`\nConvocado: `{registro.get('nome')}` | RG `{registro.get('rg')}`\nEmitido por: {interaction.user.mention} (`{interaction.user.id}`)")
+        await interaction.followup.send("✅ Solicitação de comparecimento gerada e enviada no atendimento.", ephemeral=True)
 
 class ProcuradoBoletimModal(Modal, title="Cadastrar como Procurado"):
     nome = TextInput(label="Nome", max_length=120, required=True)
