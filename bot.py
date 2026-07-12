@@ -266,6 +266,32 @@ def limpar_rg(rg: str) -> str:
     return re.sub(r"\s+", "", str(rg or "").lower())
 
 
+def normalizar_boletim_procurado(valor: str) -> str:
+    """Normaliza o boletim informado no cadastro de procurados.
+
+    Aceita formatos simples como: 1, 01, 001, BO-DICOR-001 ou Nº 001.
+    Retorna sempre BO-DICOR-000.
+    """
+    texto = str(valor or "").strip().upper()
+    if not texto:
+        return ""
+
+    # Remove prefixos comuns e preserva o último grupo numérico informado.
+    numeros = re.findall(r"\d+", texto)
+    if not numeros:
+        return ""
+
+    try:
+        numero = int(numeros[-1])
+    except ValueError:
+        return ""
+
+    if numero <= 0:
+        return ""
+
+    return f"BO-DICOR-{numero:03d}"
+
+
 def escape(texto: Any) -> str:
     return html.escape(str(texto or ""))
 
@@ -1616,6 +1642,8 @@ class NovoProcuradoModal(Modal, title="Cadastrar Novo Procurado"):
             )
             return
 
+        await interaction.response.defer(ephemeral=True, thinking=True)
+
         categoria = guild.get_channel(PROCURADOS_TEMP_CATEGORY_ID) if PROCURADOS_TEMP_CATEGORY_ID else None
         overwrites = {
             guild.default_role: discord.PermissionOverwrite(view_channel=False),
@@ -1654,7 +1682,25 @@ class NovoProcuradoModal(Modal, title="Cadastrar Novo Procurado"):
         )
 
         await enviar_log(f"📁 Canal provisório de procurado criado por {interaction.user.mention}: {canal.mention}")
-        await interaction.response.send_message(f"✅ Canal provisório criado: {canal.mention}", ephemeral=True)
+        await interaction.followup.send(f"✅ Canal provisório criado: {canal.mention}", ephemeral=True)
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception) -> None:
+        await enviar_log(
+            f"❌ Erro no cadastro de procurado por {getattr(interaction.user, 'mention', interaction.user)}: `{type(error).__name__}: {error}`"
+        )
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send(
+                    "❌ Não consegui abrir o cadastro de procurado. Verifique permissões do bot e veja o erro no canal de logs.",
+                    ephemeral=True,
+                )
+            else:
+                await interaction.response.send_message(
+                    "❌ Não consegui abrir o cadastro de procurado. Verifique permissões do bot e veja o erro no canal de logs.",
+                    ephemeral=True,
+                )
+        except Exception:
+            pass
 
 
 class FinalizarProcuradoView(View):
