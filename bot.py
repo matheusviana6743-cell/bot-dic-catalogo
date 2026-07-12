@@ -112,6 +112,7 @@ BOLETIM_TEMP_CATEGORY_ID = env_int("BOLETIM_TEMP_CATEGORY_ID", 0)
 
 # Atendimento automático de boletins
 BOLETIM_ATENDIMENTO_CHANNEL_ID = env_int("BOLETIM_ATENDIMENTO_CHANNEL_ID", 1525762770253910136)
+BOLETINS_ARQUIVADOS_CHANNEL_ID = env_int("BOLETINS_ARQUIVADOS_CHANNEL_ID", 1525762226269720696)
 # Rodízio do atendimento: somente Estagiário e Investigador.
 # Mesmo que a variável do Railway esteja errada ou tenha cargos da diretoria,
 # o bot filtra e mantém apenas estes dois cargos.
@@ -2781,15 +2782,44 @@ async def enviar_arquivos_dossie_destino(
     )
     embed_oficial.set_footer(text="Polícia Federal - DICOR • Dossiê gerado automaticamente")
 
-    files_to_send: List[discord.File] = []
+    itens: List[tuple[str, str]] = []
     if "pdf" in arquivos and Path(arquivos["pdf"]).exists():
-        files_to_send.append(discord.File(arquivos["pdf"], filename=nome_pdf))
+        itens.append((arquivos["pdf"], nome_pdf))
     if "docx" in arquivos and Path(arquivos["docx"]).exists():
-        files_to_send.append(discord.File(arquivos["docx"], filename=nome_docx))
+        itens.append((arquivos["docx"], nome_docx))
 
-    if not files_to_send:
+    if not itens:
         return None
-    return await destino.send(embed=embed_oficial, files=files_to_send)
+
+    # Primeiro tenta enviar tudo junto. Se o Discord retornar 413/Payload Too Large,
+    # envia um arquivo por mensagem. Isso evita perder o dossiê quando PDF+DOCX ficam grandes.
+    try:
+        arquivos_discord = [discord.File(caminho, filename=nome) for caminho, nome in itens]
+        return await destino.send(embed=embed_oficial, files=arquivos_discord)
+    except discord.HTTPException as erro:
+        await enviar_log(f"⚠️ Envio conjunto do dossiê falhou. Tentando arquivos separados: {erro}")
+
+    primeira_msg: Optional[discord.Message] = None
+    for indice, (caminho, nome) in enumerate(itens, start=1):
+        try:
+            tamanho = Path(caminho).stat().st_size
+            if tamanho > 24 * 1024 * 1024:
+                aviso = (
+                    f"⚠️ `{nome}` ficou grande demais para envio direto pelo Discord "
+                    f"({tamanho / (1024 * 1024):.1f} MB). O arquivo foi preservado no armazenamento interno do bot."
+                )
+                msg = await destino.send(embed=embed_oficial if primeira_msg is None else None, content=aviso)
+                primeira_msg = primeira_msg or msg
+                continue
+            msg = await destino.send(
+                embed=embed_oficial if primeira_msg is None else None,
+                content=f"📄 **Dossiê Operacional — arquivo {indice}/{len(itens)}**",
+                file=discord.File(caminho, filename=nome),
+            )
+            primeira_msg = primeira_msg or msg
+        except Exception as erro_individual:
+            await enviar_log(f"❌ Falha ao enviar `{nome}` individualmente: {erro_individual}")
+    return primeira_msg
 
 
 async def bloquear_mesa_para_novas_mensagens(canal: discord.TextChannel) -> None:
@@ -4240,21 +4270,66 @@ async def publicar_boletim_core(interaction: discord.Interaction) -> None:
         if not isinstance(canal_oficial, discord.TextChannel):
             raise RuntimeError("O canal oficial de boletins não foi encontrado.")
 
+        anexos_origem = await coletar_anexos_boletim(canal_temp)
         partes = dividir_texto_discord(formatar_boletim(dados, previa=False))
         mensagens_publicadas: List[discord.Message] = []
-        for parte in partes:
-            mensagens_publicadas.append(await canal_oficial.send(
-                parte,
-                allowed_mentions=discord.AllowedMentions(users=False, roles=False, everyone=False),
-            ))
+        anexos_publicados: List[Dict[str, Any]] = []
+
+        anexos_anexados_na_principal: set[int] = set()
+        arquivos_principais: List[discord.File] = []
+        tamanho_principal = 0
+        for anexo in anexos_origem:
+            if len(arquivos_principais) >= 10:
+                break
+            try:
+                tamanho = int(getattr(anexo, "size", 0) or 0)
+                if tamanho_principal + tamanho > 24 * 1024 * 1024:
+                    continue
+                arquivos_principais.append(await anexo.to_file())
+                anexos_anexados_na_principal.add(anexo.id)
+                tamanho_principal += tamanho
+            except Exception as erro:
+                await enviar_log(f"⚠️ Não consegui preparar anexo para a mensagem principal do boletim {dados.get('numero')}: {erro}")
+
+        for indice_parte, parte in enumerate(partes):
+            try:
+                if indice_parte == 0 and arquivos_principais:
+                    msg_publicada = await canal_oficial.send(
+                        parte,
+                        files=arquivos_principais,
+                        allowed_mentions=discord.AllowedMentions(users=False, roles=False, everyone=False),
+                    )
+                    for anexo_publicado in msg_publicada.attachments:
+                        anexos_publicados.append({
+                            "id": anexo_publicado.id,
+                            "nome": anexo_publicado.filename,
+                            "url": anexo_publicado.url,
+                            "mensagem_id": msg_publicada.id,
+                            "mensagem_url": msg_publicada.jump_url,
+                        })
+                else:
+                    msg_publicada = await canal_oficial.send(
+                        parte,
+                        allowed_mentions=discord.AllowedMentions(users=False, roles=False, everyone=False),
+                    )
+                mensagens_publicadas.append(msg_publicada)
+            except discord.HTTPException as erro:
+                await enviar_log(f"⚠️ Falha ao enviar boletim com anexos juntos. Tentando sem anexos: {erro}")
+                msg_publicada = await canal_oficial.send(
+                    parte,
+                    allowed_mentions=discord.AllowedMentions(users=False, roles=False, everyone=False),
+                )
+                mensagens_publicadas.append(msg_publicada)
+                anexos_anexados_na_principal.clear()
 
         mensagem_principal = mensagens_publicadas[0]
-        anexos_origem = await coletar_anexos_boletim(canal_temp)
-        anexos_publicados = await enviar_anexos_boletim(
-            canal_oficial,
-            anexos_origem,
-            str(dados.get("numero", "")),
-        )
+        anexos_restantes = [a for a in anexos_origem if a.id not in anexos_anexados_na_principal]
+        if anexos_restantes:
+            anexos_publicados.extend(await enviar_anexos_boletim(
+                canal_oficial,
+                anexos_restantes,
+                str(dados.get("numero", "")),
+            ))
 
         registro = dict(dados)
         registro.pop("preview_message_ids", None)
@@ -7630,11 +7705,93 @@ CANAIS_RELATORIOS = {
     "pericia_externa": 1490200524367200297
 }
 
-def obter_proximo_numero_relatorio(tipo_relatorio: str) -> str:
+def maior_numero_relatorio_local(tipo_relatorio: str) -> int:
+    maior = 0
+    contadores = carregar_json(RELATORIOS_CONTADOR_JSON, {})
+    if isinstance(contadores, dict):
+        try:
+            maior = max(maior, int(contadores.get(tipo_relatorio, 0) or 0))
+        except Exception:
+            pass
+
+    for item in carregar_relatorios_operacionais():
+        if str(item.get("tipo")) != str(tipo_relatorio):
+            continue
+        try:
+            maior = max(maior, int(str(item.get("numero", "0")).strip() or 0))
+        except Exception:
+            pass
+    return maior
+
+
+def extrair_numero_relatorio_tipo(texto: str, tipo_relatorio: str) -> int:
+    texto = str(texto or "")
+    texto_norm = normalizar_busca(texto) if 'normalizar_busca' in globals() else texto.lower()
+    chaves = {
+        "tocaia": ["relatorio de tocaia", "relatório de tocaia"],
+        "olb": ["relatorio de olb", "relatório de olb"],
+        "pericia_externa": ["relatorio de pericia externa", "relatório de perícia externa", "pericia externa", "perícia externa"],
+    }.get(tipo_relatorio, [tipo_relatorio])
+
+    if not any((normalizar_busca(c) if 'normalizar_busca' in globals() else c.lower()) in texto_norm for c in chaves):
+        return 0
+
+    m = re.search(r"N[º°O]?\s*[:#-]?\s*(\d{1,6})", texto, flags=re.I)
+    if not m:
+        return 0
+    try:
+        return int(m.group(1))
+    except Exception:
+        return 0
+
+
+async def maior_numero_relatorio_canal(tipo_relatorio: str, guild: Optional[discord.Guild]) -> int:
+    if guild is None:
+        return 0
+    canal_id = CANAIS_RELATORIOS.get(tipo_relatorio)
+    if not canal_id:
+        return 0
+    canal = guild.get_channel(canal_id)
+    if canal is None:
+        try:
+            canal = await bot.fetch_channel(canal_id)
+        except Exception:
+            return 0
+    if not hasattr(canal, "history"):
+        return 0
+
+    limite_env = os.getenv("RELATORIOS_NUMERO_SCAN_LIMIT", "0").strip()
+    limite = None if limite_env in {"", "0"} else int(limite_env) if limite_env.isdigit() else 1000
+    maior = 0
+    try:
+        async for msg in canal.history(limit=limite, oldest_first=False):
+            conteudo = coletar_texto_embed(msg) if 'coletar_texto_embed' in globals() else (msg.content or "")
+            maior = max(maior, extrair_numero_relatorio_tipo(conteudo, tipo_relatorio))
+    except Exception as erro:
+        await enviar_log(f"⚠️ Não consegui varrer numeração antiga de `{tipo_relatorio}`: {erro}")
+    return maior
+
+
+async def obter_proximo_numero_relatorio_async(tipo_relatorio: str, guild: Optional[discord.Guild]) -> str:
+    # Não reinicia a contagem quando o código muda: usa o contador salvo,
+    # os registros locais e também o maior número já publicado no canal oficial.
+    maior = maior_numero_relatorio_local(tipo_relatorio)
+    maior = max(maior, await maior_numero_relatorio_canal(tipo_relatorio, guild))
+    proximo = maior + 1
     contadores = carregar_json(RELATORIOS_CONTADOR_JSON, {})
     if not isinstance(contadores, dict):
         contadores = {}
-    proximo = contadores.get(tipo_relatorio, 0) + 1
+    contadores[tipo_relatorio] = proximo
+    salvar_json(RELATORIOS_CONTADOR_JSON, contadores)
+    return f"{proximo:03d}"
+
+
+def obter_proximo_numero_relatorio(tipo_relatorio: str) -> str:
+    maior = maior_numero_relatorio_local(tipo_relatorio)
+    proximo = maior + 1
+    contadores = carregar_json(RELATORIOS_CONTADOR_JSON, {})
+    if not isinstance(contadores, dict):
+        contadores = {}
     contadores[tipo_relatorio] = proximo
     salvar_json(RELATORIOS_CONTADOR_JSON, contadores)
     return f"{proximo:03d}"
@@ -7787,7 +7944,7 @@ class TocaiaModal(Modal, title="Relatório de Tocaia"):
 
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
-        num = obter_proximo_numero_relatorio("tocaia")
+        num = await obter_proximo_numero_relatorio_async("tocaia", interaction.guild)
         data_hora = agora_br()
         texto = (
             f"━" * 15 + f"\n**👀 RELATÓRIO DE TOCAIA Nº {num}**\n" + f"━" * 15 + "\n"
@@ -7808,7 +7965,7 @@ class OlbModal(Modal, title="Relatório de OLB"):
 
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
-        num = obter_proximo_numero_relatorio("olb")
+        num = await obter_proximo_numero_relatorio_async("olb", interaction.guild)
         data_hora = agora_br()
         texto = (
             f"━" * 15 + f"\n**🚔 RELATÓRIO DE OLB Nº {num}**\n" + f"━" * 15 + "\n"
@@ -7830,7 +7987,7 @@ class PericiaExternaModal(Modal, title="Perícia Externa"):
 
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
-        num = obter_proximo_numero_relatorio("pericia_externa")
+        num = await obter_proximo_numero_relatorio_async("pericia_externa", interaction.guild)
         data_hora = agora_br()
         texto = (
             f"━" * 15 + f"\n**🔬 RELATÓRIO DE PERÍCIA EXTERNA Nº {num}**\n" + f"━" * 15 + "\n"
@@ -9047,6 +9204,43 @@ async def enviar_arquivos_em_lotes(destino, caminhos: List[Path], legenda: str =
         enviados += len(lote)
     return enviados
 
+
+async def enviar_texto_com_anexos_path(destino, conteudo: str, caminhos: List[Path], legenda_restante: str) -> tuple[Optional[discord.Message], int]:
+    """Envia texto com o primeiro lote de anexos junto e o restante em lotes."""
+    limite = 24 * 1024 * 1024
+    selecionados: List[Path] = []
+    restantes: List[Path] = []
+    tamanho = 0
+
+    for caminho in caminhos:
+        try:
+            tam = caminho.stat().st_size
+            if len(selecionados) < 10 and tam <= limite and tamanho + tam <= limite:
+                selecionados.append(caminho)
+                tamanho += tam
+            else:
+                restantes.append(caminho)
+        except Exception:
+            restantes.append(caminho)
+
+    mensagem = None
+    try:
+        if selecionados:
+            arquivos = [discord.File(str(p), filename=p.name) for p in selecionados]
+            mensagem = await destino.send(content=conteudo[:1900], files=arquivos)
+        else:
+            mensagem = await destino.send(content=conteudo[:1900])
+    except discord.HTTPException as erro:
+        await enviar_log(f"⚠️ Não consegui enviar texto com anexos juntos. Enviando separado: {erro}")
+        mensagem = await destino.send(content=conteudo[:1900])
+        restantes = caminhos
+        selecionados = []
+
+    enviados = len(selecionados)
+    if restantes:
+        enviados += await enviar_arquivos_em_lotes(destino, restantes, legenda_restante)
+    return mensagem, enviados
+
 async def criar_area_atendimento_boletim(message: discord.Message) -> Optional[Dict[str, Any]]:
     if buscar_atendimento_por_mensagem(message.id):
         return None
@@ -9078,12 +9272,16 @@ async def criar_area_atendimento_boletim(message: discord.Message) -> Optional[D
     # A menção do agente NÃO vai aqui. Ela será enviada por último dentro do atendimento,
     # para ficar mais organizado e evitar parecer que existem dois tópicos/mensagens principais.
     conteudo_abertura = (
-        f"**📋 NOVO BOLETIM RECEBIDO**\n\n"
-        f"**Boletim:** Nº {numero_curto_boletim(numero)}\n"
+        "📋 **NOVO BOLETIM RECEBIDO PARA ANÁLISE**\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"**Boletim:** Nº `{numero_curto_boletim(numero)}`\n"
+        f"**Status:** 🟢 Em atendimento\n"
         f"**Responsável pelo atendimento:** {agente.mention if agente else 'Não definido'}\n"
         f"**Autor do boletim:** {message.author.mention if message.author else 'Não identificado'}\n"
         f"**Data de recebimento:** {agora_br()}\n"
         f"**Mensagem original:** {message.jump_url}\n"
+        f"**Anexos localizados:** `{len(message.attachments)}`\n\n"
+        "Toda a análise, provas e decisões deste boletim deverão permanecer neste tópico."
     )
 
     try:
@@ -9107,10 +9305,23 @@ async def criar_area_atendimento_boletim(message: discord.Message) -> Optional[D
 
         # Tudo fica dentro do mesmo tópico/thread/postagem: dados, texto, anexos, painel e, por último, a menção.
         await area.send(conteudo_abertura, allowed_mentions=discord.AllowedMentions(users=False, roles=False, everyone=False))
-        await area.send(f"**Texto completo do boletim:**\n{cortar_discord(texto_original, 1800)}")
+
+        texto_boletim_completo = (
+            "📄 **BOLETIM ORIGINAL COMPLETO**\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"{cortar_discord(texto_original, 1650)}\n\n"
+            f"📎 **Anexos do boletim:** `{len(anexos)}` arquivo(s) reenviado(s) neste atendimento."
+        )
         if anexos:
-            await enviar_arquivos_em_lotes(area, anexos, f"📎 Anexos do boletim {numero}")
-        painel_msg = await area.send("🛠️ **Mini painel de gerenciamento do boletim**", view=BoletimAtendimentoView())
+            await enviar_texto_com_anexos_path(area, texto_boletim_completo, anexos, f"📎 Anexos restantes do boletim {numero}")
+        else:
+            await area.send(texto_boletim_completo)
+
+        painel_msg = await area.send(
+            "🛠️ **Mini painel de gerenciamento**\n"
+            "Use os botões abaixo para finalizar, solicitar comparecimento ou iniciar cadastro de procurado.",
+            view=BoletimAtendimentoView(),
+        )
 
         # Última mensagem: somente aqui o agente é mencionado.
         if agente:
@@ -9315,8 +9526,13 @@ async def finalizar_boletim_atendimento(interaction: discord.Interaction, result
     except Exception as erro: await enviar_log(f"⚠️ Erro coletando mensagens do atendimento `{atendimento.get('numero')}`: {erro}")
     pasta = BOLETIM_ARQUIVOS_DIR / str(atendimento.get("numero", "boletim")).replace("/", "-") / "arquivamento"
     anexos = await arquivos_para_reenvio_de_mensagens(mensagens, pasta, str(atendimento.get("numero", "boletim")))
-    canal_arq = interaction.guild.get_channel(HISTORICO_PROCURADOS_ID) if interaction.guild else None
-    if canal_arq is None: return await interaction.followup.send("❌ Canal de arquivamento não encontrado. Nada foi apagado.", ephemeral=True)
+    canal_arq = interaction.guild.get_channel(BOLETINS_ARQUIVADOS_CHANNEL_ID) if interaction.guild else None
+    if canal_arq is None:
+        try:
+            canal_arq = await bot.fetch_channel(BOLETINS_ARQUIVADOS_CHANNEL_ID)
+        except Exception:
+            canal_arq = None
+    if canal_arq is None: return await interaction.followup.send("❌ Canal de arquivamento de boletins não encontrado. Nada foi apagado.", ephemeral=True)
     try:
         texto_msgs = []
         for msg in mensagens:
