@@ -15,6 +15,9 @@ import time
 import asyncio
 import datetime
 import unicodedata
+import zipfile
+import shutil
+import traceback
 from pathlib import Path
 from typing import Optional, Dict, Any, List
 from urllib.parse import quote
@@ -144,6 +147,12 @@ BOLETIM_RODIZIO_EXCLUIR_CARGOS_IDS = {
 CATEGORIA_MESAS_ABERTAS_ID = env_int("CATEGORIA_MESAS_ABERTAS_ID", 1490200456855552192)
 CATEGORIA_MESAS_FECHADAS_ID = env_int("CATEGORIA_MESAS_FECHADAS_ID", 1515165416815722586)
 BACKUP_CHANNEL_ID = env_int("BACKUP_CHANNEL_ID", 1515165673276440677)
+SERVER_BACKUP_CHANNEL_ID = env_int("SERVER_BACKUP_CHANNEL_ID", BACKUP_CHANNEL_ID)
+SERVER_BACKUP_HISTORY_LIMIT = env_int("SERVER_BACKUP_HISTORY_LIMIT", 0)  # 0 = varrer todo o histórico possível
+SERVER_BACKUP_INCLUDE_ATTACHMENTS = os.getenv("SERVER_BACKUP_INCLUDE_ATTACHMENTS", "1").strip().lower() in {"1", "true", "sim", "yes", "on"}
+SERVER_BACKUP_MAX_ATTACHMENT_MB = env_int("SERVER_BACKUP_MAX_ATTACHMENT_MB", 100)
+SERVER_BACKUP_PROGRESS_INTERVAL = env_float("SERVER_BACKUP_PROGRESS_INTERVAL", 5)
+SERVER_BACKUP_PUBLIC_URL = os.getenv("SERVER_BACKUP_PUBLIC_URL", "").strip()
 
 # Dossiê Operacional Automático DICOR
 # Coloque no .env/Railway para escolher o canal que receberá PDF + DOCX:
@@ -199,6 +208,7 @@ DATA_DIR = BASE_DIR / "data"
 PUBLIC_DIR = BASE_DIR / "public"
 UPLOADS_DIR = PUBLIC_DIR / "uploads"
 BACKUP_DIR = BASE_DIR / "backups"
+PUBLIC_BACKUPS_DIR = PUBLIC_DIR / "backups"
 
 CATALOGO_JSON = DATA_DIR / "procurados.json"
 CATALOGO_HTML = PUBLIC_DIR / "index.html"
@@ -221,8 +231,33 @@ ASSINATURAS_DOSSIE_DIR = DOSSIE_ASSETS_DIR / "assinaturas"
 RELATORIOS_OPERACIONAIS_JSON = DATA_DIR / "relatorios_operacionais.json"
 ADMIN_REPORTS_DIR = DATA_DIR / "relatorios_administrativos"
 
-for pasta in [DATA_DIR, PUBLIC_DIR, UPLOADS_DIR, BACKUP_DIR, DOSSIES_DIR, DOSSIE_ASSETS_DIR, ASSINATURAS_DOSSIE_DIR, ADMIN_REPORTS_DIR, globals().get("BOLETIM_ARQUIVOS_DIR", DATA_DIR / "boletins_arquivos")]:
-    pasta.mkdir(exist_ok=True)
+# Backup completo e proteção contra exclusão de mensagens
+BACKUP_COMPLETO_JSON = DATA_DIR / "backups_completos.json"
+BACKUP_COMPLETO_TEMP_DIR = BACKUP_DIR / "backup_servidor_temp"
+MENSAGENS_PROTEGIDAS_JSON = DATA_DIR / "mensagens_protegidas.json"
+MENSAGENS_PROTEGIDAS_DIR = DATA_DIR / "mensagens_protegidas_arquivos"
+
+# Proteção fixa de mensagens
+# Canal protegido: ninguém deve apagar mensagens nele, exceto o cargo autorizado abaixo.
+# Observação: o Discord não permite impedir self-delete 100%; por isso o bot também restaura mensagens apagadas no canal protegido.
+PROTECAO_MENSAGENS_ATIVA = os.getenv("PROTECAO_MENSAGENS_ATIVA", "1").strip().lower() in {"1", "true", "sim", "yes", "on"}
+PROTECAO_APLICAR_PERMISSOES_AUTO = os.getenv("PROTECAO_APLICAR_PERMISSOES_AUTO", "1").strip().lower() in {"1", "true", "sim", "yes", "on"}
+PROTECAO_RESTAURAR_MENSAGENS = os.getenv("PROTECAO_RESTAURAR_MENSAGENS", "1").strip().lower() in {"1", "true", "sim", "yes", "on"}
+PROTECAO_CANAL_BLOQUEADO_ID = env_int("PROTECAO_CANAL_BLOQUEADO_ID", 1520671542705651862)
+PROTECAO_CARGO_PERMITIDO_APAGAR_ID = env_int("PROTECAO_CARGO_PERMITIDO_APAGAR_ID", 1492897938807197716)
+# Por segurança, ignora a variável antiga PROTECAO_CARGOS_AUTORIZADOS_IDS.
+# Assim somente o cargo abaixo consegue apagar no canal protegido.
+PROTECAO_CARGOS_AUTORIZADOS_IDS = {PROTECAO_CARGO_PERMITIDO_APAGAR_ID} if PROTECAO_CARGO_PERMITIDO_APAGAR_ID else set()
+# Mantido apenas para compatibilidade com versões antigas; agora a proteção é por canal, não por cargo restrito.
+PROTECAO_CARGOS_RESTRITOS_IDS = {
+    int(x) for x in os.getenv(
+        "PROTECAO_CARGOS_RESTRITOS_IDS",
+        "1490200391239864352,1490200390426165290",
+    ).replace(";", ",").split(",") if x.strip().isdigit()
+}
+
+for pasta in [DATA_DIR, PUBLIC_DIR, UPLOADS_DIR, BACKUP_DIR, PUBLIC_BACKUPS_DIR, DOSSIES_DIR, DOSSIE_ASSETS_DIR, ASSINATURAS_DOSSIE_DIR, ADMIN_REPORTS_DIR, globals().get("BOLETIM_ARQUIVOS_DIR", DATA_DIR / "boletins_arquivos"), globals().get("BACKUP_COMPLETO_TEMP_DIR", BACKUP_DIR / "backup_servidor_temp"), globals().get("MENSAGENS_PROTEGIDAS_DIR", DATA_DIR / "mensagens_protegidas_arquivos")]:
+    pasta.mkdir(exist_ok=True, parents=True)
 
 # =====================================================
 # BOT
@@ -1347,12 +1382,59 @@ async def baixar_dossie_http(request: web.Request) -> web.StreamResponse:
         await enviar_log(f"❌ Erro ao servir download de dossiê: {erro}")
         return web.Response(status=500, text="Falha ao preparar download.")
 
+
+def backup_download_url(caminho: Any, nome_download: Optional[str] = None) -> str:
+    """Monta link público para baixar backups completos sem anexar arquivos gigantes no Discord."""
+    try:
+        caminho_path = Path(str(caminho)).resolve()
+        base_dir = PUBLIC_BACKUPS_DIR.resolve()
+        if base_dir not in caminho_path.parents and caminho_path != base_dir:
+            return ""
+        rel = caminho_path.relative_to(base_dir)
+        partes = [quote(parte) for parte in rel.parts]
+        url_base = (SERVER_BACKUP_PUBLIC_URL or DOSSIE_PUBLIC_URL or CATALOG_PUBLIC_URL or "").strip().rstrip("/")
+        if not url_base:
+            return ""
+        if not re.match(r"^https?://", url_base, flags=re.I):
+            url_base = "https://" + url_base
+        url = f"{url_base}/backups/{'/'.join(partes)}?download=1"
+        if nome_download:
+            url += f"&nome={quote(str(nome_download))}"
+        return url
+    except Exception:
+        return ""
+
+
+async def baixar_backup_http(request: web.Request) -> web.StreamResponse:
+    """Endpoint protegido para baixar ZIPs de backup completos."""
+    rel = str(request.match_info.get("caminho", "") or "").strip().replace("\\", "/")
+    if not rel or ".." in rel.split("/"):
+        return web.Response(status=404, text="Backup não encontrado.")
+
+    try:
+        caminho = (PUBLIC_BACKUPS_DIR / rel).resolve()
+        base_dir = PUBLIC_BACKUPS_DIR.resolve()
+        if base_dir not in caminho.parents or not caminho.exists() or not caminho.is_file():
+            return web.Response(status=404, text="Backup não encontrado.")
+
+        nome = request.query.get("nome") or caminho.name
+        nome_seguro = re.sub(r"[^A-Za-z0-9_.\-() ]+", "_", str(nome))[:180] or caminho.name
+        headers = {
+            "Content-Disposition": f'attachment; filename="{nome_seguro}"',
+            "X-Content-Type-Options": "nosniff",
+        }
+        return web.FileResponse(path=str(caminho), headers=headers)
+    except Exception as erro:
+        await enviar_log(f"❌ Erro ao servir download de backup: {erro}")
+        return web.Response(status=500, text="Falha ao preparar backup.")
+
 async def start_web_server():
     gerar_catalogo_html()
     app = web.Application()
     app.router.add_get("/", pagina_inicial)
     app.router.add_get("/index.html", pagina_inicial)
     app.router.add_get("/dossies/{caminho:.+}", baixar_dossie_http)
+    app.router.add_get("/backups/{caminho:.+}", baixar_backup_http)
     app.router.add_post(
         "/api/catalogo/apagar",
         api_apagar_procurado,
@@ -9754,6 +9836,718 @@ async def persistencia_boletim_atendimento_views():
         await enviar_log("✅ Views persistentes do atendimento de boletins carregadas.")
     except Exception as erro:
         await enviar_log(f"⚠️ Falha ao carregar views persistentes de boletins: {erro}")
+
+
+
+# =====================================================
+# BACKUP COMPLETO DO SERVIDOR + PROTEÇÃO DE MENSAGENS
+# =====================================================
+
+backup_servidor_em_execucao = False
+mensagens_restauradas_em_execucao: set[int] = set()
+permissoes_protecao_aplicadas = False
+
+
+def _dt_iso(valor) -> str:
+    try:
+        if valor is None:
+            return ""
+        return valor.isoformat()
+    except Exception:
+        return str(valor or "")
+
+
+def _safe_filename(nome: str, limite: int = 120) -> str:
+    nome = unicodedata.normalize("NFKD", str(nome or "arquivo")).encode("ascii", "ignore").decode("ascii")
+    nome = re.sub(r"[^A-Za-z0-9_.\-() ]+", "_", nome).strip("._ ")
+    return (nome[:limite] or "arquivo")
+
+
+def _canal_nome_backup(canal) -> str:
+    try:
+        return f"{getattr(canal, 'name', 'canal')}-{getattr(canal, 'id', 0)}"
+    except Exception:
+        return "canal"
+
+
+def _member_tem_cargo(member: discord.Member, cargos: set[int]) -> bool:
+    try:
+        return bool({r.id for r in member.roles}.intersection(cargos))
+    except Exception:
+        return False
+
+
+def canal_eh_protegido(canal_ou_id) -> bool:
+    try:
+        canal_id = int(getattr(canal_ou_id, "id", canal_ou_id) or 0)
+        return PROTECAO_MENSAGENS_ATIVA and canal_id == int(PROTECAO_CANAL_BLOQUEADO_ID or 0)
+    except Exception:
+        return False
+
+
+def usuario_pode_apagar_mensagens(member: Optional[discord.Member]) -> bool:
+    """Neste canal protegido, somente o cargo configurado pode apagar mensagens."""
+    if not isinstance(member, discord.Member):
+        return False
+    try:
+        cargos_usuario = {r.id for r in member.roles}
+        return bool(cargos_usuario.intersection(PROTECAO_CARGOS_AUTORIZADOS_IDS))
+    except Exception:
+        return False
+
+
+def membro_restrito_para_apagar(member: Optional[discord.Member], canal_ou_id=None) -> bool:
+    """Todos os membros sem o cargo permitido são restritos somente no canal protegido."""
+    if not isinstance(member, discord.Member):
+        return False
+    if not canal_eh_protegido(canal_ou_id):
+        return False
+    return not usuario_pode_apagar_mensagens(member)
+
+def carregar_mensagens_protegidas() -> Dict[str, Any]:
+    dados = carregar_json(MENSAGENS_PROTEGIDAS_JSON, {}) if 'MENSAGENS_PROTEGIDAS_JSON' in globals() else {}
+    return dados if isinstance(dados, dict) else {}
+
+
+def salvar_mensagens_protegidas(dados: Dict[str, Any]) -> None:
+    if 'MENSAGENS_PROTEGIDAS_JSON' in globals():
+        salvar_json(MENSAGENS_PROTEGIDAS_JSON, dados)
+
+
+def carregar_backups_completos() -> List[Dict[str, Any]]:
+    dados = carregar_json(BACKUP_COMPLETO_JSON, []) if 'BACKUP_COMPLETO_JSON' in globals() else []
+    return dados if isinstance(dados, list) else []
+
+
+def salvar_backups_completos(dados: List[Dict[str, Any]]) -> None:
+    if 'BACKUP_COMPLETO_JSON' in globals():
+        salvar_json(BACKUP_COMPLETO_JSON, dados[-100:])
+
+
+async def _baixar_attachment_para_caminho(attachment: discord.Attachment, caminho: Path) -> bool:
+    try:
+        caminho.parent.mkdir(parents=True, exist_ok=True)
+        await attachment.save(str(caminho), use_cached=True)
+        return True
+    except Exception:
+        try:
+            timeout = ClientTimeout(total=45)
+            async with ClientSession(timeout=timeout) as session:
+                async with session.get(attachment.url) as resp:
+                    if resp.status != 200:
+                        return False
+                    with open(caminho, "wb") as f:
+                        async for chunk in resp.content.iter_chunked(1024 * 64):
+                            f.write(chunk)
+            return True
+        except Exception:
+            return False
+
+
+def _message_to_dict(message: discord.Message, attachment_paths: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+    try:
+        embeds = []
+        for embed in message.embeds:
+            embeds.append({
+                "title": getattr(embed, "title", None),
+                "description": getattr(embed, "description", None),
+                "url": getattr(embed, "url", None),
+                "fields": [{"name": f.name, "value": f.value, "inline": f.inline} for f in getattr(embed, "fields", [])],
+            })
+    except Exception:
+        embeds = []
+
+    try:
+        reactions = [{"emoji": str(r.emoji), "count": r.count} for r in message.reactions]
+    except Exception:
+        reactions = []
+
+    return {
+        "id": message.id,
+        "channel_id": getattr(message.channel, "id", 0),
+        "channel_name": getattr(message.channel, "name", ""),
+        "author_id": getattr(message.author, "id", 0),
+        "author_name": str(message.author),
+        "author_display_name": getattr(message.author, "display_name", str(message.author)),
+        "author_bot": bool(getattr(message.author, "bot", False)),
+        "content": message.content or "",
+        "clean_content": getattr(message, "clean_content", "") or "",
+        "created_at": _dt_iso(message.created_at),
+        "edited_at": _dt_iso(message.edited_at),
+        "pinned": bool(getattr(message, "pinned", False)),
+        "jump_url": getattr(message, "jump_url", ""),
+        "embeds": embeds,
+        "reactions": reactions,
+        "attachments": [
+            {
+                "id": a.id,
+                "filename": a.filename,
+                "url": a.url,
+                "proxy_url": a.proxy_url,
+                "content_type": a.content_type,
+                "size": a.size,
+            }
+            for a in message.attachments
+        ],
+        "arquivos_salvos": attachment_paths or [],
+    }
+
+
+async def salvar_mensagem_protegida(message: discord.Message) -> None:
+    """Guarda mensagens de Estagiário/Investigador para restaurar se tentarem apagar."""
+    if not PROTECAO_MENSAGENS_ATIVA or not canal_eh_protegido(message.channel):
+        return
+    if not message.guild or getattr(message.author, "bot", False):
+        return
+    member = message.author if isinstance(message.author, discord.Member) else message.guild.get_member(message.author.id)
+    if not membro_restrito_para_apagar(member, message.channel):
+        return
+    if not (message.content or message.attachments or message.embeds):
+        return
+
+    salvos: List[Dict[str, Any]] = []
+    for idx, anexo in enumerate(message.attachments):
+        try:
+            nome = f"{message.id}-{idx}-{_safe_filename(anexo.filename)}"
+            caminho = MENSAGENS_PROTEGIDAS_DIR / str(message.channel.id) / nome
+            ok = await _baixar_attachment_para_caminho(anexo, caminho)
+            salvos.append({
+                "filename": anexo.filename,
+                "local_path": str(caminho) if ok else "",
+                "size": anexo.size,
+                "content_type": anexo.content_type,
+                "url": anexo.url,
+                "baixado": ok,
+            })
+        except Exception as erro:
+            await enviar_log(f"⚠️ Falha ao salvar anexo de mensagem protegida `{message.id}`: `{erro}`")
+
+    dados = carregar_mensagens_protegidas()
+    dados[str(message.id)] = _message_to_dict(message, salvos)
+    dados[str(message.id)]["guild_id"] = message.guild.id if message.guild else 0
+    dados[str(message.id)]["roles_autor"] = [r.id for r in getattr(member, "roles", [])]
+    dados[str(message.id)]["protegida_em"] = agora_br()
+    salvar_mensagens_protegidas(dados)
+
+
+async def identificar_executor_delete(guild: discord.Guild, channel_id: int, author_id: int) -> Optional[discord.Member]:
+    """Tenta identificar quem apagou por audit log. Self-delete geralmente não aparece."""
+    try:
+        await asyncio.sleep(1.2)
+        async for entry in guild.audit_logs(limit=8, action=discord.AuditLogAction.message_delete):
+            try:
+                extra = getattr(entry, "extra", None)
+                alvo = getattr(entry, "target", None)
+                canal_ok = getattr(getattr(extra, "channel", None), "id", None) == channel_id
+                alvo_ok = getattr(alvo, "id", None) == author_id
+                tempo_ok = (datetime.datetime.now(datetime.timezone.utc) - entry.created_at).total_seconds() < 20
+                if canal_ok and alvo_ok and tempo_ok:
+                    return entry.user if isinstance(entry.user, discord.Member) else guild.get_member(entry.user.id)
+            except Exception:
+                continue
+    except Exception:
+        return None
+    return None
+
+
+async def restaurar_mensagem_protegida(message_id: int, guild: Optional[discord.Guild], channel, motivo: str = "exclusão detectada") -> None:
+    if not PROTECAO_RESTAURAR_MENSAGENS:
+        return
+    if message_id in mensagens_restauradas_em_execucao:
+        return
+    mensagens_restauradas_em_execucao.add(message_id)
+    try:
+        dados = carregar_mensagens_protegidas()
+        registro = dados.get(str(message_id))
+        if not registro:
+            return
+        if not canal_eh_protegido(int(registro.get("channel_id", 0) or 0)):
+            return
+        if guild is None:
+            guild = bot.get_guild(int(registro.get("guild_id", 0) or 0))
+        if channel is None:
+            try:
+                channel = bot.get_channel(int(registro.get("channel_id", 0))) or await bot.fetch_channel(int(registro.get("channel_id", 0)))
+            except Exception:
+                channel = None
+        if channel is None or not hasattr(channel, "send"):
+            return
+
+        author_id = int(registro.get("author_id", 0) or 0)
+        executor = await identificar_executor_delete(guild, int(registro.get("channel_id", 0) or 0), author_id) if guild else None
+        autor_original = guild.get_member(author_id) if guild else None
+        # Se o executor identificado possui o cargo autorizado, a exclusão é permitida.
+        # Se não houver audit log e o próprio autor possui o cargo autorizado, também permite self-delete.
+        if (executor and usuario_pode_apagar_mensagens(executor)) or (executor is None and usuario_pode_apagar_mensagens(autor_original)):
+            await enviar_log(
+                "🗑️ **Mensagem do canal protegido apagada por usuário autorizado**\n"
+                f"Mensagem: `{message_id}`\n"
+                f"Autor original: <@{author_id}> (`{author_id}`)\n"
+                f"Apagada por: {getattr(executor, 'mention', 'autor autorizado/self-delete')} (`{getattr(executor, 'id', author_id)}`)\n"
+                f"Canal: {getattr(channel, 'mention', channel)}\n"
+                f"Data: {agora_br()}"
+            )
+            return
+
+        conteudo = str(registro.get("content") or "").strip()
+        header = (
+            "🛡️ **Mensagem protegida restaurada — DICOR**\n"
+            f"> **Autor original:** <@{author_id}> (`{author_id}`)\n"
+            f"> **Data original:** `{registro.get('created_at', 'Não informado')}`\n"
+            f"> **Motivo:** `{motivo}`\n"
+        )
+        if executor:
+            header += f"> **Tentativa de exclusão por:** {executor.mention} (`{executor.id}`)\n"
+        else:
+            header += "> **Tentativa de exclusão:** autor da mensagem ou usuário não identificado\n"
+        corpo = conteudo if conteudo else "*Mensagem sem texto. Conteúdo preservado pelos anexos/metadados.*"
+        texto_final = (header + "\n" + corpo)[:1900]
+
+        arquivos: List[discord.File] = []
+        for item in registro.get("arquivos_salvos", [])[:8]:
+            caminho = Path(str(item.get("local_path") or ""))
+            if caminho.exists() and caminho.is_file():
+                try:
+                    arquivos.append(discord.File(str(caminho), filename=_safe_filename(item.get("filename") or caminho.name)))
+                except Exception:
+                    pass
+
+        if arquivos:
+            await channel.send(texto_final, files=arquivos, allowed_mentions=discord.AllowedMentions.none())
+        else:
+            await channel.send(texto_final, allowed_mentions=discord.AllowedMentions.none())
+
+        await enviar_log(
+            "🛡️ **Mensagem restaurada automaticamente**\n"
+            f"Mensagem original: `{message_id}`\n"
+            f"Autor original: <@{author_id}> (`{author_id}`)\n"
+            f"Canal: {getattr(channel, 'mention', channel)} (`{getattr(channel, 'id', 0)}`)\n"
+            f"Executor identificado: {getattr(executor, 'mention', 'Não identificado')}\n"
+            f"Anexos restaurados: `{len(arquivos)}`\n"
+            f"Data: {agora_br()}"
+        )
+    except Exception as erro:
+        await enviar_log(f"❌ Erro ao restaurar mensagem protegida `{message_id}`: `{erro}`\n```{traceback.format_exc()[-1500:]}```")
+    finally:
+        mensagens_restauradas_em_execucao.discard(message_id)
+
+
+async def aplicar_protecao_permissoes_guild(guild: discord.Guild, progress_callback=None) -> Dict[str, int]:
+    """Aplica proteção somente no canal configurado.
+
+    Nesse canal, todos os cargos ficam sem `Gerenciar mensagens`, exceto o cargo autorizado.
+    O Discord ainda permite self-delete; por isso o bot restaura mensagens apagadas por quem não possui o cargo permitido.
+    """
+    stats = {"canais_analisados": 0, "canais_atualizados": 0, "falhas": 0}
+    if not guild.me or not guild.me.guild_permissions.manage_channels:
+        await enviar_log("⚠️ Não consegui aplicar proteção: o bot precisa da permissão `Gerenciar Canais`.")
+        return stats
+
+    canal = guild.get_channel(int(PROTECAO_CANAL_BLOQUEADO_ID or 0))
+    if canal is None:
+        try:
+            canal = await bot.fetch_channel(int(PROTECAO_CANAL_BLOQUEADO_ID or 0))
+        except Exception:
+            canal = None
+    if canal is None:
+        await enviar_log(f"⚠️ Canal protegido `{PROTECAO_CANAL_BLOQUEADO_ID}` não encontrado.")
+        stats["falhas"] += 1
+        return stats
+
+    stats["canais_analisados"] = 1
+    alterou = False
+    cargo_permitido = guild.get_role(int(PROTECAO_CARGO_PERMITIDO_APAGAR_ID or 0))
+
+    # Remove Gerenciar Mensagens de todos os cargos no canal protegido.
+    # Depois libera explicitamente somente o cargo autorizado.
+    for role in guild.roles:
+        try:
+            if role.is_default():
+                continue
+            overwrite = canal.overwrites_for(role)
+            if cargo_permitido and role.id == cargo_permitido.id:
+                if overwrite.manage_messages is not True:
+                    overwrite.manage_messages = True
+                    await canal.set_permissions(role, overwrite=overwrite, reason="Proteção DICOR: somente cargo autorizado pode apagar neste canal")
+                    alterou = True
+            else:
+                if overwrite.manage_messages is not False:
+                    overwrite.manage_messages = False
+                    await canal.set_permissions(role, overwrite=overwrite, reason="Proteção DICOR: ninguém pode apagar neste canal")
+                    alterou = True
+            await asyncio.sleep(0.15)
+        except Exception:
+            stats["falhas"] += 1
+
+    # Garante que o próprio bot consiga ver/enviar mensagens no canal.
+    try:
+        if guild.me:
+            ow_bot = canal.overwrites_for(guild.me)
+            ow_bot.view_channel = True
+            ow_bot.send_messages = True
+            ow_bot.read_message_history = True
+            await canal.set_permissions(guild.me, overwrite=ow_bot, reason="Proteção DICOR: bot precisa monitorar/restaurar mensagens")
+    except Exception:
+        stats["falhas"] += 1
+
+    if alterou:
+        stats["canais_atualizados"] = 1
+    return stats
+
+@bot.listen("on_message")
+async def protecao_cache_mensagens_restritas(message: discord.Message):
+    try:
+        await salvar_mensagem_protegida(message)
+    except Exception as erro:
+        await enviar_log(f"⚠️ Erro ao salvar mensagem protegida: {erro}")
+
+
+@bot.listen("on_message_delete")
+async def protecao_restaura_mensagem_deletada(message: discord.Message):
+    try:
+        if getattr(message.author, "bot", False):
+            return
+        await restaurar_mensagem_protegida(message.id, message.guild, message.channel, "mensagem apagada")
+    except Exception as erro:
+        await enviar_log(f"⚠️ Erro em on_message_delete/proteção: {erro}")
+
+
+@bot.listen("on_raw_message_delete")
+async def protecao_restaura_mensagem_deletada_raw(payload: discord.RawMessageDeleteEvent):
+    try:
+        if payload.message_id in mensagens_restauradas_em_execucao:
+            return
+        dados = carregar_mensagens_protegidas()
+        if str(payload.message_id) not in dados:
+            return
+        guild = bot.get_guild(payload.guild_id) if payload.guild_id else None
+        channel = bot.get_channel(payload.channel_id)
+        if channel is None:
+            try:
+                channel = await bot.fetch_channel(payload.channel_id)
+            except Exception:
+                channel = None
+        await restaurar_mensagem_protegida(payload.message_id, guild, channel, "mensagem apagada")
+    except Exception as erro:
+        await enviar_log(f"⚠️ Erro em on_raw_message_delete/proteção: {erro}")
+
+
+@bot.listen("on_raw_bulk_message_delete")
+async def protecao_restaura_mensagem_bulk(payload: discord.RawBulkMessageDeleteEvent):
+    try:
+        dados = carregar_mensagens_protegidas()
+        guild = bot.get_guild(payload.guild_id) if payload.guild_id else None
+        channel = bot.get_channel(payload.channel_id)
+        if channel is None:
+            try:
+                channel = await bot.fetch_channel(payload.channel_id)
+            except Exception:
+                channel = None
+        for mid in list(payload.message_ids):
+            if str(mid) in dados:
+                await restaurar_mensagem_protegida(int(mid), guild, channel, "exclusão em massa detectada")
+                await asyncio.sleep(0.5)
+    except Exception as erro:
+        await enviar_log(f"⚠️ Erro em bulk delete/proteção: {erro}")
+
+
+@bot.listen("on_ready")
+async def aplicar_protecao_mensagens_automatico():
+    global permissoes_protecao_aplicadas
+    if permissoes_protecao_aplicadas or not PROTECAO_MENSAGENS_ATIVA or not PROTECAO_APLICAR_PERMISSOES_AUTO:
+        return
+    permissoes_protecao_aplicadas = True
+    try:
+        guild = bot.get_guild(GUILD_ID) if GUILD_ID else (bot.guilds[0] if bot.guilds else None)
+        if not guild:
+            return
+        stats = await aplicar_protecao_permissoes_guild(guild)
+        await enviar_log(
+            "🛡️ **Proteção fixa de canal aplicada**\n"
+            f"Canal protegido: <#{PROTECAO_CANAL_BLOQUEADO_ID}> (`{PROTECAO_CANAL_BLOQUEADO_ID}`)\n"
+            f"Cargo autorizado a apagar: <@&{PROTECAO_CARGO_PERMITIDO_APAGAR_ID}> (`{PROTECAO_CARGO_PERMITIDO_APAGAR_ID}`)\n"
+            f"Canais analisados: `{stats['canais_analisados']}`\n"
+            f"Canais atualizados: `{stats['canais_atualizados']}`\n"
+            f"Falhas: `{stats['falhas']}`\n"
+            "Observação: o Discord não bloqueia self-delete; se alguém sem o cargo autorizado apagar a própria mensagem no canal protegido, o bot restaura automaticamente."
+        )
+    except Exception as erro:
+        await enviar_log(f"❌ Falha ao aplicar proteção automática de mensagens: {erro}")
+
+
+async def coletar_threads_arquivadas_seguro(canal) -> List[Any]:
+    saida = []
+    try:
+        async for thread in canal.archived_threads(limit=None):
+            saida.append(thread)
+    except Exception:
+        pass
+    try:
+        async for thread in canal.archived_threads(private=False, joined=False, limit=None):
+            if thread not in saida:
+                saida.append(thread)
+    except Exception:
+        pass
+    return saida
+
+
+async def listar_canais_backup(guild: discord.Guild) -> List[Any]:
+    canais = []
+    vistos = set()
+    for canal in list(guild.text_channels) + list(getattr(guild, "threads", [])):
+        if getattr(canal, "id", None) not in vistos:
+            canais.append(canal); vistos.add(canal.id)
+    for canal in list(guild.text_channels) + list(getattr(guild, "forums", [])):
+        try:
+            for thread in await coletar_threads_arquivadas_seguro(canal):
+                if getattr(thread, "id", None) not in vistos:
+                    canais.append(thread); vistos.add(thread.id)
+        except Exception:
+            pass
+    return canais
+
+
+async def criar_backup_completo_servidor(interaction: discord.Interaction) -> None:
+    global backup_servidor_em_execucao
+    guild = interaction.guild
+    if guild is None:
+        await responder_interacao(interaction, "❌ Use dentro de um servidor.", ephemeral=True)
+        return
+    if not isinstance(interaction.user, discord.Member) or not usuario_pode_fechar_mesa(interaction.user):
+        await responder_interacao(interaction, "❌ Apenas Inspetor ou superior pode gerar backup completo do servidor.", ephemeral=True)
+        await enviar_log(f"🚫 Tentativa sem permissão de backup completo por {interaction.user.mention} (`{interaction.user.id}`)")
+        return
+    if backup_servidor_em_execucao:
+        await responder_interacao(interaction, "⚠️ Já existe um backup completo em andamento. Aguarde finalizar.", ephemeral=True)
+        return
+
+    backup_servidor_em_execucao = True
+    inicio = time.monotonic()
+    try:
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=True, thinking=True)
+        await interaction.followup.send("📦 **Backup completo iniciado.** Vou varrer canais, tópicos, mensagens e anexos. Isso pode demorar.", ephemeral=True)
+
+        stamp = data_caso()
+        nome_base = f"backup-completo-servidor-{guild.id}-{stamp}"
+        temp_dir = BACKUP_COMPLETO_TEMP_DIR / nome_base
+        if temp_dir.exists():
+            shutil.rmtree(temp_dir, ignore_errors=True)
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        anexos_dir = temp_dir / "anexos"
+        anexos_dir.mkdir(parents=True, exist_ok=True)
+
+        manifest: Dict[str, Any] = {
+            "tipo": "BACKUP_COMPLETO_SERVIDOR_DICOR",
+            "gerado_em": agora_br(),
+            "gerado_por": {"id": interaction.user.id, "nome": str(interaction.user)},
+            "servidor": {"id": guild.id, "nome": guild.name, "owner_id": guild.owner_id, "created_at": _dt_iso(guild.created_at)},
+            "estatisticas": {"canais": 0, "mensagens": 0, "anexos": 0, "anexos_baixados": 0, "falhas": 0},
+        }
+
+        roles = []
+        for role in guild.roles:
+            roles.append({
+                "id": role.id, "name": role.name, "position": role.position,
+                "color": str(role.color), "permissions": role.permissions.value,
+                "mentionable": role.mentionable, "hoist": role.hoist,
+            })
+        canais_meta = []
+        for canal in guild.channels:
+            canais_meta.append({
+                "id": canal.id,
+                "name": getattr(canal, "name", ""),
+                "type": str(getattr(canal, "type", "")),
+                "category_id": getattr(getattr(canal, "category", None), "id", None),
+                "position": getattr(canal, "position", None),
+            })
+        membros = []
+        for member in guild.members:
+            membros.append({
+                "id": member.id,
+                "name": str(member),
+                "display_name": member.display_name,
+                "bot": member.bot,
+                "roles": [r.id for r in member.roles],
+                "joined_at": _dt_iso(member.joined_at),
+            })
+
+        salvar_json(temp_dir / "roles.json", roles)
+        salvar_json(temp_dir / "canais.json", canais_meta)
+        salvar_json(temp_dir / "membros.json", membros)
+
+        canais = await listar_canais_backup(guild)
+        manifest["estatisticas"]["canais"] = len(canais)
+        ultimo_progresso = time.monotonic()
+        mensagens_por_canal_dir = temp_dir / "mensagens"
+        mensagens_por_canal_dir.mkdir(exist_ok=True)
+
+        await enviar_log(
+            "📦 **Backup completo iniciado**\n"
+            f"Servidor: `{guild.name}` (`{guild.id}`)\n"
+            f"Solicitado por: {interaction.user.mention} (`{interaction.user.id}`)\n"
+            f"Canais/tópicos para varrer: `{len(canais)}`\n"
+            f"Anexos: `{'sim' if SERVER_BACKUP_INCLUDE_ATTACHMENTS else 'não'}`\n"
+            f"Limite histórico: `{SERVER_BACKUP_HISTORY_LIMIT or 'todo possível'}`"
+        )
+
+        for idx, canal in enumerate(canais, start=1):
+            mensagens = []
+            try:
+                limite = None if SERVER_BACKUP_HISTORY_LIMIT == 0 else SERVER_BACKUP_HISTORY_LIMIT
+                async for msg in canal.history(limit=limite, oldest_first=True):
+                    salvos = []
+                    for aidx, anexo in enumerate(msg.attachments):
+                        manifest["estatisticas"]["anexos"] += 1
+                        item = {
+                            "filename": anexo.filename,
+                            "size": anexo.size,
+                            "content_type": anexo.content_type,
+                            "url": anexo.url,
+                            "baixado": False,
+                            "local_path": "",
+                        }
+                        try:
+                            tamanho_mb = (anexo.size or 0) / (1024 * 1024)
+                            if SERVER_BACKUP_INCLUDE_ATTACHMENTS and tamanho_mb <= SERVER_BACKUP_MAX_ATTACHMENT_MB:
+                                nome = f"{msg.id}-{aidx}-{_safe_filename(anexo.filename)}"
+                                caminho = anexos_dir / str(getattr(canal, "id", 0)) / nome
+                                ok = await _baixar_attachment_para_caminho(anexo, caminho)
+                                item["baixado"] = ok
+                                if ok:
+                                    item["local_path"] = str(caminho.relative_to(temp_dir))
+                                    manifest["estatisticas"]["anexos_baixados"] += 1
+                        except Exception as erro:
+                            item["erro"] = str(erro)
+                            manifest["estatisticas"]["falhas"] += 1
+                        salvos.append(item)
+                    mensagens.append(_message_to_dict(msg, salvos))
+                    manifest["estatisticas"]["mensagens"] += 1
+
+                arquivo_canal = mensagens_por_canal_dir / f"{_safe_filename(_canal_nome_backup(canal))}.json"
+                salvar_json(arquivo_canal, mensagens)
+            except Exception as erro:
+                manifest["estatisticas"]["falhas"] += 1
+                await enviar_log(f"⚠️ Falha ao varrer canal/tópico `{getattr(canal, 'name', canal)}` (`{getattr(canal, 'id', 0)}`): `{erro}`")
+
+            if time.monotonic() - ultimo_progresso >= SERVER_BACKUP_PROGRESS_INTERVAL:
+                ultimo_progresso = time.monotonic()
+                try:
+                    await interaction.followup.send(
+                        f"📦 Backup em andamento: `{idx}/{len(canais)}` canais • `{manifest['estatisticas']['mensagens']}` mensagens • `{manifest['estatisticas']['anexos_baixados']}` anexos baixados.",
+                        ephemeral=True,
+                    )
+                except Exception:
+                    pass
+
+        # Inclui bases internas atuais do bot.
+        internos = temp_dir / "dados_do_bot"
+        internos.mkdir(exist_ok=True)
+        for caminho in [
+            CATALOGO_JSON, MESAS_JSON, BOLETINS_JSON, BOLETINS_CONTADOR_JSON, ORGANIZACOES_JSON,
+            HISTORICO_ORGANIZACOES_JSON, DOSSIES_JSON, RELATORIOS_OPERACIONAIS_JSON,
+            BOLETIM_ATENDIMENTOS_JSON, BOLETIM_RODIZIO_JSON, ASSINATURAS_DOSSIE_JSON,
+            MENSAGENS_PROTEGIDAS_JSON,
+        ]:
+            try:
+                if caminho.exists():
+                    shutil.copy2(caminho, internos / caminho.name)
+            except Exception:
+                manifest["estatisticas"]["falhas"] += 1
+
+        manifest["duracao_segundos"] = round(time.monotonic() - inicio, 2)
+        salvar_json(temp_dir / "manifesto.json", manifest)
+
+        zip_path = PUBLIC_BACKUPS_DIR / f"{nome_base}.zip"
+        with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
+            for caminho in temp_dir.rglob("*"):
+                if caminho.is_file():
+                    zf.write(caminho, caminho.relative_to(temp_dir))
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+        tamanho_mb = zip_path.stat().st_size / (1024 * 1024)
+        url = backup_download_url(zip_path, zip_path.name)
+        historico = carregar_backups_completos()
+        historico.append({
+            "data": agora_br(), "arquivo": str(zip_path), "url": url,
+            "tamanho_mb": round(tamanho_mb, 2), "gerado_por_id": interaction.user.id,
+            "gerado_por_nome": str(interaction.user), "estatisticas": manifest["estatisticas"],
+        })
+        salvar_backups_completos(historico)
+
+        embed = discord.Embed(
+            title="📦 Backup Completo do Servidor — DICOR",
+            description="Backup concluído com canais, tópicos, mensagens, anexos e bancos internos do bot.",
+            color=discord.Color.dark_blue(),
+        )
+        embed.add_field(name="Mensagens", value=f"`{manifest['estatisticas']['mensagens']}`", inline=True)
+        embed.add_field(name="Anexos baixados", value=f"`{manifest['estatisticas']['anexos_baixados']}/{manifest['estatisticas']['anexos']}`", inline=True)
+        embed.add_field(name="Tamanho", value=f"`{tamanho_mb:.1f} MB`", inline=True)
+        embed.add_field(name="Duração", value=f"`{manifest['duracao_segundos']}s`", inline=True)
+        embed.add_field(name="Falhas", value=f"`{manifest['estatisticas']['falhas']}`", inline=True)
+        embed.set_footer(text="DICOR • Backup completo operacional")
+
+        view = None
+        if url:
+            view = View(timeout=None)
+            view.add_item(discord.ui.Button(label="Baixar Backup Completo", emoji="📥", style=discord.ButtonStyle.link, url=url))
+
+        canal_destino = bot.get_channel(SERVER_BACKUP_CHANNEL_ID) if SERVER_BACKUP_CHANNEL_ID else None
+        if canal_destino is None and SERVER_BACKUP_CHANNEL_ID:
+            try:
+                canal_destino = await bot.fetch_channel(SERVER_BACKUP_CHANNEL_ID)
+            except Exception:
+                canal_destino = None
+        if canal_destino and hasattr(canal_destino, "send"):
+            await canal_destino.send(embed=embed, view=view)
+
+        await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+        await enviar_log(
+            "✅ **Backup completo finalizado**\n"
+            f"Arquivo: `{zip_path.name}`\n"
+            f"Tamanho: `{tamanho_mb:.1f} MB`\n"
+            f"Mensagens: `{manifest['estatisticas']['mensagens']}`\n"
+            f"Anexos baixados: `{manifest['estatisticas']['anexos_baixados']}`\n"
+            f"Solicitado por: {interaction.user.mention} (`{interaction.user.id}`)\n"
+            f"Link: {url or 'sem link público configurado'}"
+        )
+    except Exception as erro:
+        await enviar_log(f"❌ **Erro no backup completo do servidor**\nErro: `{erro}`\n```{traceback.format_exc()[-1800:]}```")
+        try:
+            await interaction.followup.send("❌ O backup completo falhou. O erro completo foi enviado aos logs.", ephemeral=True)
+        except Exception:
+            pass
+    finally:
+        backup_servidor_em_execucao = False
+
+
+@bot.tree.command(name="backupservidor", description="Gera backup completo de todo o servidor: canais, mensagens, tópicos, anexos e dados do bot.")
+async def backupservidor(interaction: discord.Interaction):
+    await criar_backup_completo_servidor(interaction)
+
+
+@bot.tree.command(name="aplicarprotecaomensagens", description="Aplica proteção fixa no canal configurado: só o cargo autorizado pode apagar mensagens.")
+async def aplicarprotecaomensagens(interaction: discord.Interaction):
+    if not isinstance(interaction.user, discord.Member) or not usuario_pode_apagar_mensagens(interaction.user):
+        await responder_interacao(interaction, "❌ Apenas o cargo autorizado pode aplicar a proteção desse canal.", ephemeral=True)
+        return
+    if not interaction.guild:
+        await responder_interacao(interaction, "❌ Use dentro de um servidor.", ephemeral=True)
+        return
+    if not interaction.response.is_done():
+        await interaction.response.defer(ephemeral=True, thinking=True)
+    stats = await aplicar_protecao_permissoes_guild(interaction.guild)
+    await interaction.followup.send(
+        "🛡️ **Proteção fixa aplicada no canal.**\n"
+        f"Canal protegido: <#{PROTECAO_CANAL_BLOQUEADO_ID}>\n"
+        f"Cargo autorizado a apagar: <@&{PROTECAO_CARGO_PERMITIDO_APAGAR_ID}>\n"
+        f"Canais analisados: `{stats['canais_analisados']}`\n"
+        f"Canais atualizados: `{stats['canais_atualizados']}`\n"
+        f"Falhas: `{stats['falhas']}`\n\n"
+        "Obs: o Discord não permite bloquear self-delete diretamente; se alguém sem o cargo autorizado apagar a própria mensagem nesse canal, o bot restaura automaticamente quando ela estiver em cache.",
+        ephemeral=True,
+    )
+    await enviar_log(f"🛡️ Proteção fixa do canal <#{PROTECAO_CANAL_BLOQUEADO_ID}> aplicada manualmente por {interaction.user.mention} (`{interaction.user.id}`). Stats: {stats}")
 
 
 # =====================================================
