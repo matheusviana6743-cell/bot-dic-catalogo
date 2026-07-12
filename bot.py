@@ -8630,84 +8630,84 @@ def pdf_add_assinaturas_dossie(story: List[Any], dados: Dict[str, Any], style_ce
         style_center,
     ))
 
+
 def gerar_pdf_dossie(dados: Dict[str, Any], caminho_pdf: Path) -> None:
-    """Gera o Dossiê no modelo visual aprovado: estilo Canva/mandado, fundo escuro, moldura e identidade DICOR."""
+    """Gera o Dossiê no modelo escuro aprovado, preenchendo melhor as páginas e usando visual próximo ao mandado/Canva."""
     if SimpleDocTemplate is None:
         raise RuntimeError("Dependência ausente: instale reportlab, qrcode e pillow.")
 
     caminho_pdf = Path(caminho_pdf)
     caminho_pdf.parent.mkdir(parents=True, exist_ok=True)
-
     largura, altura = A4
-    margem_x = 1.15 * cm
-    margem_y = 1.35 * cm
 
     def on_page(c, doc):
         c.saveState()
-        # Fundo escuro estilo documento RP aprovado.
-        c.setFillColor(colors.HexColor("#101010"))
+        c.setFillColor(colors.HexColor("#0B0B0B"))
         c.rect(0, 0, largura, altura, stroke=0, fill=1)
 
-        # Marca d'água grande e discreta.
-        c.setFillColor(colors.Color(1, 1, 1, alpha=0.045))
-        c.setFont("Helvetica-Bold", 82)
-        c.translate(largura / 2, altura / 2)
-        c.rotate(34)
-        c.drawCentredString(0, 0, "DICOR")
-        c.setFont("Helvetica-Bold", 18)
-        c.drawCentredString(0, -1.25 * cm, "INTELIGÊNCIA OPERACIONAL")
-        c.rotate(-34)
-        c.translate(-largura / 2, -altura / 2)
-
-        # Moldura externa e interna.
+        # moldura tripla
+        m1 = 0.48 * cm
         c.setStrokeColor(colors.HexColor("#DCEEF4"))
-        c.setLineWidth(1.7)
-        c.rect(0.38 * cm, 0.38 * cm, largura - 0.76 * cm, altura - 0.76 * cm, stroke=1, fill=0)
-        c.setStrokeColor(colors.HexColor("#7FA6AF"))
+        c.setLineWidth(2.0)
+        c.rect(m1, m1, largura - 2*m1, altura - 2*m1, stroke=1, fill=0)
+        m2 = 0.68 * cm
+        c.setStrokeColor(colors.HexColor("#94B8C4"))
         c.setLineWidth(1.0)
-        c.rect(0.58 * cm, 0.58 * cm, largura - 1.16 * cm, altura - 1.16 * cm, stroke=1, fill=0)
+        c.rect(m2, m2, largura - 2*m2, altura - 2*m2, stroke=1, fill=0)
+        m3 = 0.90 * cm
         c.setStrokeColor(colors.HexColor("#D4AF37"))
         c.setLineWidth(0.8)
-        c.rect(0.82 * cm, 0.82 * cm, largura - 1.64 * cm, altura - 1.64 * cm, stroke=1, fill=0)
+        c.rect(m3, m3, largura - 2*m3, altura - 2*m3, stroke=1, fill=0)
 
-        # Pequenos enfeites diagonais na moldura, sem pesar o documento.
-        c.setStrokeColor(colors.HexColor("#93B6BF"))
-        c.setLineWidth(0.45)
-        step = 0.36 * cm
-        x0, x1 = 0.48 * cm, largura - 0.48 * cm
-        y_top = altura - 0.50 * cm
-        y_bottom = 0.50 * cm
-        x = x0
-        while x < x1:
-            c.line(x, y_top, x + 0.14 * cm, y_top - 0.12 * cm)
-            c.line(x, y_bottom, x + 0.14 * cm, y_bottom + 0.12 * cm)
+        # pequenos enfeites
+        c.setStrokeColor(colors.HexColor("#A8C7D2"))
+        c.setLineWidth(0.5)
+        step = 0.40 * cm
+        x = 0.58 * cm
+        while x < largura - 0.75 * cm:
+            c.line(x, altura - 0.58 * cm, x + 0.18 * cm, altura - 0.74 * cm)
+            c.line(x, 0.58 * cm, x + 0.18 * cm, 0.74 * cm)
             x += step
-        y = 0.72 * cm
-        while y < altura - 0.72 * cm:
-            c.line(0.50 * cm, y, 0.62 * cm, y + 0.14 * cm)
-            c.line(largura - 0.50 * cm, y, largura - 0.62 * cm, y + 0.14 * cm)
+        y = 0.60 * cm
+        while y < altura - 0.80 * cm:
+            c.line(0.58 * cm, y, 0.74 * cm, y + 0.18 * cm)
+            c.line(largura - 0.58 * cm, y, largura - 0.74 * cm, y + 0.18 * cm)
             y += step
 
-        # Cabeçalho/rodapé interno.
+        # marca d'água discreta
+        try:
+            c.saveState()
+            c.setFillColor(colors.Color(1, 1, 1, alpha=0.04))
+            c.setFont("Helvetica-Bold", 110)
+            c.translate(largura/2, altura/2)
+            c.rotate(32)
+            c.drawCentredString(0, 0, "DICOR")
+            c.setFont("Helvetica-Bold", 24)
+            c.drawCentredString(0, -1.2*cm, "INTELIGÊNCIA OPERACIONAL")
+            c.restoreState()
+        except Exception:
+            pass
+
+        # cabeçalho / rodapé
         c.setStrokeColor(colors.HexColor("#D4AF37"))
         c.setLineWidth(0.7)
-        c.line(1.05 * cm, altura - 1.25 * cm, largura - 1.05 * cm, altura - 1.25 * cm)
-        c.line(1.05 * cm, 1.10 * cm, largura - 1.05 * cm, 1.10 * cm)
-        c.setFillColor(colors.HexColor("#F2F2F2"))
-        c.setFont("Courier-Bold", 7.6)
-        c.drawString(1.05 * cm, altura - 0.95 * cm, "CAPITAL MORADA DO VALLEY • POLÍCIA FEDERAL • DICOR")
-        c.drawRightString(largura - 1.05 * cm, altura - 0.95 * cm, f"Processo: {dados.get('processo', 'N/I')}")
-        c.setFont("Courier", 7.2)
-        c.setFillColor(colors.HexColor("#B7C7CD"))
-        c.drawString(1.05 * cm, 0.72 * cm, "Documento reservado • Inteligência • Investigação • Resultado")
-        c.drawRightString(largura - 1.05 * cm, 0.72 * cm, f"Página {c.getPageNumber()}")
+        c.line(1.10 * cm, altura - 1.30 * cm, largura - 1.10 * cm, altura - 1.30 * cm)
+        c.line(1.10 * cm, 1.12 * cm, largura - 1.10 * cm, 1.12 * cm)
+        c.setFillColor(colors.white)
+        c.setFont("Courier-Bold", 8.2)
+        c.drawString(1.15 * cm, altura - 1.00 * cm, "POLÍCIA FEDERAL • DICOR • CAPITAL MORADA DO VALLEY")
+        c.drawRightString(largura - 1.15 * cm, altura - 1.00 * cm, f"Processo: {dados.get('processo', 'N/I')}")
+        c.setFont("Courier", 7.9)
+        c.setFillColor(colors.HexColor("#DCEEF4"))
+        c.drawString(1.15 * cm, 0.76 * cm, "Documento reservado • Inteligência • Investigação • Resultado")
+        c.drawRightString(largura - 1.15 * cm, 0.76 * cm, f"Página {c.getPageNumber()}")
         c.restoreState()
 
     doc = SimpleDocTemplate(
         str(caminho_pdf),
         pagesize=A4,
-        rightMargin=1.35 * cm,
-        leftMargin=1.35 * cm,
+        rightMargin=1.18 * cm,
+        leftMargin=1.18 * cm,
         topMargin=1.70 * cm,
         bottomMargin=1.55 * cm,
         title=f"Dossiê Operacional {dados.get('processo')}",
@@ -8715,25 +8715,29 @@ def gerar_pdf_dossie(dados: Dict[str, Any], caminho_pdf: Path) -> None:
     )
 
     styles = getSampleStyleSheet()
-    style_title = ParagraphStyle("DICORCanvaTitle", parent=styles["Title"], fontName="Courier-Bold", fontSize=18.5, leading=23, alignment=TA_CENTER, textColor=colors.HexColor("#FFFFFF"), spaceAfter=8)
-    style_subtitle = ParagraphStyle("DICORCanvaSub", parent=styles["Normal"], fontName="Courier-Bold", fontSize=10.5, leading=14, alignment=TA_CENTER, textColor=colors.HexColor("#D4AF37"), spaceAfter=8)
-    style_h1 = ParagraphStyle("DICORCanvaH1", parent=styles["Heading1"], fontName="Courier-Bold", fontSize=14.2, leading=17.5, textColor=colors.HexColor("#FFFFFF"), spaceBefore=8, spaceAfter=6)
-    style_h2 = ParagraphStyle("DICORCanvaH2", parent=styles["Heading2"], fontName="Courier-Bold", fontSize=10.8, leading=14, textColor=colors.HexColor("#D4AF37"), spaceBefore=6, spaceAfter=4)
-    style_body = ParagraphStyle("DICORCanvaBody", parent=styles["Normal"], fontName="Courier", fontSize=9.4, leading=13.4, alignment=TA_JUSTIFY, textColor=colors.HexColor("#F4F4F4"), spaceAfter=5)
-    style_body_left = ParagraphStyle("DICORCanvaBodyLeft", parent=style_body, alignment=TA_LEFT)
-    style_center = ParagraphStyle("DICORCanvaCenter", parent=style_body, alignment=TA_CENTER)
-    style_small = ParagraphStyle("DICORCanvaSmall", parent=style_body_left, fontSize=7.6, leading=10.5, textColor=colors.HexColor("#DCEEF4"))
+    style_title = ParagraphStyle("DossieTitleEscuro", parent=styles["Title"], fontName="Courier-Bold", fontSize=19.6, leading=24, alignment=TA_CENTER, textColor=colors.white, spaceAfter=6)
+    style_subtitle = ParagraphStyle("DossieSubEscuro", parent=styles["Normal"], fontName="Courier-Bold", fontSize=11.3, leading=14.2, alignment=TA_CENTER, textColor=colors.HexColor("#D4AF37"), spaceAfter=7)
+    style_h1 = ParagraphStyle("DossieH1Escuro", parent=styles["Heading1"], fontName="Courier-Bold", fontSize=14.8, leading=18.2, textColor=colors.white, spaceBefore=5, spaceAfter=6)
+    style_h2 = ParagraphStyle("DossieH2Escuro", parent=styles["Heading2"], fontName="Courier-Bold", fontSize=11.4, leading=14, textColor=colors.HexColor("#D4AF37"), spaceBefore=5, spaceAfter=3)
+    style_body = ParagraphStyle("DossieBodyEscuro", parent=styles["Normal"], fontName="Courier", fontSize=10.15, leading=14.0, alignment=TA_JUSTIFY, textColor=colors.HexColor("#F5F5F5"), spaceAfter=4)
+    style_body_left = ParagraphStyle("DossieBodyLeftEscuro", parent=style_body, alignment=TA_LEFT)
+    style_center = ParagraphStyle("DossieCenterEscuro", parent=style_body, alignment=TA_CENTER)
+    style_small = ParagraphStyle("DossieSmallEscuro", parent=style_body_left, fontSize=8.8, leading=11.2, textColor=colors.HexColor("#DCEEF4"), spaceAfter=3)
+    style_mini = ParagraphStyle("DossieMiniEscuro", parent=style_body_left, fontSize=8.0, leading=10.0, textColor=colors.HexColor("#E8F3F7"), spaceAfter=2)
 
     def ptxt(txt: Any, style=style_body):
         return pdf_paragrafo(txt, style)
 
     def secao(titulo: str):
-        faixa = Table([[Paragraph(titulo, style_h1)]], colWidths=[16.25 * cm], hAlign="CENTER")
+        faixa = Table([[Paragraph(titulo, style_h1)]], colWidths=[17.0 * cm], hAlign="CENTER")
         faixa.setStyle(TableStyle([
-            ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#1B1B1B")),
-            ("BOX", (0, 0), (-1, -1), 0.7, colors.HexColor("#D4AF37")),
-            ("LINEBEFORE", (0, 0), (0, -1), 4, colors.HexColor("#7FA6AF")),
-            ("PADDING", (0, 0), (-1, -1), 8),
+            ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#151515")),
+            ("BOX", (0, 0), (-1, -1), 0.9, colors.HexColor("#D4AF37")),
+            ("LINEBEFORE", (0, 0), (0, -1), 4.2, colors.HexColor("#8EB8C8")),
+            ("LINEAFTER", (-1, 0), (-1, -1), 0.8, colors.HexColor("#D4AF37")),
+            ("TOPPADDING", (0, 0), (-1, -1), 7),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
+            ("LEFTPADDING", (0, 0), (-1, -1), 8),
         ]))
         story.append(faixa)
         story.append(Spacer(1, 8))
@@ -8742,7 +8746,7 @@ def gerar_pdf_dossie(dados: Dict[str, Any], caminho_pdf: Path) -> None:
         if not rows:
             return Spacer(1, 1)
         if col_widths is None:
-            col_widths = [4.7 * cm, 11.55 * cm]
+            col_widths = [5.1 * cm, 11.9 * cm]
         converted = []
         for r, row in enumerate(rows):
             converted.append([ptxt(cell, style_body_left if r else style_center) for cell in row])
@@ -8751,61 +8755,122 @@ def gerar_pdf_dossie(dados: Dict[str, Any], caminho_pdf: Path) -> None:
             ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#0B263D")),
             ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
             ("BACKGROUND", (0, 1), (0, -1), colors.HexColor("#202020")),
-            ("BACKGROUND", (1, 1), (-1, -1), colors.HexColor("#151515")),
-            ("GRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#7FA6AF")),
-            ("BOX", (0, 0), (-1, -1), 0.7, colors.HexColor("#D4AF37")),
+            ("BACKGROUND", (1, 1), (-1, -1), colors.HexColor("#131313")),
+            ("GRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#89AEB8")),
+            ("BOX", (0, 0), (-1, -1), 0.75, colors.HexColor("#D4AF37")),
             ("VALIGN", (0, 0), (-1, -1), "TOP"),
-            ("PADDING", (0, 0), (-1, -1), 6),
+            ("TOPPADDING", (0, 0), (-1, -1), 6),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+            ("LEFTPADDING", (0, 0), (-1, -1), 6),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 6),
         ]))
         return t
 
-    def imagens_secao(evidencias: List[Dict[str, Any]], vazio: str = "Nenhuma imagem anexada nesta seção."):
-        imgs = [ev for ev in evidencias if ev.get("tipo") == "imagem" and ev.get("local")]
+    def bloco_resumo(texto: str, titulo: Optional[str] = None):
+        linhas = []
+        if titulo:
+            linhas.append([Paragraph(titulo, style_h2)])
+        linhas.append([ptxt(texto, style_body)])
+        t = Table(linhas, colWidths=[17.0 * cm], hAlign="CENTER")
+        t.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#111111")),
+            ("BOX", (0, 0), (-1, -1), 0.7, colors.HexColor("#7FA6AF")),
+            ("TOPPADDING", (0, 0), (-1, -1), 6),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+            ("LEFTPADDING", (0, 0), (-1, -1), 8),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+        ]))
+        story.append(t)
+        story.append(Spacer(1, 7))
+
+    def badges_estatisticas():
+        est = dados.get("estatisticas", {}) or {}
+        res = dados.get("resultados", {}) or {}
+        rows = [[
+            Paragraph(f"<b>Mensagens</b><br/>{est.get('mensagens_analisadas', 0)}", style_center),
+            Paragraph(f"<b>Evidências</b><br/>{est.get('evidencias', 0)}", style_center),
+            Paragraph(f"<b>Imagens</b><br/>{est.get('imagens', 0)}", style_center),
+            Paragraph(f"<b>Resultados</b><br/>{res.get('prisoes', '0')} prisões", style_center),
+        ]]
+        t = Table(rows, colWidths=[4.25 * cm, 4.25 * cm, 4.25 * cm, 4.25 * cm], hAlign="CENTER")
+        t.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#141414")),
+            ("BOX", (0, 0), (-1, -1), 0.85, colors.HexColor("#D4AF37")),
+            ("INNERGRID", (0, 0), (-1, -1), 0.45, colors.HexColor("#7FA6AF")),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("TOPPADDING", (0, 0), (-1, -1), 8),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+        ]))
+        story.append(t)
+        story.append(Spacer(1, 9))
+
+    def imagens_secao(evidencias: List[Dict[str, Any]], vazio: str = "Nenhuma imagem anexada nesta seção.", limite: int = 8):
+        imgs = [ev for ev in evidencias if ev.get("tipo") == "imagem" and ev.get("local")][:limite]
         if not imgs:
             story.append(ptxt(vazio, style_body_left))
             return
+        cards = []
         for idx, ev in enumerate(imgs, start=1):
-            img = pdf_img_fit(ev.get("local", ""), 7.3 * cm, 5.2 * cm)
-            legenda = ptxt(
-                f"Imagem {idx}\nTópico: {ev.get('origem', 'Não informado')}\nAutor: {ev.get('autor', 'Não informado')}\nData: {ev.get('data', 'Não informado')}\nArquivo: {ev.get('arquivo', 'Sem nome')}",
-                style_small,
+            img = pdf_img_fit(ev.get("local", ""), 7.85 * cm, 5.9 * cm)
+            if not img:
+                continue
+            legenda = Paragraph(
+                f"<b>Imagem {idx}</b><br/>Tópico: {escape(str(ev.get('origem', 'Não informado')))}<br/>Autor: {escape(str(ev.get('autor', 'Não informado')))}<br/>Data: {escape(str(ev.get('data', 'Não informado')))}<br/>Arquivo: {escape(str(ev.get('arquivo', 'Sem nome')))}",
+                style_mini,
             )
-            if img:
-                t = Table([[img, legenda]], colWidths=[7.8 * cm, 8.3 * cm], hAlign="CENTER")
-                t.setStyle(TableStyle([
-                    ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#151515")),
-                    ("BOX", (0, 0), (-1, -1), 0.6, colors.HexColor("#7FA6AF")),
-                    ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-                    ("PADDING", (0, 0), (-1, -1), 5),
-                ]))
-                story.append(t)
-                story.append(Spacer(1, 6))
-            else:
-                story.append(ptxt(f"Arquivo registrado, mas não incorporado: {ev.get('arquivo')}", style_small))
+            card = Table([[img], [legenda]], colWidths=[8.15 * cm], hAlign="CENTER")
+            card.setStyle(TableStyle([
+                ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#121212")),
+                ("BOX", (0, 0), (-1, -1), 0.7, colors.HexColor("#7FA6AF")),
+                ("TOPPADDING", (0, 0), (-1, -1), 5),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+                ("LEFTPADDING", (0, 0), (-1, -1), 5),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+            ]))
+            cards.append(card)
+        if not cards:
+            story.append(ptxt(vazio, style_body_left))
+            return
+        rows = []
+        for i in range(0, len(cards), 2):
+            left = cards[i]
+            right = cards[i+1] if i + 1 < len(cards) else Spacer(1, 0.1)
+            rows.append([left, right])
+        grid = Table(rows, colWidths=[8.35 * cm, 8.35 * cm], hAlign="CENTER")
+        grid.setStyle(TableStyle([
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 0),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+            ("TOPPADDING", (0, 0), (-1, -1), 0),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+        ]))
+        story.append(grid)
+        story.append(Spacer(1, 4))
 
     def pessoas_table(pessoas: List[Dict[str, str]], vazio: str):
         if not pessoas:
             story.append(ptxt(vazio, style_body_left))
             return
         rows = [["Foto", "Nome", "RG", "Função/Cargo", "Periculosidade/Obs."]]
-        for pessoa in pessoas[:40]:
-            foto = pdf_img_fit(pessoa.get("foto", ""), 2.0 * cm, 2.0 * cm) or ptxt("Sem foto", style_small)
+        for pessoa in pessoas[:36]:
+            foto = pdf_img_fit(pessoa.get("foto", ""), 2.2 * cm, 2.2 * cm) or ptxt("Sem foto", style_small)
             rows.append([
                 foto,
                 ptxt(pessoa.get("nome", "Não informado"), style_small),
                 ptxt(pessoa.get("rg", "Não informado"), style_small),
                 ptxt(pessoa.get("funcao") or pessoa.get("cargo") or "Não informado", style_small),
-                ptxt(f"{pessoa.get('periculosidade', 'Não informado')}\n{pessoa.get('observacoes', '')}", style_small),
+                ptxt(f"{pessoa.get('periculosidade', 'Não informado')}<br/>{pessoa.get('observacoes', '')}", style_small),
             ])
-        t = Table(rows, colWidths=[2.45 * cm, 3.9 * cm, 2.45 * cm, 3.3 * cm, 4.15 * cm], repeatRows=1, hAlign="CENTER")
+        t = Table(rows, colWidths=[2.55 * cm, 4.0 * cm, 2.6 * cm, 3.45 * cm, 4.4 * cm], repeatRows=1, hAlign="CENTER")
         t.setStyle(TableStyle([
             ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#0B263D")),
-            ("BACKGROUND", (0, 1), (-1, -1), colors.HexColor("#151515")),
+            ("BACKGROUND", (0, 1), (-1, -1), colors.HexColor("#131313")),
             ("TEXTCOLOR", (0, 0), (-1, -1), colors.white),
             ("GRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#7FA6AF")),
-            ("BOX", (0, 0), (-1, -1), 0.7, colors.HexColor("#D4AF37")),
+            ("BOX", (0, 0), (-1, -1), 0.75, colors.HexColor("#D4AF37")),
             ("VALIGN", (0, 0), (-1, -1), "TOP"),
-            ("PADDING", (0, 0), (-1, -1), 5),
+            ("TOPPADDING", (0, 0), (-1, -1), 5),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
         ]))
         story.append(t)
 
@@ -8814,45 +8879,46 @@ def gerar_pdf_dossie(dados: Dict[str, Any], caminho_pdf: Path) -> None:
         imgs, linhas, titulos = [], [], []
         for ass in assinaturas_dados:
             imagem_assinatura = limpar_imagem_assinatura_dossie(ass.get("imagem")) or ass.get("imagem")
-            img = pdf_img_fit(str(imagem_assinatura or ""), 4.9 * cm, 2.1 * cm)
+            img = pdf_img_fit(str(imagem_assinatura or ""), 5.1 * cm, 2.2 * cm)
             if img:
                 imgs.append(img)
             elif ass.get("texto"):
                 imgs.append(ptxt(str(ass.get("texto"))[:350], style_center))
             else:
                 imgs.append(Spacer(1, 0.9 * cm))
-            linhas.append(ptxt("____________________________", style_center))
+            linhas.append(ptxt("________________________________", style_center))
             titulos.append(ptxt(str(ass.get("titulo") or ""), style_center))
-        t = Table([imgs, linhas, titulos], colWidths=[5.35 * cm, 5.35 * cm, 5.35 * cm], hAlign="CENTER")
+        t = Table([imgs, linhas, titulos], colWidths=[5.45 * cm, 5.45 * cm, 5.45 * cm], hAlign="CENTER")
         t.setStyle(TableStyle([
             ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#101010")),
-            ("LINEABOVE", (0, 1), (-1, 1), 0.45, colors.HexColor("#D4AF37")),
+            ("LINEABOVE", (0, 1), (-1, 1), 0.55, colors.HexColor("#D4AF37")),
             ("ALIGN", (0, 0), (-1, -1), "CENTER"),
             ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-            ("PADDING", (0, 0), (-1, -1), 4),
+            ("PADDING", (0, 0), (-1, -1), 5),
         ]))
         story.append(t)
 
     story: List[Any] = []
 
-    # Página 1 — Capa no modelo escuro/moldura.
     brasao_pf = caminho_brasao_pf()
     brasao_dicor = caminho_brasao_dicor()
-    img_pf = pdf_img_fit(str(brasao_pf), 3.25 * cm, 3.25 * cm) if brasao_pf else ptxt("PF", style_center)
-    img_dicor = pdf_img_fit(str(brasao_dicor), 3.25 * cm, 3.25 * cm) if brasao_dicor else ptxt("DICOR", style_center)
-    cab = Table([[img_pf, ptxt("POLÍCIA FEDERAL\nCAPITAL MORADA DO VALLEY\nDIRETORIA DE INVESTIGAÇÃO E COMBATE AO CRIME ORGANIZADO - DICOR", style_center), img_dicor]], colWidths=[4.05 * cm, 8.15 * cm, 4.05 * cm], hAlign="CENTER")
+    img_pf = pdf_img_fit(str(brasao_pf), 3.0 * cm, 3.0 * cm) if brasao_pf else ptxt("PF", style_center)
+    img_dicor = pdf_img_fit(str(brasao_dicor), 3.0 * cm, 3.0 * cm) if brasao_dicor else ptxt("DICOR", style_center)
+
+    cab = Table([[img_pf, ptxt("POLÍCIA FEDERAL\nDO ESTADO DA CAPITAL\nMORADA DO VALLEY", style_center), img_dicor]], colWidths=[3.5 * cm, 10.0 * cm, 3.5 * cm], hAlign="CENTER")
     cab.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#101010")),
+        ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#0B0B0B")),
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
         ("ALIGN", (0, 0), (-1, -1), "CENTER"),
-        ("BOX", (0, 0), (-1, -1), 0.5, colors.HexColor("#D4AF37")),
-        ("PADDING", (0, 0), (-1, -1), 8),
+        ("TOPPADDING", (0, 0), (-1, -1), 6),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
     ]))
     story.append(cab)
-    story.append(Spacer(1, 0.55 * cm))
+    story.append(Spacer(1, 0.20 * cm))
     story.append(Paragraph("DOSSIÊ OPERACIONAL DICOR", style_title))
     story.append(Paragraph("DOCUMENTO RESERVADO • INTELIGÊNCIA • INVESTIGAÇÃO • RESULTADO", style_subtitle))
-    story.append(Spacer(1, 0.15 * cm))
+    story.append(Spacer(1, 0.12 * cm))
+    badges_estatisticas()
     story.append(info_table([
         ["DADOS DO PROCESSO", "INFORMAÇÕES CONSOLIDADAS"],
         ["Processo Nº", dados.get("processo")],
@@ -8864,26 +8930,29 @@ def gerar_pdf_dossie(dados: Dict[str, Any], caminho_pdf: Path) -> None:
         ["Data de Encerramento", dados.get("data_encerramento")],
         ["Delegado Responsável", dados.get("delegado_responsavel")],
         ["Agente do Encerramento", dados.get("agente_encerramento")],
-        ["Integrantes da Investigação", ", ".join(dados.get("integrantes_investigacao", []))],
+        ["Integrantes da Investigação", ", ".join(dados.get("integrantes_investigacao", [])) or "Não informado"],
     ]))
-    story.append(Spacer(1, 0.35 * cm))
-    story.append(ptxt("Documento gerado automaticamente a partir do encerramento da mesa de investigação. Todas as provas, registros, anexos e informações operacionais coletadas foram consolidadas para arquivo interno da DICOR.", style_center))
+    story.append(Spacer(1, 0.18 * cm))
+    bloco_resumo(
+        "Documento gerado automaticamente a partir do encerramento da mesa de investigação. Todas as provas, registros, anexos e informações operacionais coletadas foram consolidadas para arquivo interno da DICOR, preservando a linha visual RP aprovada e o contexto operacional da Capital Morada do Valley.",
+        "Síntese do documento",
+    )
     story.append(PageBreak())
 
     secao("2. RESUMO EXECUTIVO")
-    story.append(ptxt(dados.get("objetivo")))
-    story.append(ptxt(resumo_contexto_operacional(dados)))
+    bloco_resumo(dados.get("objetivo") or "Objetivo não informado.", "Objetivo da investigação")
+    bloco_resumo(resumo_contexto_operacional(dados), "Contexto operacional")
     story.append(info_table([
         ["Campo", "Informação"],
         ["Status da Investigação", dados.get("status")],
         ["Prioridade", dados.get("prioridade")],
         ["Facção Investigada", dados.get("faccao")],
         ["Agente Responsável", dados.get("agente_encerramento")],
-        ["Integrantes", ", ".join(dados.get("integrantes_investigacao", []))],
+        ["Integrantes", ", ".join(dados.get("integrantes_investigacao", [])) or "Não informado"],
     ]))
-    story.append(Spacer(1, 8))
+    story.append(Spacer(1, 6))
     story.append(Paragraph("Tabela de Conteúdo", style_h2))
-    story.append(info_table(linhas_tabela_conteudo(), [2.6 * cm, 13.65 * cm]))
+    story.append(info_table(linhas_tabela_conteudo(), [2.8 * cm, 14.2 * cm]))
     story.append(PageBreak())
 
     secao("3. LIDERANÇAS IDENTIFICADAS")
@@ -8895,30 +8964,36 @@ def gerar_pdf_dossie(dados: Dict[str, Any], caminho_pdf: Path) -> None:
     story.append(PageBreak())
 
     secao("5. PAINEL DA ORGANIZAÇÃO")
-    story.append(ptxt(dados.get("resumos", {}).get("painel")))
-    imagens_secao(filtrar_evidencias_por_topico(dados.get("evidencias", []), ["painel"]))
+    bloco_resumo(dados.get("resumos", {}).get("painel") or "Não foram localizados registros textuais adicionais no tópico de painel da organização.")
+    imagens_secao(filtrar_evidencias_por_topico(dados.get("evidencias", []), ["painel"]), "Nenhuma imagem do painel da organização foi anexada.")
     story.append(PageBreak())
 
     secao("6. LOCALIZAÇÃO")
-    story.append(ptxt(dados.get("resumos", {}).get("localizacao")))
-    story.append(ptxt(f"Comunidade/Base: {dados.get('comunidade')}\nCanal de reabertura: {dados.get('reabrir_url')}", style_body_left))
-    imagens_secao(filtrar_evidencias_por_topico(dados.get("evidencias", []), ["localizacao"]))
+    bloco_resumo(dados.get("resumos", {}).get("localizacao") or "Não foram localizados registros textuais adicionais na seção de localização.")
+    story.append(info_table([
+        ["Campo", "Informação"],
+        ["Comunidade/Base", dados.get('comunidade')],
+        ["Canal de reabertura", dados.get('reabrir_url') or "Não informado"],
+        ["Cidade operacional", dados.get('cidade_operacional', DOSSIE_CIDADE_OPERACIONAL)],
+    ]))
+    story.append(Spacer(1, 7))
+    imagens_secao(filtrar_evidencias_por_topico(dados.get("evidencias", []), ["localizacao"]), "Nenhuma imagem de localização foi anexada.")
     story.append(PageBreak())
 
     secao("7. PRODUÇÃO E FABRICAÇÃO")
-    story.append(ptxt(dados.get("resumos", {}).get("producao")))
-    imagens_secao(filtrar_evidencias_por_topico(dados.get("evidencias", []), ["producao", "farm", "ingredientes"]))
+    bloco_resumo(dados.get("resumos", {}).get("producao") or "Não foram localizados registros textuais adicionais na produção e fabricação.")
+    imagens_secao(filtrar_evidencias_por_topico(dados.get("evidencias", []), ["producao", "farm", "ingredientes"]), "Nenhuma imagem de produção/fabricação foi anexada.")
     story.append(PageBreak())
 
     secao("8. BAÚS E ARMAZENAMENTO")
-    story.append(ptxt(dados.get("resumos", {}).get("baus")))
-    imagens_secao(filtrar_evidencias_por_topico(dados.get("evidencias", []), ["baus", "bau", "baú"]))
+    bloco_resumo(dados.get("resumos", {}).get("baus") or "Não foram localizados registros textuais adicionais na seção de armazenamento.")
+    imagens_secao(filtrar_evidencias_por_topico(dados.get("evidencias", []), ["baus", "bau", "baú"]), "Nenhuma imagem de baús/armazenamento foi anexada.")
     story.append(PageBreak())
 
     secao("9. INFORMANTES")
     pessoas_table(dados.get("informantes", []), "Nenhum informante foi identificado automaticamente nos tópicos da mesa.")
-    story.append(Spacer(1, 8))
-    story.append(ptxt(dados.get("resumos", {}).get("informantes")))
+    story.append(Spacer(1, 6))
+    bloco_resumo(dados.get("resumos", {}).get("informantes") or "Não foram localizadas observações textuais adicionais na seção de informantes.")
     story.append(PageBreak())
 
     secao("10. MATERIAIS APREENDIDOS")
@@ -8932,12 +9007,12 @@ def gerar_pdf_dossie(dados: Dict[str, Any], caminho_pdf: Path) -> None:
         ["Veículos", res.get("veiculos", "Não informado")],
         ["Outros Itens", res.get("outros", "Não informado")],
     ]))
-    story.append(Spacer(1, 8))
+    story.append(Spacer(1, 7))
     anexos = [["Tipo", "Arquivo", "Data", "Origem"]]
     for ev in dados.get("evidencias", [])[:90]:
         anexos.append([ev.get("tipo"), ev.get("arquivo"), ev.get("data"), ev.get("origem")])
     story.append(Paragraph("Provas e anexos registrados", style_h2))
-    story.append(info_table(anexos, [2.1 * cm, 6.2 * cm, 3.1 * cm, 4.85 * cm]))
+    story.append(info_table(anexos, [2.3 * cm, 6.9 * cm, 3.1 * cm, 4.7 * cm]))
     story.append(PageBreak())
 
     secao("11. RESULTADO OPERACIONAL")
@@ -8953,18 +9028,27 @@ def gerar_pdf_dossie(dados: Dict[str, Any], caminho_pdf: Path) -> None:
         ["Links registrados", est.get("links", 0)],
         ["Tópicos analisados", est.get("threads", 0)],
     ]))
+    story.append(Spacer(1, 7))
+    bloco_resumo("Os indicadores acima representam a consolidação automática do conteúdo da mesa e dos anexos vinculados ao procedimento investigativo.")
     story.append(PageBreak())
 
     secao("12. CONCLUSÃO")
-    story.append(ptxt(montar_conclusao_dossie(dados)))
-    story.append(Spacer(1, 0.85 * cm))
+    bloco_resumo(montar_conclusao_dossie(dados))
+    story.append(Spacer(1, 0.25 * cm))
     assinaturas()
-    story.append(Spacer(1, 0.4 * cm))
+    story.append(Spacer(1, 0.35 * cm))
     qr_path = dados.get("qr_reabertura")
-    qr_img = pdf_img_fit(qr_path, 2.4 * cm, 2.4 * cm) if qr_path else None
+    qr_img = pdf_img_fit(qr_path, 2.6 * cm, 2.6 * cm) if qr_path else None
     if qr_img:
         story.append(Paragraph("QR Code para reabrir a investigação arquivada", style_h2))
-        story.append(qr_img)
+        t_qr = Table([[qr_img, ptxt("A leitura do QR Code direciona para o mecanismo de reabertura/controle arquivado da investigação.", style_body_left)]], colWidths=[3.2 * cm, 13.4 * cm], hAlign="CENTER")
+        t_qr.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#111111")),
+            ("BOX", (0, 0), (-1, -1), 0.7, colors.HexColor("#7FA6AF")),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("PADDING", (0, 0), (-1, -1), 6),
+        ]))
+        story.append(t_qr)
 
     doc.build(story, onFirstPage=on_page, onLaterPages=on_page)
 
@@ -9779,6 +9863,7 @@ def _draw_logo_comparecimento(c, caminho: Optional[Path], x: float, y: float, w:
         pass
 
 
+
 def gerar_pdf_comparecimento(registro: Dict[str, Any], caminho_pdf: Path) -> None:
     if canvas is None or A4 is None:
         raise RuntimeError("Dependência ausente: instale reportlab.")
@@ -9787,85 +9872,112 @@ def gerar_pdf_comparecimento(registro: Dict[str, Any], caminho_pdf: Path) -> Non
     largura, altura = A4
     fundo = colors.HexColor("#0B0B0B")
     branco = colors.HexColor("#FFFFFF")
-    borda = colors.HexColor("#CFE9F2")
+    borda = colors.HexColor("#DCEEF4")
+    azul = colors.HexColor("#8EB8C8")
     dourado = colors.HexColor("#D4AF37")
+
     c.setFillColor(fundo)
     c.rect(0, 0, largura, altura, fill=1, stroke=0)
-    m = 0.65 * cm
-    c.setStrokeColor(borda)
-    c.setLineWidth(2)
+
+    m = 0.50 * cm
+    c.setStrokeColor(borda); c.setLineWidth(2)
     c.rect(m, m, largura-2*m, altura-2*m, fill=0, stroke=1)
-    c.setLineWidth(0.8)
-    c.rect(m+0.18*cm, m+0.18*cm, largura-2*(m+0.18*cm), altura-2*(m+0.18*cm), fill=0, stroke=1)
-    # enfeites pequenos na moldura
-    c.setStrokeColor(colors.HexColor("#8EB8C8"))
-    step = 0.42 * cm
-    x = m + 0.28*cm
-    while x < largura-m-0.28*cm:
-        c.line(x, altura-m-0.25*cm, min(x+0.18*cm, largura-m), altura-m-0.40*cm)
-        c.line(x, m+0.25*cm, min(x+0.18*cm, largura-m), m+0.40*cm)
+    c.setStrokeColor(azul); c.setLineWidth(1.0)
+    c.rect(m+0.20*cm, m+0.20*cm, largura-2*(m+0.20*cm), altura-2*(m+0.20*cm), fill=0, stroke=1)
+    c.setStrokeColor(dourado); c.setLineWidth(0.8)
+    c.rect(m+0.42*cm, m+0.42*cm, largura-2*(m+0.42*cm), altura-2*(m+0.42*cm), fill=0, stroke=1)
+
+    c.setStrokeColor(azul); c.setLineWidth(0.45)
+    step = 0.40 * cm
+    x = m + 0.30 * cm
+    while x < largura - m - 0.35 * cm:
+        c.line(x, altura-m-0.28*cm, min(x+0.18*cm, largura-m), altura-m-0.44*cm)
+        c.line(x, m+0.28*cm, min(x+0.18*cm, largura-m), m+0.44*cm)
         x += step
-    y = m + 0.30*cm
-    while y < altura-m-0.30*cm:
-        c.line(m+0.25*cm, y, m+0.40*cm, min(y+0.18*cm, altura-m))
-        c.line(largura-m-0.25*cm, y, largura-m-0.40*cm, min(y+0.18*cm, altura-m))
+    y = m + 0.30 * cm
+    while y < altura - m - 0.35 * cm:
+        c.line(m+0.28*cm, y, m+0.44*cm, min(y+0.18*cm, altura-m))
+        c.line(largura-m-0.28*cm, y, largura-m-0.44*cm, min(y+0.18*cm, altura-m))
         y += step
-    _draw_logo_comparecimento(c, caminho_brasao_pf(), 1.15*cm, altura-3.55*cm, 2.35*cm, 2.35*cm)
-    _draw_logo_comparecimento(c, caminho_brasao_dicor(), largura-3.55*cm, altura-3.55*cm, 2.35*cm, 2.35*cm)
+
+    _draw_logo_comparecimento(c, caminho_brasao_pf(), 1.05*cm, altura-3.15*cm, 2.55*cm, 2.55*cm)
+    _draw_logo_comparecimento(c, caminho_brasao_dicor(), largura-3.60*cm, altura-3.15*cm, 2.55*cm, 2.55*cm)
+
     try:
         c.saveState()
-        c.setFillColor(colors.Color(1, 1, 1, alpha=0.055))
-        c.setFont("Helvetica-Bold", 150)
-        c.translate(largura/2, altura/2)
-        c.rotate(35)
+        c.setFillColor(colors.Color(1, 1, 1, alpha=0.050))
+        c.setFont("Helvetica-Bold", 92)
+        c.translate(largura/2, altura/2 + 0.4*cm)
+        c.rotate(28)
         c.drawCentredString(0, 0, "DICOR")
         c.restoreState()
     except Exception:
         pass
+
     c.setFillColor(branco)
-    c.setFont("Courier-Bold", 15)
-    c.drawCentredString(largura/2, altura-1.65*cm, "POLÍCIA FEDERAL")
-    c.setFont("Courier-Bold", 12.5)
-    c.drawCentredString(largura/2, altura-2.20*cm, "CAPITAL MORADA DO VALLEY")
-    c.setFont("Courier-Bold", 9.6)
-    c.drawCentredString(largura/2, altura-2.75*cm, "DIRETORIA DE INVESTIGAÇÃO E COMBATE AO CRIME ORGANIZADO - DICOR")
-    ypos = altura - 4.85*cm
-    c.setFont("Courier-Bold", 10.6)
-    c.drawString(1.05*cm, ypos, f"SOLICITAÇÃO DE COMPARECIMENTO: {registro.get('numero', '00000-0000')}")
-    ypos -= 0.52*cm
-    c.setFont("Courier", 10)
-    c.drawString(1.05*cm, ypos, f"Data de Expedição: {registro.get('data_expedicao', agora_br())}")
-    ypos -= 0.44*cm
-    c.drawString(1.05*cm, ypos, f"Nº do Processo: {registro.get('processo', 'Não informado')}")
-    ypos -= 0.95*cm
-    c.setFont("Courier-Bold", 10.3)
-    c.drawString(1.05*cm, ypos, f"A(o) Sr.(a): {registro.get('nome', 'Não informado')}")
-    ypos -= 0.47*cm
-    c.drawString(1.05*cm, ypos, f"RG: {registro.get('rg', 'Não informado')}")
-    ypos -= 0.72*cm
-    c.setFont("Courier", 9.55)
+    c.setFont("Courier-Bold", 15.4)
+    c.drawCentredString(largura/2, altura-1.58*cm, "POLÍCIA FEDERAL")
+    c.setFont("Courier-Bold", 13.1)
+    c.drawCentredString(largura/2, altura-2.12*cm, "DO ESTADO DA CAPITAL")
+    c.drawCentredString(largura/2, altura-2.66*cm, "MORADA DO VALLEY")
+
+    y = altura - 4.25*cm
+    c.setFont("Courier-Bold", 11.2)
+    c.drawString(1.08*cm, y, f"SOLICITAÇÃO DE COMPARECIMENTO: {registro.get('numero', '00000-0000')}")
+    y -= 0.55*cm
+    c.setFont("Courier", 10.4)
+    c.drawString(1.08*cm, y, f"Data de Expedição: {registro.get('data_expedicao', agora_br())}")
+    y -= 0.46*cm
+    c.drawString(1.08*cm, y, f"Nº do Processo: {registro.get('processo', 'Não informado')}")
+    y -= 0.84*cm
+
+    c.setFillColor(colors.HexColor("#151515"))
+    c.setStrokeColor(dourado)
+    c.setLineWidth(0.7)
+    c.roundRect(1.0*cm, y-1.02*cm, largura-2.0*cm, 1.05*cm, 6, fill=1, stroke=1)
+    c.setFillColor(branco)
+    c.setFont("Courier-Bold", 10.8)
+    c.drawString(1.18*cm, y-0.30*cm, f"A(o) Sr.(a): {registro.get('nome', 'Não informado')}")
+    c.drawString(1.18*cm, y-0.72*cm, f"RG: {registro.get('rg', 'Não informado')}")
+    y -= 1.45*cm
+
+    c.setFillColor(colors.HexColor("#121212"))
+    c.setStrokeColor(azul)
+    c.roundRect(1.0*cm, y-2.25*cm, largura-2.0*cm, 2.25*cm, 6, fill=1, stroke=1)
+    c.setFillColor(branco)
+    c.setFont("Courier-Bold", 10.2)
+    c.drawString(1.18*cm, y-0.38*cm, "DADOS DO COMPARECIMENTO")
+    c.setFont("Courier", 9.9)
+    c.drawString(1.20*cm, y-0.88*cm, f"Local: {registro.get('local', 'Sede da Polícia Federal - DICOR')}")
+    c.drawString(1.20*cm, y-1.30*cm, f"Data/Horário: {registro.get('data_hora', 'a definir')}")
+    motivo = str(registro.get('motivo', 'Não informado'))
+    for i, linha in enumerate(_wrap_pdf(c, f"Motivo: {motivo}", "Courier", 9.9, largura-2.5*cm)[:2]):
+        c.drawString(1.20*cm, y-1.72*cm - i*0.34*cm, linha)
+    y -= 2.65*cm
+
+    c.setFont("Courier", 10.15)
     texto = (
         "O Departamento de Inteligência e Combate ao Crime Organizado - DICOR, no uso de suas atribuições legais e com fundamento nos procedimentos internos, "
         "SOLICITA o comparecimento de Vossa Senhoria para prestar esclarecimentos referentes à investigação em curso relacionada ao processo em epígrafe. "
         f"O comparecimento deverá ocorrer em {registro.get('local', 'Sede da Polícia Federal - DICOR')}, na data/horário {registro.get('data_hora', 'a definir')}. "
         "Ressalta-se que o não comparecimento injustificado poderá ensejar a adoção das medidas legais cabíveis. "
-        f"Motivo informado: {registro.get('motivo', 'Não informado')}. "
         "Sem mais para o momento, colocamo-nos à disposição para eventuais esclarecimentos."
     )
-    for linha in _wrap_pdf(c, texto, "Courier", 9.55, largura-2.1*cm):
-        if ypos < 4.1*cm:
+    for linha in _wrap_pdf(c, texto, "Courier", 10.15, largura-2.15*cm):
+        if y < 4.4*cm:
             break
-        c.drawString(1.05*cm, ypos, linha)
-        ypos -= 0.42*cm
+        c.drawString(1.08*cm, y, linha)
+        y -= 0.43*cm
+
     c.setStrokeColor(colors.HexColor("#CCCCCC"))
-    c.line(5.8*cm, 2.35*cm, largura-5.8*cm, 2.35*cm)
+    c.line(5.6*cm, 2.28*cm, largura-5.6*cm, 2.28*cm)
     c.setFillColor(branco)
-    c.setFont("Courier-Bold", 9.2)
-    c.drawCentredString(largura/2, 1.9*cm, "POLÍCIA FEDERAL - DICOR")
-    c.setFont("Courier", 8.2)
-    c.drawCentredString(largura/2, 1.52*cm, f"Emitido por: {registro.get('solicitado_por_nome', 'Sistema DICOR')}")
+    c.setFont("Courier-Bold", 9.5)
+    c.drawCentredString(largura/2, 1.84*cm, "POLÍCIA FEDERAL - DICOR")
+    c.setFont("Courier", 8.5)
+    c.drawCentredString(largura/2, 1.46*cm, f"Emitido por: {registro.get('solicitado_por_nome', 'Sistema DICOR')}")
     c.setFillColor(dourado)
-    c.setFont("Courier-Bold", 7.2)
+    c.setFont("Courier-Bold", 7.4)
     c.drawCentredString(largura/2, 0.88*cm, "DOCUMENTO DE USO INTERNO • GTA RP • CAPITAL MORADA DO VALLEY")
     c.save()
 
@@ -9875,19 +9987,42 @@ def gerar_docx_comparecimento(registro: Dict[str, Any], caminho_docx: Path) -> N
         raise RuntimeError("Dependência ausente: instale python-docx.")
     caminho_docx.parent.mkdir(parents=True, exist_ok=True)
     doc = Document()
+    try:
+        sec = doc.sections[0]
+        sec.top_margin = Inches(0.55)
+        sec.bottom_margin = Inches(0.55)
+        sec.left_margin = Inches(0.60)
+        sec.right_margin = Inches(0.60)
+    except Exception:
+        pass
     p = doc.add_paragraph()
     p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    run = p.add_run("POLÍCIA FEDERAL\nCAPITAL MORADA DO VALLEY\nDICOR")
+    run = p.add_run("POLÍCIA FEDERAL\nDO ESTADO DA CAPITAL\nMORADA DO VALLEY")
     run.bold = True
-    run.font.size = Pt(16)
-    p = doc.add_paragraph()
-    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    r = p.add_run(f"SOLICITAÇÃO DE COMPARECIMENTO: {registro.get('numero', '00000-0000')}")
-    r.bold = True
-    r.font.size = Pt(13)
+    try:
+        run.font.size = Pt(15)
+    except Exception:
+        pass
+    p2 = doc.add_paragraph()
+    p2.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    r2 = p2.add_run(f"SOLICITAÇÃO DE COMPARECIMENTO: {registro.get('numero', '00000-0000')}")
+    r2.bold = True
+    try:
+        r2.font.size = Pt(13)
+    except Exception:
+        pass
     tabela = doc.add_table(rows=0, cols=2)
     tabela.style = "Table Grid"
-    for k, v in [("Data de Expedição", registro.get("data_expedicao", agora_br())), ("Nº do Processo", registro.get("processo", "Não informado")), ("Convocado", registro.get("nome", "Não informado")), ("RG", registro.get("rg", "Não informado")), ("Data/Horário", registro.get("data_hora", "Não informado")), ("Local", registro.get("local", "Não informado")), ("Motivo", registro.get("motivo", "Não informado"))]:
+    campos = [
+        ("Data de Expedição", registro.get("data_expedicao", agora_br())),
+        ("Nº do Processo", registro.get("processo", "Não informado")),
+        ("Convocado", registro.get("nome", "Não informado")),
+        ("RG", registro.get("rg", "Não informado")),
+        ("Data/Horário", registro.get("data_hora", "Não informado")),
+        ("Local", registro.get("local", "Não informado")),
+        ("Motivo", registro.get("motivo", "Não informado")),
+    ]
+    for k, v in campos:
         row = tabela.add_row().cells
         row[0].text = str(k)
         row[1].text = str(v)
@@ -9895,7 +10030,7 @@ def gerar_docx_comparecimento(registro: Dict[str, Any], caminho_docx: Path) -> N
         "O Departamento de Inteligência e Combate ao Crime Organizado - DICOR, no uso de suas atribuições legais e com fundamento nos procedimentos internos, "
         "SOLICITA o comparecimento de Vossa Senhoria para prestar esclarecimentos referentes à investigação em curso relacionada ao processo em epígrafe. "
         f"O comparecimento deverá ocorrer em {registro.get('local', 'Sede da Polícia Federal - DICOR')}, na data/horário {registro.get('data_hora', 'a definir')}. "
-        "Ressalta-se que o não comparecimento injustificado poderá ensejar a adoção das medidas legais cabíveis."
+        "Ressalta-se que o não comparecimento injustificado poderá ensejar a adoção das medidas legais cabíveis. Sem mais para o momento, colocamo-nos à disposição para eventuais esclarecimentos."
     )
     p = doc.add_paragraph(texto)
     p.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
@@ -9905,7 +10040,6 @@ def gerar_docx_comparecimento(registro: Dict[str, Any], caminho_docx: Path) -> N
     p = doc.add_paragraph(f"Emitido por: {registro.get('solicitado_por_nome', 'Sistema DICOR')}")
     p.alignment = WD_ALIGN_PARAGRAPH.CENTER
     doc.save(str(caminho_docx))
-
 
 def preparar_registro_comparecimento(atendimento: Dict[str, Any], dados: Dict[str, Any], usuario: discord.abc.User) -> Dict[str, Any]:
     return {
