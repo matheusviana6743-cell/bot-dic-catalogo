@@ -1915,6 +1915,17 @@ class FinalizarProcuradoView(View):
                 pass
 
 
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception, item) -> None:
+        await enviar_log(f"❌ Erro na finalização de procurado: {error}\n```{traceback.format_exc()[:1500]}```")
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send("❌ Não foi possível finalizar o procurado. Veja os logs.", ephemeral=True)
+            else:
+                await interaction.response.send_message("❌ Não foi possível finalizar o procurado. Veja os logs.", ephemeral=True)
+        except Exception:
+            pass
+
 class RetirarProcuradoModal(Modal, title="Retirar Procurado"):
     rg = TextInput(label="RG", placeholder="RG do procurado", max_length=50)
     motivo = TextInput(label="Motivo", placeholder="Motivo da retirada", style=discord.TextStyle.paragraph, max_length=800, required=False)
@@ -7883,8 +7894,27 @@ class ReabrirMesaView(discord.ui.View):
         custom_id="dic_reabrir_mesa_botao"
     )
     async def reabrir(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # Garante que a função interna recebe a interação e o canal de texto corretamente
-        await reabrir_mesa_core(interaction, interaction.channel)
+        try:
+            await reabrir_mesa_core(interaction, interaction.channel)
+        except Exception as erro:
+            await enviar_log(f"❌ Erro ao reabrir mesa pelo botão: {erro}\n```{traceback.format_exc()[:1500]}```")
+            try:
+                if interaction.response.is_done():
+                    await interaction.followup.send("❌ Não foi possível reabrir a mesa. O erro foi enviado para os logs.", ephemeral=True)
+                else:
+                    await interaction.response.send_message("❌ Não foi possível reabrir a mesa. O erro foi enviado para os logs.", ephemeral=True)
+            except Exception:
+                pass
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception, item) -> None:
+        await enviar_log(f"❌ Erro na view de reabrir mesa: {error}\n```{traceback.format_exc()[:1500]}```")
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send("❌ O botão deu erro. Veja os logs.", ephemeral=True)
+            else:
+                await interaction.response.send_message("❌ O botão deu erro. Veja os logs.", ephemeral=True)
+        except Exception:
+            pass
 @bot.event
 async def on_ready():
     global comandos_ja_sincronizados
@@ -10660,6 +10690,17 @@ class AutorizacaoComparecimentoBoletimView(View):
         await enviar_log(f"❌ Comparecimento recusado no boletim `{atendimento.get('numero')}` por {interaction.user.mention} (`{interaction.user.id}`).")
         await interaction.followup.send("❌ Solicitação recusada.", ephemeral=True)
 
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception, item) -> None:
+        await enviar_log(f"❌ Erro na autorização de comparecimento: {error}\n```{traceback.format_exc()[:1500]}```")
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send("❌ O painel de autorização do mandado deu erro. Veja os logs.", ephemeral=True)
+            else:
+                await interaction.response.send_message("❌ O painel de autorização do mandado deu erro. Veja os logs.", ephemeral=True)
+        except Exception:
+            pass
+
 class ProcuradoBoletimModal(Modal, title="Cadastrar como Procurado"):
     nome = TextInput(label="Nome", max_length=120, required=True)
     rg = TextInput(label="RG", max_length=50, required=True)
@@ -10739,6 +10780,17 @@ class AutorizacaoProcuradoBoletimView(View):
         await enviar_log(f"❌ Procurado recusado no boletim `{atendimento.get('numero')}` por {interaction.user.mention} (`{interaction.user.id}`).")
         await interaction.followup.send("❌ Solicitação recusada.", ephemeral=True)
 
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception, item) -> None:
+        await enviar_log(f"❌ Erro na autorização de procurado do boletim: {error}\n```{traceback.format_exc()[:1500]}```")
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send("❌ O painel de autorização do procurado deu erro. Veja os logs.", ephemeral=True)
+            else:
+                await interaction.response.send_message("❌ O painel de autorização do procurado deu erro. Veja os logs.", ephemeral=True)
+        except Exception:
+            pass
+
 class FotoProcuradoBoletimView(View):
     def __init__(self): super().__init__(timeout=None)
     @discord.ui.button(label="Confirmar Fotos e Publicar", emoji="📸", style=discord.ButtonStyle.green, custom_id="dic_bo_confirmar_fotos_procurado")
@@ -10804,6 +10856,17 @@ class BoletimAtendimentoView(View):
                     texto = coletar_texto_embed(msg)
             except Exception: texto = ""
         await interaction.response.send_modal(ProcuradoBoletimModal(extrair_dados_procurado_de_texto(texto)))
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception, item) -> None:
+        await enviar_log(f"❌ Erro nos botões do atendimento do boletim: {error}\n```{traceback.format_exc()[:1500]}```")
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send("❌ O botão do boletim deu erro. Veja os logs.", ephemeral=True)
+            else:
+                await interaction.response.send_message("❌ O botão do boletim deu erro. Veja os logs.", ephemeral=True)
+        except Exception:
+            pass
+
 
 async def finalizar_boletim_atendimento(interaction: discord.Interaction, resultado: str) -> None:
     if not interaction.response.is_done(): await interaction.response.defer(ephemeral=True, thinking=True)
