@@ -17,6 +17,7 @@ import datetime
 import unicodedata
 from pathlib import Path
 from typing import Optional, Dict, Any, List
+from urllib.parse import quote
 
 import discord
 from discord import app_commands
@@ -172,6 +173,11 @@ ASSINATURA_AGENTE_RESPONSAVEL_TEXTO = os.getenv("ASSINATURA_AGENTE_RESPONSAVEL_T
 
 # Catalogo
 CATALOG_PUBLIC_URL = os.getenv("CATALOG_PUBLIC_URL", "http://127.0.0.1:8000/").strip()
+# URL pública usada para baixar dossiês sem anexar arquivos grandes no Discord.
+# Se ficar vazio, usa o mesmo domínio público do catálogo.
+DOSSIE_PUBLIC_URL = os.getenv("DOSSIE_PUBLIC_URL", CATALOG_PUBLIC_URL).strip() or CATALOG_PUBLIC_URL
+# Por padrão, o bot envia links de download em vez de anexar PDF/DOCX, evitando 413 Payload Too Large e previews.
+DOSSIE_ENVIAR_ARQUIVOS_DISCORD = os.getenv("DOSSIE_ENVIAR_ARQUIVOS_DISCORD", "0").strip().lower() in {"1", "true", "sim", "yes", "on"}
 CATALOG_ADMIN_PASSWORD = os.getenv("CATALOG_ADMIN_PASSWORD", "").strip()
 PORT = env_int("PORT", 8000)
 
@@ -1268,11 +1274,57 @@ async def api_apagar_procurado(
     )
 
 
+
+
+def dossie_download_url(caminho: Any, nome_download: Optional[str] = None) -> str:
+    """Monta link público para baixar dossiês sem depender do upload do Discord."""
+    try:
+        caminho_path = Path(str(caminho)).resolve()
+        base_dir = DOSSIES_DIR.resolve()
+        if base_dir not in caminho_path.parents:
+            return ""
+        rel = caminho_path.relative_to(base_dir)
+        partes = [quote(parte) for parte in rel.parts]
+        url_base = (DOSSIE_PUBLIC_URL or CATALOG_PUBLIC_URL or "").rstrip("/")
+        if not url_base:
+            return ""
+        url = f"{url_base}/dossies/{'/'.join(partes)}?download=1"
+        if nome_download:
+            url += f"&nome={quote(str(nome_download))}"
+        return url
+    except Exception:
+        return ""
+
+
+async def baixar_dossie_http(request: web.Request) -> web.StreamResponse:
+    """Endpoint protegido contra path traversal para baixar PDF/DOCX gerados."""
+    rel = str(request.match_info.get("caminho", "") or "").strip().replace("\\", "/")
+    if not rel or ".." in rel.split("/"):
+        return web.Response(status=404, text="Arquivo não encontrado.")
+
+    try:
+        caminho = (DOSSIES_DIR / rel).resolve()
+        base_dir = DOSSIES_DIR.resolve()
+        if base_dir not in caminho.parents or not caminho.exists() or not caminho.is_file():
+            return web.Response(status=404, text="Arquivo não encontrado.")
+
+        nome = request.query.get("nome") or caminho.name
+        nome_seguro = re.sub(r"[^A-Za-z0-9_.\-() ]+", "_", str(nome))[:180] or caminho.name
+        headers = {
+            "Content-Disposition": f'attachment; filename="{nome_seguro}"',
+            "X-Content-Type-Options": "nosniff",
+        }
+        return web.FileResponse(path=str(caminho), headers=headers)
+    except Exception as erro:
+        await enviar_log(f"❌ Erro ao servir download de dossiê: {erro}")
+        return web.Response(status=500, text="Falha ao preparar download.")
+
 async def start_web_server():
     gerar_catalogo_html()
     app = web.Application()
     app.router.add_get("/", pagina_inicial)
     app.router.add_get("/index.html", pagina_inicial)
+    app.router.add_get("/dossies/{caminho:.+}", baixar_dossie_http)
     app.router.add_post(
         "/api/catalogo/apagar",
         api_apagar_procurado,
@@ -2760,6 +2812,15 @@ async def enviar_arquivos_dossie_destino(
     if not destino or not arquivos or not hasattr(destino, "send"):
         return None
 
+    itens: List[tuple[str, str, str]] = []
+    if "pdf" in arquivos and Path(arquivos["pdf"]).exists():
+        itens.append((arquivos["pdf"], nome_pdf, "PDF"))
+    if "docx" in arquivos and Path(arquivos["docx"]).exists():
+        itens.append((arquivos["docx"], nome_docx, "DOCX"))
+
+    if not itens:
+        return None
+
     embed_oficial = discord.Embed(
         title=titulo,
         description=(
@@ -2767,12 +2828,13 @@ async def enviar_arquivos_dossie_destino(
             f"**Investigação:** `{dados_dossie.get('numero_investigacao')}`\n"
             f"**Operação:** {dados_dossie.get('nome_operacao')}\n"
             f"**Mesa:** {canal_mesa.mention}\n"
-            f"**Encerrada por:** {usuario.mention if hasattr(usuario, 'mention') else usuario}"
+            f"**Encerrada por:** {usuario.mention if hasattr(usuario, 'mention') else usuario}\n\n"
+            "📥 **Modo download ativado:** os arquivos ficam disponíveis por link, sem preview/anexo pesado no Discord."
         ),
         color=discord.Color.from_rgb(0, 43, 91),
     )
     embed_oficial.add_field(
-        name="Conteúdo",
+        name="Conteúdo coletado",
         value=(
             f"Mensagens: `{dados_dossie.get('estatisticas', {}).get('mensagens_analisadas', 0)}` • "
             f"Evidências: `{dados_dossie.get('estatisticas', {}).get('evidencias', 0)}` • "
@@ -2780,47 +2842,51 @@ async def enviar_arquivos_dossie_destino(
         ),
         inline=False,
     )
-    embed_oficial.set_footer(text="Polícia Federal - DICOR • Dossiê gerado automaticamente")
 
-    itens: List[tuple[str, str]] = []
-    if "pdf" in arquivos and Path(arquivos["pdf"]).exists():
-        itens.append((arquivos["pdf"], nome_pdf))
-    if "docx" in arquivos and Path(arquivos["docx"]).exists():
-        itens.append((arquivos["docx"], nome_docx))
-
-    if not itens:
-        return None
-
-    # Primeiro tenta enviar tudo junto. Se o Discord retornar 413/Payload Too Large,
-    # envia um arquivo por mensagem. Isso evita perder o dossiê quando PDF+DOCX ficam grandes.
-    try:
-        arquivos_discord = [discord.File(caminho, filename=nome) for caminho, nome in itens]
-        return await destino.send(embed=embed_oficial, files=arquivos_discord)
-    except discord.HTTPException as erro:
-        await enviar_log(f"⚠️ Envio conjunto do dossiê falhou. Tentando arquivos separados: {erro}")
-
-    primeira_msg: Optional[discord.Message] = None
-    for indice, (caminho, nome) in enumerate(itens, start=1):
+    linhas_download: List[str] = []
+    for caminho, nome, rotulo in itens:
+        tamanho_mb = 0.0
         try:
-            tamanho = Path(caminho).stat().st_size
-            if tamanho > 24 * 1024 * 1024:
-                aviso = (
-                    f"⚠️ `{nome}` ficou grande demais para envio direto pelo Discord "
-                    f"({tamanho / (1024 * 1024):.1f} MB). O arquivo foi preservado no armazenamento interno do bot."
-                )
-                msg = await destino.send(embed=embed_oficial if primeira_msg is None else None, content=aviso)
-                primeira_msg = primeira_msg or msg
-                continue
-            msg = await destino.send(
-                embed=embed_oficial if primeira_msg is None else None,
-                content=f"📄 **Dossiê Operacional — arquivo {indice}/{len(itens)}**",
-                file=discord.File(caminho, filename=nome),
-            )
-            primeira_msg = primeira_msg or msg
-        except Exception as erro_individual:
-            await enviar_log(f"❌ Falha ao enviar `{nome}` individualmente: {erro_individual}")
-    return primeira_msg
+            tamanho_mb = Path(caminho).stat().st_size / (1024 * 1024)
+        except Exception:
+            pass
+        url = dossie_download_url(caminho, nome)
+        if url:
+            # Usar <url> evita preview automático e mantém a mensagem mais limpa.
+            linhas_download.append(f"**{rotulo}:** <{url}>  — `{tamanho_mb:.1f} MB`")
+        else:
+            linhas_download.append(f"**{rotulo}:** arquivo salvo no armazenamento interno do bot, mas sem URL pública configurada. `{tamanho_mb:.1f} MB`")
 
+    conteudo_links = (
+        "📄 **Dossiê Operacional gerado.**\n"
+        "Clique no link correspondente para **baixar** o arquivo.\n\n"
+        + "\n".join(linhas_download)
+    )
+
+    # Padrão: enviar apenas links. Isso evita erro 413 Payload Too Large e evita preview de arquivo no Discord.
+    if not DOSSIE_ENVIAR_ARQUIVOS_DISCORD:
+        return await destino.send(
+            content=conteudo_links[:1900],
+            embed=embed_oficial,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    # Modo opcional: tentar anexar. Se falhar, retorna automaticamente para links de download.
+    try:
+        arquivos_discord = [discord.File(caminho, filename=nome) for caminho, nome, _ in itens]
+        return await destino.send(
+            content="📄 **Dossiê Operacional — arquivos anexados.**",
+            embed=embed_oficial,
+            files=arquivos_discord,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+    except discord.HTTPException as erro:
+        await enviar_log(f"⚠️ Envio do dossiê por anexo falhou. Enviando links de download: {erro}")
+        return await destino.send(
+            content=conteudo_links[:1900],
+            embed=embed_oficial,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
 
 async def bloquear_mesa_para_novas_mensagens(canal: discord.TextChannel) -> None:
     guild = canal.guild
@@ -3274,6 +3340,14 @@ async def fechar_mesa_core(
     except Exception:
         pass
 
+    try:
+        await interaction.followup.send(
+            "✅ Encerramento iniciado. Vou gerar o dossiê e liberar os links de download quando terminar.",
+            ephemeral=True,
+        )
+    except Exception:
+        pass
+
     mesa = None
     try:
         mesa = buscar_mesa_por_canal(canal.id)
@@ -3462,7 +3536,7 @@ async def fechar_mesa_core(
             "✅ **Mesa encerrada com sucesso.**\n\n"
             "📄 **Dossiê Operacional gerado.**\n"
             "📁 **Arquivos salvos com sucesso.**\n"
-            "📎 **Arquivos enviados na mesa e/ou no canal oficial.**\n"
+            "🔗 **Links de download enviados na mesa e/ou no canal oficial.**\n"
             "📚 **Investigação arquivada.**\n"
             "🏛️ **Polícia Federal - DICOR.**"
         ),
@@ -3486,7 +3560,7 @@ async def fechar_mesa_core(
             inline=False,
         )
     if mensagem_dossie_url:
-        embed_sucesso.add_field(name="Arquivo oficial", value=f"[Abrir envio do dossiê]({mensagem_dossie_url})", inline=False)
+        embed_sucesso.add_field(name="Downloads do dossiê", value=f"[Abrir mensagem com links]({mensagem_dossie_url})", inline=False)
     avisos = erros_geracao + erros_envio
     if avisos:
         embed_sucesso.add_field(name="Avisos", value="\n".join(avisos)[:900], inline=False)
@@ -3516,7 +3590,7 @@ async def fechar_mesa_core(
 
     try:
         await interaction.followup.send(
-            "✅ Mesa encerrada e Dossiê Operacional gerado com sucesso. Os arquivos foram enviados na mesa/canal oficial.",
+            "✅ Mesa encerrada e Dossiê Operacional gerado com sucesso. Os links de download foram enviados na mesa/canal oficial.",
             ephemeral=True,
         )
     except Exception:
