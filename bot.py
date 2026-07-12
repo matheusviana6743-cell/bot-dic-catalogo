@@ -1285,9 +1285,11 @@ def dossie_download_url(caminho: Any, nome_download: Optional[str] = None) -> st
             return ""
         rel = caminho_path.relative_to(base_dir)
         partes = [quote(parte) for parte in rel.parts]
-        url_base = (DOSSIE_PUBLIC_URL or CATALOG_PUBLIC_URL or "").rstrip("/")
+        url_base = (DOSSIE_PUBLIC_URL or CATALOG_PUBLIC_URL or "").strip().rstrip("/")
         if not url_base:
             return ""
+        if not re.match(r"^https?://", url_base, flags=re.I):
+            url_base = "https://" + url_base
         url = f"{url_base}/dossies/{'/'.join(partes)}?download=1"
         if nome_download:
             url += f"&nome={quote(str(nome_download))}"
@@ -2809,6 +2811,11 @@ async def enviar_arquivos_dossie_destino(
     usuario: discord.abc.User,
     titulo: str = "🏛️ DOSSIÊ OPERACIONAL AUTOMÁTICO DICOR",
 ) -> Optional[discord.Message]:
+    """Envia um painel limpo de download do dossiê.
+
+    Não publica URL crua no Discord. Os downloads ficam em botões, evitando preview
+    e deixando o canal com aparência mais profissional.
+    """
     if not destino or not arquivos or not hasattr(destino, "send"):
         return None
 
@@ -2821,57 +2828,96 @@ async def enviar_arquivos_dossie_destino(
     if not itens:
         return None
 
+    stats = dados_dossie.get("estatisticas", {}) or {}
+    processo = dados_dossie.get("processo") or "Não informado"
+    investigacao = dados_dossie.get("numero_investigacao") or "Não informado"
+    operacao = dados_dossie.get("nome_operacao") or "Não informado"
+
     embed_oficial = discord.Embed(
         title=titulo,
         description=(
-            f"**Processo:** `{dados_dossie.get('processo')}`\n"
-            f"**Investigação:** `{dados_dossie.get('numero_investigacao')}`\n"
-            f"**Operação:** {dados_dossie.get('nome_operacao')}\n"
-            f"**Mesa:** {canal_mesa.mention}\n"
-            f"**Encerrada por:** {usuario.mention if hasattr(usuario, 'mention') else usuario}\n\n"
-            "📥 **Modo download ativado:** os arquivos ficam disponíveis por link, sem preview/anexo pesado no Discord."
+            "Documento oficial consolidado e disponível para download.\n"
+            "Use os botões abaixo para baixar os arquivos sem gerar prévia no Discord."
         ),
         color=discord.Color.from_rgb(0, 43, 91),
+    )
+    embed_oficial.add_field(name="Processo", value=f"`{processo}`", inline=True)
+    embed_oficial.add_field(name="Investigação", value=f"`{investigacao}`", inline=True)
+    embed_oficial.add_field(name="Operação", value=f"**{operacao}**", inline=False)
+    embed_oficial.add_field(name="Mesa", value=canal_mesa.mention, inline=True)
+    embed_oficial.add_field(
+        name="Encerrada por",
+        value=usuario.mention if hasattr(usuario, "mention") else str(usuario),
+        inline=True,
     )
     embed_oficial.add_field(
         name="Conteúdo coletado",
         value=(
-            f"Mensagens: `{dados_dossie.get('estatisticas', {}).get('mensagens_analisadas', 0)}` • "
-            f"Evidências: `{dados_dossie.get('estatisticas', {}).get('evidencias', 0)}` • "
-            f"Links: `{dados_dossie.get('estatisticas', {}).get('links', 0)}`"
+            f"Mensagens: `{stats.get('mensagens_analisadas', 0)}` • "
+            f"Evidências: `{stats.get('evidencias', 0)}` • "
+            f"Links: `{stats.get('links', 0)}`"
         ),
         inline=False,
     )
 
-    linhas_download: List[str] = []
+    view_download = discord.ui.View(timeout=None)
+    linhas_arquivos: List[str] = []
+    urls_validas = 0
+
     for caminho, nome, rotulo in itens:
         tamanho_mb = 0.0
         try:
             tamanho_mb = Path(caminho).stat().st_size / (1024 * 1024)
         except Exception:
             pass
+
+        linhas_arquivos.append(f"**{rotulo}:** `{tamanho_mb:.1f} MB`")
         url = dossie_download_url(caminho, nome)
         if url:
-            # Usar <url> evita preview automático e mantém a mensagem mais limpa.
-            linhas_download.append(f"**{rotulo}:** <{url}>  — `{tamanho_mb:.1f} MB`")
-        else:
-            linhas_download.append(f"**{rotulo}:** arquivo salvo no armazenamento interno do bot, mas sem URL pública configurada. `{tamanho_mb:.1f} MB`")
+            urls_validas += 1
+            emoji = "📄" if rotulo.upper() == "PDF" else "📝"
+            view_download.add_item(
+                discord.ui.Button(
+                    label=f"Baixar {rotulo}",
+                    emoji=emoji,
+                    style=discord.ButtonStyle.link,
+                    url=url,
+                )
+            )
 
-    conteudo_links = (
-        "📄 **Dossiê Operacional gerado.**\n"
-        "Clique no link correspondente para **baixar** o arquivo.\n\n"
-        + "\n".join(linhas_download)
+    embed_oficial.add_field(
+        name="Arquivos disponíveis",
+        value="\n".join(linhas_arquivos) if linhas_arquivos else "Nenhum arquivo disponível.",
+        inline=False,
     )
 
-    # Padrão: enviar apenas links. Isso evita erro 413 Payload Too Large e evita preview de arquivo no Discord.
+    if urls_validas:
+        embed_oficial.add_field(
+            name="Download",
+            value="Clique nos botões abaixo. Os arquivos não são anexados para evitar erro de limite e prévia automática.",
+            inline=False,
+        )
+    else:
+        embed_oficial.add_field(
+            name="Download indisponível",
+            value="Os arquivos foram salvos, mas não há URL pública configurada. Configure `DOSSIE_PUBLIC_URL` ou `CATALOG_PUBLIC_URL` com o link público do Railway.",
+            inline=False,
+        )
+
+    embed_oficial.set_footer(text="Polícia Federal - DICOR • Sistema de Inteligência Operacional")
+
+    conteudo = "🏛️ **Polícia Federal - DICOR**\n📁 **Dossiê Operacional disponível para download.**"
+
+    # Padrão: enviar painel com botões. Isso evita erro 413 Payload Too Large e deixa o Discord limpo.
     if not DOSSIE_ENVIAR_ARQUIVOS_DISCORD:
         return await destino.send(
-            content=conteudo_links[:1900],
+            content=conteudo,
             embed=embed_oficial,
+            view=view_download if urls_validas else None,
             allowed_mentions=discord.AllowedMentions.none(),
         )
 
-    # Modo opcional: tentar anexar. Se falhar, retorna automaticamente para links de download.
+    # Modo opcional: tentar anexar. Se falhar, retorna automaticamente ao painel com botões.
     try:
         arquivos_discord = [discord.File(caminho, filename=nome) for caminho, nome, _ in itens]
         return await destino.send(
@@ -2881,10 +2927,11 @@ async def enviar_arquivos_dossie_destino(
             allowed_mentions=discord.AllowedMentions.none(),
         )
     except discord.HTTPException as erro:
-        await enviar_log(f"⚠️ Envio do dossiê por anexo falhou. Enviando links de download: {erro}")
+        await enviar_log(f"⚠️ Envio do dossiê por anexo falhou. Enviando painel de download: {erro}")
         return await destino.send(
-            content=conteudo_links[:1900],
+            content=conteudo,
             embed=embed_oficial,
+            view=view_download if urls_validas else None,
             allowed_mentions=discord.AllowedMentions.none(),
         )
 
@@ -3560,7 +3607,7 @@ async def fechar_mesa_core(
             inline=False,
         )
     if mensagem_dossie_url:
-        embed_sucesso.add_field(name="Downloads do dossiê", value=f"[Abrir mensagem com links]({mensagem_dossie_url})", inline=False)
+        embed_sucesso.add_field(name="Download do dossiê", value=f"[Abrir painel de download]({mensagem_dossie_url})", inline=False)
     avisos = erros_geracao + erros_envio
     if avisos:
         embed_sucesso.add_field(name="Avisos", value="\n".join(avisos)[:900], inline=False)
@@ -3590,7 +3637,7 @@ async def fechar_mesa_core(
 
     try:
         await interaction.followup.send(
-            "✅ Mesa encerrada e Dossiê Operacional gerado com sucesso. Os links de download foram enviados na mesa/canal oficial.",
+            "✅ Mesa encerrada e Dossiê Operacional gerado com sucesso. O painel de download foi enviado na mesa/canal oficial.",
             ephemeral=True,
         )
     except Exception:
