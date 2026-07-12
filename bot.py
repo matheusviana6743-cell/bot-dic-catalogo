@@ -19,7 +19,7 @@ import zipfile
 import shutil
 import traceback
 from pathlib import Path
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 from urllib.parse import quote, urlparse
 
 import discord
@@ -8696,7 +8696,7 @@ def gerar_pdf_dossie(dados: Dict[str, Any], caminho_pdf: Path) -> None:
     rodape_limite = 1.65 * cm
 
     def _limpar(txt: Any) -> str:
-        return str(txt if txt is not None else "Não informado").replace("\\r", "").strip() or "Não informado"
+        return str(txt if txt is not None else "Não informado").replace("\r", "").strip() or "Não informado"
 
     def _linhas(texto: Any, fonte: str = "Courier", tamanho: float = 9.4, largura_max: float = None) -> List[str]:
         largura_max = largura_max or largura_util
@@ -9834,14 +9834,17 @@ def _draw_logo_comparecimento(c, caminho: Optional[Path], x: float, y: float, w:
 
 
 
+
 def gerar_pdf_comparecimento(registro: Dict[str, Any], caminho_pdf: Path) -> None:
-    """Gera o mandado/solicitação no mesmo modelo aprovado da prévia, com fonte levemente maior."""
+    """Gera o mandado/solicitação no modelo aprovado, sem sobrepor o cabeçalho da imagem."""
     if canvas is None or A4 is None:
         raise RuntimeError("Dependência ausente: instale reportlab.")
     caminho_pdf.parent.mkdir(parents=True, exist_ok=True)
+
     c = canvas.Canvas(str(caminho_pdf), pagesize=A4)
     largura, altura = A4
     template = caminho_modelo_visual_canva()
+
     if template and Path(template).exists():
         try:
             c.drawImage(str(template), 0, 0, width=largura, height=altura, preserveAspectRatio=False, mask="auto")
@@ -9852,14 +9855,21 @@ def gerar_pdf_comparecimento(registro: Dict[str, Any], caminho_pdf: Path) -> Non
         c.setFillColor(colors.HexColor("#0B0B0B"))
         c.rect(0, 0, largura, altura, fill=1, stroke=0)
 
-    margem_x = 1.08 * cm
-    y = altura - 4.25 * cm
+    branco = colors.HexColor("#FFFFFF")
+    dourado = colors.HexColor("#D4AF37")
+    azul_claro = colors.HexColor("#8EB8C8")
+    preto_caixa = colors.HexColor("#050505")
+
+    margem_x = 1.18 * cm
     largura_util = largura - 2 * margem_x
 
-    def linhas(texto, fonte="Courier", tam=9.4, largura_max=None):
+    def _safe(txt: Any) -> str:
+        return str(txt if txt is not None else "Não informado").replace("\r", "").strip() or "Não informado"
+
+    def _linhas(texto: Any, fonte="Courier", tam=9.3, largura_max=None) -> List[str]:
         largura_max = largura_max or largura_util
-        saida = []
-        for bloco in str(texto or "").replace("\r", "").split("\n"):
+        saida: List[str] = []
+        for bloco in _safe(texto).split("\n"):
             bloco = bloco.strip()
             if not bloco:
                 saida.append("")
@@ -9867,63 +9877,103 @@ def gerar_pdf_comparecimento(registro: Dict[str, Any], caminho_pdf: Path) -> Non
             try:
                 saida.extend(_wrap_pdf(c, bloco, fonte, tam, largura_max))
             except Exception:
-                import textwrap
-                saida.extend(textwrap.wrap(bloco, 95) or [""])
+                import textwrap as _tw
+                saida.extend(_tw.wrap(bloco, 72) or [""])
         return saida
 
-    def draw_label(label, value, y, label_w=4.2*cm):
-        c.setFillColor(colors.white)
-        c.setFont("Courier-Bold", 9.4)
-        c.drawString(margem_x, y, f"{label}:")
-        c.setFont("Courier", 9.4)
-        xs = margem_x + label_w
-        for idx, linha in enumerate(linhas(value, "Courier", 9.4, largura_util-label_w)):
-            if idx == 0:
-                c.drawString(xs, y, linha[:150])
-            else:
-                y -= 0.38 * cm
-                c.drawString(xs, y, linha[:150])
-        return y - 0.46 * cm
+    def _painel(x, y, w, h, titulo: str = ""):
+        try:
+            c.setFillAlpha(0.84)
+        except Exception:
+            pass
+        c.setFillColor(preto_caixa)
+        c.roundRect(x, y, w, h, 7, fill=1, stroke=0)
+        try:
+            c.setFillAlpha(1)
+            c.setStrokeAlpha(1)
+        except Exception:
+            pass
+        c.setStrokeColor(azul_claro)
+        c.setLineWidth(0.75)
+        c.roundRect(x, y, w, h, 7, fill=0, stroke=1)
+        if titulo:
+            c.setFillColor(dourado)
+            c.setFont("Courier-Bold", 10.7)
+            c.drawString(x + 0.22 * cm, y + h - 0.45 * cm, titulo.upper()[:80])
+            c.setStrokeColor(dourado)
+            c.line(x + 0.20 * cm, y + h - 0.58 * cm, x + w - 0.20 * cm, y + h - 0.58 * cm)
 
-    c.setFillColor(colors.white)
-    c.setFont("Courier-Bold", 11.6)
-    c.drawString(margem_x, y, f"SOLICITAÇÃO DE COMPARECIMENTO: {registro.get('numero', '00000-0000')}")
-    y -= 0.52 * cm
-    y = draw_label("Data de Expedição", registro.get("data_expedicao", agora_br()), y)
-    y = draw_label("Nº do Processo", registro.get("processo", "Não informado"), y)
-    y -= 0.20 * cm
-    y = draw_label("A(o) Sr.(a)", registro.get("nome", "Não informado"), y)
-    y = draw_label("RG", registro.get("rg", "Não informado"), y)
-    y -= 0.15 * cm
-    y = draw_label("Local", registro.get("local", "Sede da Polícia Federal - DICOR"), y)
-    y = draw_label("Data/Horário", registro.get("data_hora", "a definir"), y)
-    y = draw_label("Motivo", registro.get("motivo", "Não informado"), y)
-    y -= 0.20 * cm
+    def _kv(rows, x, y, label_w=4.45*cm, tam=9.4, leading=0.49*cm):
+        for label, value in rows:
+            c.setFont("Courier-Bold", tam)
+            c.setFillColor(dourado)
+            c.drawString(x, y, f"{label}:")
+            c.setFont("Courier", tam)
+            c.setFillColor(branco)
+            linhas = _linhas(value, "Courier", tam, largura_util - label_w - 0.4*cm)
+            if not linhas:
+                linhas = ["Não informado"]
+            c.drawString(x + label_w, y, linhas[0][:130])
+            for extra in linhas[1:2]:
+                y -= leading * 0.78
+                c.drawString(x + label_w, y, extra[:130])
+            y -= leading
+        return y
 
+    # O cabeçalho da arte já ocupa a parte de cima. O conteúdo começa abaixo dele.
+    y_top = altura - 5.35 * cm
+
+    _painel(margem_x, y_top - 2.25*cm, largura_util, 2.25*cm, "Solicitação de Comparecimento")
+    _kv([
+        ("Solicitação", registro.get("numero", "00000-0000")),
+        ("Data de Expedição", registro.get("data_expedicao", agora_br())),
+        ("Nº do Processo", registro.get("processo", "Não informado")),
+    ], margem_x + 0.28*cm, y_top - 0.82*cm, label_w=4.55*cm, tam=9.6, leading=0.45*cm)
+
+    y2 = y_top - 2.65*cm
+    _painel(margem_x, y2 - 1.55*cm, largura_util, 1.55*cm, "Identificação do Convocado")
+    _kv([
+        ("A(o) Sr.(a)", registro.get("nome", "Não informado")),
+        ("RG", registro.get("rg", "Não informado")),
+    ], margem_x + 0.28*cm, y2 - 0.72*cm, label_w=3.25*cm, tam=9.8, leading=0.48*cm)
+
+    y3 = y2 - 1.95*cm
+    _painel(margem_x, y3 - 2.15*cm, largura_util, 2.15*cm, "Local e Data para Comparecimento")
+    _kv([
+        ("Local", registro.get("local", "Sede da Polícia Federal - DICOR")),
+        ("Data/Horário", registro.get("data_hora", "a definir")),
+        ("Motivo", registro.get("motivo", "Não informado")),
+    ], margem_x + 0.28*cm, y3 - 0.72*cm, label_w=3.65*cm, tam=9.25, leading=0.46*cm)
+
+    y4 = y3 - 2.55*cm
+    altura_texto = max(4.10 * cm, y4 - 2.70 * cm)
+    _painel(margem_x, 2.75*cm, largura_util, altura_texto, "Texto Oficial")
     texto = (
         "O Departamento de Inteligência e Combate ao Crime Organizado - DICOR, no uso de suas atribuições legais e "
         "com fundamento nos procedimentos internos, SOLICITA o comparecimento de Vossa Senhoria para prestar "
         "esclarecimentos referentes à investigação em curso relacionada ao processo em epígrafe. "
-        f"O comparecimento deverá ocorrer em {registro.get('local', 'Sede da Polícia Federal - DICOR')}, "
-        f"na data/horário {registro.get('data_hora', 'a definir')}. "
+        f"O comparecimento deverá ocorrer no local informado para comparecimento ({registro.get('local', 'Sede da Polícia Federal - DICOR')}), "
+        f"na data/horário informado para comparecimento ({registro.get('data_hora', 'a definir')}). "
         "Ressalta-se que o não comparecimento injustificado poderá ensejar a adoção das medidas legais cabíveis. "
         "Sem mais para o momento, colocamo-nos à disposição para eventuais esclarecimentos."
     )
 
-    c.setFont("Courier", 9.4)
-    c.setFillColor(colors.white)
-    for linha in linhas(texto, "Courier", 9.7, largura_util):
-        if y < 3.4 * cm:
+    c.setFillColor(branco)
+    c.setFont("Courier", 9.15)
+    y_text = 2.75*cm + altura_texto - 0.92*cm
+    for linha in _linhas(texto, "Courier", 9.15, largura_util - 0.62*cm):
+        if y_text < 3.15 * cm:
             break
-        c.drawString(margem_x, y, linha[:180])
-        y -= 0.39 * cm
+        c.drawString(margem_x + 0.30*cm, y_text, linha[:160])
+        y_text -= 0.39 * cm
 
+    # Assinatura dentro da área livre inferior, sem jogar texto em cima da arte.
     c.setStrokeColor(colors.HexColor("#CCCCCC"))
-    c.line(5.4*cm, 2.18*cm, largura-5.4*cm, 2.18*cm)
-    c.setFillColor(colors.white)
-    c.setFont("Courier-Bold", 9.8)
-    c.drawCentredString(largura/2, 1.78*cm, "POLÍCIA FEDERAL - DICOR")
-    c.setFont("Courier", 8.2)
+    c.line(5.35*cm, 2.13*cm, largura-5.35*cm, 2.13*cm)
+    c.setFillColor(branco)
+    c.setFont("Courier-Bold", 9.2)
+    c.drawCentredString(largura/2, 1.74*cm, "POLÍCIA FEDERAL - DICOR")
+    c.setFont("Courier", 7.9)
     c.drawCentredString(largura/2, 1.43*cm, f"Emitido por: {registro.get('solicitado_por_nome', 'Sistema DICOR')}")
     c.save()
 
@@ -9963,8 +10013,8 @@ def gerar_docx_comparecimento(registro: Dict[str, Any], caminho_docx: Path) -> N
         ("Nº do Processo", registro.get("processo", "Não informado")),
         ("Convocado", registro.get("nome", "Não informado")),
         ("RG", registro.get("rg", "Não informado")),
-        ("Data/Horário", registro.get("data_hora", "Não informado")),
-        ("Local", registro.get("local", "Não informado")),
+        ("Data para comparecimento", registro.get("data_hora", "Não informado")),
+        ("Local para comparecimento", registro.get("local", "Não informado")),
         ("Motivo", registro.get("motivo", "Não informado")),
     ]
     for k, v in campos:
@@ -9974,7 +10024,7 @@ def gerar_docx_comparecimento(registro: Dict[str, Any], caminho_docx: Path) -> N
     texto = (
         "O Departamento de Inteligência e Combate ao Crime Organizado - DICOR, no uso de suas atribuições legais e com fundamento nos procedimentos internos, "
         "SOLICITA o comparecimento de Vossa Senhoria para prestar esclarecimentos referentes à investigação em curso relacionada ao processo em epígrafe. "
-        f"O comparecimento deverá ocorrer em {registro.get('local', 'Sede da Polícia Federal - DICOR')}, na data/horário {registro.get('data_hora', 'a definir')}. "
+        f"O comparecimento deverá ocorrer no local informado para comparecimento ({registro.get('local', 'Sede da Polícia Federal - DICOR')}), na data/horário informado para comparecimento ({registro.get('data_hora', 'a definir')}). "
         "Ressalta-se que o não comparecimento injustificado poderá ensejar a adoção das medidas legais cabíveis. Sem mais para o momento, colocamo-nos à disposição para eventuais esclarecimentos."
     )
     p = doc.add_paragraph(texto)
@@ -10428,8 +10478,8 @@ class ComparecimentoBoletimModal(Modal, title="Solicitar Comparecimento"):
     nome = TextInput(label="Nome do convocado", max_length=120)
     rg = TextInput(label="RG", max_length=50)
     motivo = TextInput(label="Motivo do comparecimento", style=discord.TextStyle.paragraph, max_length=900)
-    data_hora = TextInput(label="Data e horário", placeholder="Ex: 12/07 às 20h", max_length=120)
-    local = TextInput(label="Local", placeholder="Ex: Sede da Polícia Federal - DICOR", max_length=160)
+    data_hora = TextInput(label="Data para comparecimento", placeholder="Ex: 12/07 às 20h", max_length=120)
+    local = TextInput(label="Local para comparecimento", placeholder="Ex: Sede da Polícia Federal - DICOR", max_length=160)
 
     async def on_submit(self, interaction: discord.Interaction):
         dados = {
@@ -10492,8 +10542,8 @@ async def solicitar_autorizacao_comparecimento_boletim(interaction: discord.Inte
     embed.add_field(name="Solicitação", value=f"`{registro.get('numero')}`", inline=True)
     embed.add_field(name="Convocado", value=f"**{registro.get('nome')}**\nRG: `{registro.get('rg')}`", inline=False)
     embed.add_field(name="Motivo", value=str(registro.get("motivo", "Não informado"))[:900], inline=False)
-    embed.add_field(name="Data/Horário", value=str(registro.get("data_hora", "Não informado")), inline=True)
-    embed.add_field(name="Local", value=str(registro.get("local", "Não informado")), inline=True)
+    embed.add_field(name="Data para comparecimento", value=str(registro.get("data_hora", "Não informado")), inline=True)
+    embed.add_field(name="Local para comparecimento", value=str(registro.get("local", "Não informado")), inline=True)
     embed.add_field(name="Solicitado por", value=interaction.user.mention, inline=False)
 
     mencoes = mencoes_inspetor_mais(interaction.guild)
