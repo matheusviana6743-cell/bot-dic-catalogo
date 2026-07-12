@@ -8631,70 +8631,230 @@ def pdf_add_assinaturas_dossie(story: List[Any], dados: Dict[str, Any], style_ce
     ))
 
 def gerar_pdf_dossie(dados: Dict[str, Any], caminho_pdf: Path) -> None:
+    """Gera o Dossiê no modelo visual aprovado: estilo Canva/mandado, fundo escuro, moldura e identidade DICOR."""
     if SimpleDocTemplate is None:
         raise RuntimeError("Dependência ausente: instale reportlab, qrcode e pillow.")
 
     caminho_pdf = Path(caminho_pdf)
     caminho_pdf.parent.mkdir(parents=True, exist_ok=True)
 
+    largura, altura = A4
+    margem_x = 1.15 * cm
+    margem_y = 1.35 * cm
+
+    def on_page(c, doc):
+        c.saveState()
+        # Fundo escuro estilo documento RP aprovado.
+        c.setFillColor(colors.HexColor("#101010"))
+        c.rect(0, 0, largura, altura, stroke=0, fill=1)
+
+        # Marca d'água grande e discreta.
+        c.setFillColor(colors.Color(1, 1, 1, alpha=0.045))
+        c.setFont("Helvetica-Bold", 82)
+        c.translate(largura / 2, altura / 2)
+        c.rotate(34)
+        c.drawCentredString(0, 0, "DICOR")
+        c.setFont("Helvetica-Bold", 18)
+        c.drawCentredString(0, -1.25 * cm, "INTELIGÊNCIA OPERACIONAL")
+        c.rotate(-34)
+        c.translate(-largura / 2, -altura / 2)
+
+        # Moldura externa e interna.
+        c.setStrokeColor(colors.HexColor("#DCEEF4"))
+        c.setLineWidth(1.7)
+        c.rect(0.38 * cm, 0.38 * cm, largura - 0.76 * cm, altura - 0.76 * cm, stroke=1, fill=0)
+        c.setStrokeColor(colors.HexColor("#7FA6AF"))
+        c.setLineWidth(1.0)
+        c.rect(0.58 * cm, 0.58 * cm, largura - 1.16 * cm, altura - 1.16 * cm, stroke=1, fill=0)
+        c.setStrokeColor(colors.HexColor("#D4AF37"))
+        c.setLineWidth(0.8)
+        c.rect(0.82 * cm, 0.82 * cm, largura - 1.64 * cm, altura - 1.64 * cm, stroke=1, fill=0)
+
+        # Pequenos enfeites diagonais na moldura, sem pesar o documento.
+        c.setStrokeColor(colors.HexColor("#93B6BF"))
+        c.setLineWidth(0.45)
+        step = 0.36 * cm
+        x0, x1 = 0.48 * cm, largura - 0.48 * cm
+        y_top = altura - 0.50 * cm
+        y_bottom = 0.50 * cm
+        x = x0
+        while x < x1:
+            c.line(x, y_top, x + 0.14 * cm, y_top - 0.12 * cm)
+            c.line(x, y_bottom, x + 0.14 * cm, y_bottom + 0.12 * cm)
+            x += step
+        y = 0.72 * cm
+        while y < altura - 0.72 * cm:
+            c.line(0.50 * cm, y, 0.62 * cm, y + 0.14 * cm)
+            c.line(largura - 0.50 * cm, y, largura - 0.62 * cm, y + 0.14 * cm)
+            y += step
+
+        # Cabeçalho/rodapé interno.
+        c.setStrokeColor(colors.HexColor("#D4AF37"))
+        c.setLineWidth(0.7)
+        c.line(1.05 * cm, altura - 1.25 * cm, largura - 1.05 * cm, altura - 1.25 * cm)
+        c.line(1.05 * cm, 1.10 * cm, largura - 1.05 * cm, 1.10 * cm)
+        c.setFillColor(colors.HexColor("#F2F2F2"))
+        c.setFont("Courier-Bold", 7.6)
+        c.drawString(1.05 * cm, altura - 0.95 * cm, "CAPITAL MORADA DO VALLEY • POLÍCIA FEDERAL • DICOR")
+        c.drawRightString(largura - 1.05 * cm, altura - 0.95 * cm, f"Processo: {dados.get('processo', 'N/I')}")
+        c.setFont("Courier", 7.2)
+        c.setFillColor(colors.HexColor("#B7C7CD"))
+        c.drawString(1.05 * cm, 0.72 * cm, "Documento reservado • Inteligência • Investigação • Resultado")
+        c.drawRightString(largura - 1.05 * cm, 0.72 * cm, f"Página {c.getPageNumber()}")
+        c.restoreState()
+
     doc = SimpleDocTemplate(
         str(caminho_pdf),
         pagesize=A4,
-        rightMargin=1.6 * cm,
-        leftMargin=1.6 * cm,
-        topMargin=1.8 * cm,
-        bottomMargin=1.8 * cm,
+        rightMargin=1.35 * cm,
+        leftMargin=1.35 * cm,
+        topMargin=1.70 * cm,
+        bottomMargin=1.55 * cm,
         title=f"Dossiê Operacional {dados.get('processo')}",
         author="Polícia Federal - DICOR",
     )
 
     styles = getSampleStyleSheet()
-    style_title = ParagraphStyle("DICORTitle", parent=styles["Title"], fontName="Helvetica-Bold", fontSize=24, leading=29, alignment=TA_CENTER, textColor=colors.HexColor(f"#{DICOR_AZUL}"), spaceAfter=8)
-    style_subtitle = ParagraphStyle("DICORSub", parent=styles["Normal"], fontName="Helvetica-Bold", fontSize=11.2, leading=15, alignment=TA_CENTER, textColor=colors.HexColor(f"#{DICOR_DOURADO}"), spaceAfter=10)
-    style_h1 = ParagraphStyle("DICORH1", parent=styles["Heading1"], fontName="Helvetica-Bold", fontSize=16.5, leading=20, textColor=colors.HexColor(f"#{DICOR_AZUL}"), spaceBefore=8, spaceAfter=6)
-    style_h2 = ParagraphStyle("DICORH2", parent=styles["Heading2"], fontName="Helvetica-Bold", fontSize=12.2, leading=15.5, textColor=colors.HexColor("#333333"), spaceBefore=6, spaceAfter=4)
-    style_body = ParagraphStyle("DICORBody", parent=styles["Normal"], fontName="Helvetica", fontSize=10.2, leading=14.2, alignment=TA_JUSTIFY, textColor=colors.HexColor("#222222"), spaceAfter=6)
-    style_center = ParagraphStyle("DICORCenter", parent=style_body, alignment=TA_CENTER)
+    style_title = ParagraphStyle("DICORCanvaTitle", parent=styles["Title"], fontName="Courier-Bold", fontSize=18.5, leading=23, alignment=TA_CENTER, textColor=colors.HexColor("#FFFFFF"), spaceAfter=8)
+    style_subtitle = ParagraphStyle("DICORCanvaSub", parent=styles["Normal"], fontName="Courier-Bold", fontSize=10.5, leading=14, alignment=TA_CENTER, textColor=colors.HexColor("#D4AF37"), spaceAfter=8)
+    style_h1 = ParagraphStyle("DICORCanvaH1", parent=styles["Heading1"], fontName="Courier-Bold", fontSize=14.2, leading=17.5, textColor=colors.HexColor("#FFFFFF"), spaceBefore=8, spaceAfter=6)
+    style_h2 = ParagraphStyle("DICORCanvaH2", parent=styles["Heading2"], fontName="Courier-Bold", fontSize=10.8, leading=14, textColor=colors.HexColor("#D4AF37"), spaceBefore=6, spaceAfter=4)
+    style_body = ParagraphStyle("DICORCanvaBody", parent=styles["Normal"], fontName="Courier", fontSize=9.4, leading=13.4, alignment=TA_JUSTIFY, textColor=colors.HexColor("#F4F4F4"), spaceAfter=5)
+    style_body_left = ParagraphStyle("DICORCanvaBodyLeft", parent=style_body, alignment=TA_LEFT)
+    style_center = ParagraphStyle("DICORCanvaCenter", parent=style_body, alignment=TA_CENTER)
+    style_small = ParagraphStyle("DICORCanvaSmall", parent=style_body_left, fontSize=7.6, leading=10.5, textColor=colors.HexColor("#DCEEF4"))
+
+    def ptxt(txt: Any, style=style_body):
+        return pdf_paragrafo(txt, style)
+
+    def secao(titulo: str):
+        faixa = Table([[Paragraph(titulo, style_h1)]], colWidths=[16.25 * cm], hAlign="CENTER")
+        faixa.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#1B1B1B")),
+            ("BOX", (0, 0), (-1, -1), 0.7, colors.HexColor("#D4AF37")),
+            ("LINEBEFORE", (0, 0), (0, -1), 4, colors.HexColor("#7FA6AF")),
+            ("PADDING", (0, 0), (-1, -1), 8),
+        ]))
+        story.append(faixa)
+        story.append(Spacer(1, 8))
+
+    def info_table(rows: List[List[Any]], col_widths: Optional[List[float]] = None):
+        if not rows:
+            return Spacer(1, 1)
+        if col_widths is None:
+            col_widths = [4.7 * cm, 11.55 * cm]
+        converted = []
+        for r, row in enumerate(rows):
+            converted.append([ptxt(cell, style_body_left if r else style_center) for cell in row])
+        t = Table(converted, colWidths=col_widths, hAlign="CENTER")
+        t.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#0B263D")),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+            ("BACKGROUND", (0, 1), (0, -1), colors.HexColor("#202020")),
+            ("BACKGROUND", (1, 1), (-1, -1), colors.HexColor("#151515")),
+            ("GRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#7FA6AF")),
+            ("BOX", (0, 0), (-1, -1), 0.7, colors.HexColor("#D4AF37")),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("PADDING", (0, 0), (-1, -1), 6),
+        ]))
+        return t
+
+    def imagens_secao(evidencias: List[Dict[str, Any]], vazio: str = "Nenhuma imagem anexada nesta seção."):
+        imgs = [ev for ev in evidencias if ev.get("tipo") == "imagem" and ev.get("local")]
+        if not imgs:
+            story.append(ptxt(vazio, style_body_left))
+            return
+        for idx, ev in enumerate(imgs, start=1):
+            img = pdf_img_fit(ev.get("local", ""), 7.3 * cm, 5.2 * cm)
+            legenda = ptxt(
+                f"Imagem {idx}\nTópico: {ev.get('origem', 'Não informado')}\nAutor: {ev.get('autor', 'Não informado')}\nData: {ev.get('data', 'Não informado')}\nArquivo: {ev.get('arquivo', 'Sem nome')}",
+                style_small,
+            )
+            if img:
+                t = Table([[img, legenda]], colWidths=[7.8 * cm, 8.3 * cm], hAlign="CENTER")
+                t.setStyle(TableStyle([
+                    ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#151515")),
+                    ("BOX", (0, 0), (-1, -1), 0.6, colors.HexColor("#7FA6AF")),
+                    ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                    ("PADDING", (0, 0), (-1, -1), 5),
+                ]))
+                story.append(t)
+                story.append(Spacer(1, 6))
+            else:
+                story.append(ptxt(f"Arquivo registrado, mas não incorporado: {ev.get('arquivo')}", style_small))
+
+    def pessoas_table(pessoas: List[Dict[str, str]], vazio: str):
+        if not pessoas:
+            story.append(ptxt(vazio, style_body_left))
+            return
+        rows = [["Foto", "Nome", "RG", "Função/Cargo", "Periculosidade/Obs."]]
+        for pessoa in pessoas[:40]:
+            foto = pdf_img_fit(pessoa.get("foto", ""), 2.0 * cm, 2.0 * cm) or ptxt("Sem foto", style_small)
+            rows.append([
+                foto,
+                ptxt(pessoa.get("nome", "Não informado"), style_small),
+                ptxt(pessoa.get("rg", "Não informado"), style_small),
+                ptxt(pessoa.get("funcao") or pessoa.get("cargo") or "Não informado", style_small),
+                ptxt(f"{pessoa.get('periculosidade', 'Não informado')}\n{pessoa.get('observacoes', '')}", style_small),
+            ])
+        t = Table(rows, colWidths=[2.45 * cm, 3.9 * cm, 2.45 * cm, 3.3 * cm, 4.15 * cm], repeatRows=1, hAlign="CENTER")
+        t.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#0B263D")),
+            ("BACKGROUND", (0, 1), (-1, -1), colors.HexColor("#151515")),
+            ("TEXTCOLOR", (0, 0), (-1, -1), colors.white),
+            ("GRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#7FA6AF")),
+            ("BOX", (0, 0), (-1, -1), 0.7, colors.HexColor("#D4AF37")),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("PADDING", (0, 0), (-1, -1), 5),
+        ]))
+        story.append(t)
+
+    def assinaturas():
+        assinaturas_dados = obter_assinaturas_dossie(dados)
+        imgs, linhas, titulos = [], [], []
+        for ass in assinaturas_dados:
+            imagem_assinatura = limpar_imagem_assinatura_dossie(ass.get("imagem")) or ass.get("imagem")
+            img = pdf_img_fit(str(imagem_assinatura or ""), 4.9 * cm, 2.1 * cm)
+            if img:
+                imgs.append(img)
+            elif ass.get("texto"):
+                imgs.append(ptxt(str(ass.get("texto"))[:350], style_center))
+            else:
+                imgs.append(Spacer(1, 0.9 * cm))
+            linhas.append(ptxt("____________________________", style_center))
+            titulos.append(ptxt(str(ass.get("titulo") or ""), style_center))
+        t = Table([imgs, linhas, titulos], colWidths=[5.35 * cm, 5.35 * cm, 5.35 * cm], hAlign="CENTER")
+        t.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#101010")),
+            ("LINEABOVE", (0, 1), (-1, 1), 0.45, colors.HexColor("#D4AF37")),
+            ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("PADDING", (0, 0), (-1, -1), 4),
+        ]))
+        story.append(t)
 
     story: List[Any] = []
 
-    # Página 1 — Capa
+    # Página 1 — Capa no modelo escuro/moldura.
     brasao_pf = caminho_brasao_pf()
     brasao_dicor = caminho_brasao_dicor()
-    img_pf = pdf_img_fit(str(brasao_pf), 3.45 * cm, 3.45 * cm) if brasao_pf else pdf_paragrafo("PF", style_center)
-    img_dicor = pdf_img_fit(str(brasao_dicor), 3.45 * cm, 3.45 * cm) if brasao_dicor else pdf_paragrafo("DICOR", style_center)
-    cab = Table([[img_pf, pdf_paragrafo(dados.get("cabecalho_institucional") or DOSSIE_INSTITUICAO_CABECALHO, style_center), img_dicor]], colWidths=[4.05 * cm, 9.3 * cm, 4.05 * cm])
-    cab.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "MIDDLE"), ("ALIGN", (0, 0), (-1, -1), "CENTER")]))
-    story.append(cab)
-    story.append(Spacer(1, 0.75 * cm))
-    story.append(Paragraph("POLÍCIA FEDERAL", style_title))
-    story.append(Paragraph(f"CAPITAL MORADA DO VALLEY • DIRETORIA DE INVESTIGAÇÃO E COMBATE AO CRIME ORGANIZADO - DICOR", style_subtitle))
-    faixa = Table([[pdf_paragrafo("DOCUMENTO RESERVADO • INTELIGÊNCIA • INVESTIGAÇÃO • RESULTADO", style_center)]], colWidths=[16 * cm])
-    faixa.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor(f"#{DICOR_AZUL}")),
-        ("TEXTCOLOR", (0, 0), (-1, -1), colors.white),
-        ("BOX", (0, 0), (-1, -1), 0.8, colors.HexColor(f"#{DICOR_DOURADO}")),
+    img_pf = pdf_img_fit(str(brasao_pf), 3.25 * cm, 3.25 * cm) if brasao_pf else ptxt("PF", style_center)
+    img_dicor = pdf_img_fit(str(brasao_dicor), 3.25 * cm, 3.25 * cm) if brasao_dicor else ptxt("DICOR", style_center)
+    cab = Table([[img_pf, ptxt("POLÍCIA FEDERAL\nCAPITAL MORADA DO VALLEY\nDIRETORIA DE INVESTIGAÇÃO E COMBATE AO CRIME ORGANIZADO - DICOR", style_center), img_dicor]], colWidths=[4.05 * cm, 8.15 * cm, 4.05 * cm], hAlign="CENTER")
+    cab.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#101010")),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+        ("BOX", (0, 0), (-1, -1), 0.5, colors.HexColor("#D4AF37")),
         ("PADDING", (0, 0), (-1, -1), 8),
-        ("ALIGN", (0, 0), (-1, -1), "CENTER"),
     ]))
-    story.append(faixa)
-    story.append(Spacer(1, 0.25 * cm))
-    selo_operacional = Table([[
-        pdf_paragrafo("UNIDADE OPERACIONAL", style_center),
-        pdf_paragrafo(dados.get("cidade_operacional", DOSSIE_CIDADE_OPERACIONAL).upper(), style_center),
-        pdf_paragrafo("ARQUIVO DICOR", style_center),
-    ]], colWidths=[5.33 * cm, 5.33 * cm, 5.33 * cm], hAlign="CENTER")
-    selo_operacional.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#F7F9FC")),
-        ("BOX", (0, 0), (-1, -1), 0.6, colors.HexColor(f"#{DICOR_DOURADO}")),
-        ("INNERGRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#C7CCD4")),
-        ("PADDING", (0, 0), (-1, -1), 7),
-        ("ALIGN", (0, 0), (-1, -1), "CENTER"),
-    ]))
-    story.append(selo_operacional)
+    story.append(cab)
     story.append(Spacer(1, 0.55 * cm))
-    capa_rows = [
-        ["DOSSIÊ DE INTELIGÊNCIA OPERACIONAL", ""],
+    story.append(Paragraph("DOSSIÊ OPERACIONAL DICOR", style_title))
+    story.append(Paragraph("DOCUMENTO RESERVADO • INTELIGÊNCIA • INVESTIGAÇÃO • RESULTADO", style_subtitle))
+    story.append(Spacer(1, 0.15 * cm))
+    story.append(info_table([
+        ["DADOS DO PROCESSO", "INFORMAÇÕES CONSOLIDADAS"],
         ["Processo Nº", dados.get("processo")],
         ["Investigação Nº", dados.get("numero_investigacao")],
         ["Nome da Operação", dados.get("nome_operacao")],
@@ -8703,95 +8863,67 @@ def gerar_pdf_dossie(dados: Dict[str, Any], caminho_pdf: Path) -> None:
         ["Data de Abertura", dados.get("data_abertura")],
         ["Data de Encerramento", dados.get("data_encerramento")],
         ["Delegado Responsável", dados.get("delegado_responsavel")],
+        ["Agente do Encerramento", dados.get("agente_encerramento")],
         ["Integrantes da Investigação", ", ".join(dados.get("integrantes_investigacao", []))],
-    ]
-    capa = []
-    for i, row in enumerate(capa_rows):
-        if i == 0:
-            capa.append([Paragraph(f"<b>{escape(row[0])}</b>", style_center), ""])
-        else:
-            capa.append([pdf_paragrafo(row[0], style_body), pdf_paragrafo(row[1], style_body)])
-    t_capa = Table(capa, colWidths=[5.2 * cm, 10.8 * cm])
-    t_capa.setStyle(TableStyle([
-        ("SPAN", (0, 0), (1, 0)),
-        ("BACKGROUND", (0, 0), (1, 0), colors.HexColor(f"#{DICOR_AZUL}")),
-        ("TEXTCOLOR", (0, 0), (1, 0), colors.white),
-        ("BACKGROUND", (0, 1), (0, -1), colors.HexColor(f"#{DICOR_CINZA}")),
-        ("BOX", (0, 0), (-1, -1), 1.2, colors.HexColor(f"#{DICOR_DOURADO}")),
-        ("GRID", (0, 1), (-1, -1), 0.35, colors.HexColor("#C7CCD4")),
-        ("PADDING", (0, 0), (-1, -1), 8),
-        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
     ]))
-    story.append(t_capa)
-    story.append(Spacer(1, 2.0 * cm))
-    story.append(pdf_paragrafo("Documento gerado automaticamente a partir do encerramento da mesa de investigação.", style_center))
+    story.append(Spacer(1, 0.35 * cm))
+    story.append(ptxt("Documento gerado automaticamente a partir do encerramento da mesa de investigação. Todas as provas, registros, anexos e informações operacionais coletadas foram consolidadas para arquivo interno da DICOR.", style_center))
     story.append(PageBreak())
 
-    # Página 2 — Resumo Executivo + índice
-    pdf_add_secao_titulo(story, "2. RESUMO EXECUTIVO", style_h1)
-    story.append(pdf_paragrafo(dados.get("objetivo"), style_body))
-    story.append(pdf_paragrafo(resumo_contexto_operacional(dados), style_body))
-    meta = [
+    secao("2. RESUMO EXECUTIVO")
+    story.append(ptxt(dados.get("objetivo")))
+    story.append(ptxt(resumo_contexto_operacional(dados)))
+    story.append(info_table([
         ["Campo", "Informação"],
         ["Status da Investigação", dados.get("status")],
         ["Prioridade", dados.get("prioridade")],
-        ["Cidade Operacional", dados.get("cidade_operacional", DOSSIE_CIDADE_OPERACIONAL)],
         ["Facção Investigada", dados.get("faccao")],
-        ["Agente Responsável pelo Encerramento", dados.get("agente_encerramento")],
-        ["Integrantes da Investigação", ", ".join(dados.get("integrantes_investigacao", []))],
-    ]
-    story.append(pdf_tabela_metadados(meta, [5.3 * cm, 11.2 * cm], style_body))
-    story.append(Spacer(1, 12))
+        ["Agente Responsável", dados.get("agente_encerramento")],
+        ["Integrantes", ", ".join(dados.get("integrantes_investigacao", []))],
+    ]))
+    story.append(Spacer(1, 8))
     story.append(Paragraph("Tabela de Conteúdo", style_h2))
-    story.append(pdf_tabela_metadados(linhas_tabela_conteudo(), [2.8 * cm, 13.7 * cm], style_body))
+    story.append(info_table(linhas_tabela_conteudo(), [2.6 * cm, 13.65 * cm]))
     story.append(PageBreak())
 
-    # Página 3 — Lideranças
-    pdf_add_secao_titulo(story, "3. LIDERANÇAS IDENTIFICADAS", style_h1)
-    pdf_add_pessoas(story, dados.get("liderancas", []), "Nenhuma liderança foi identificada automaticamente nos tópicos da mesa.", style_body)
+    secao("3. LIDERANÇAS IDENTIFICADAS")
+    pessoas_table(dados.get("liderancas", []), "Nenhuma liderança foi identificada automaticamente nos tópicos da mesa.")
     story.append(PageBreak())
 
-    # Página 4 — Integrantes
-    pdf_add_secao_titulo(story, "4. INTEGRANTES IDENTIFICADOS", style_h1)
-    pdf_add_pessoas(story, dados.get("integrantes", []), "Nenhum integrante foi identificado automaticamente nos tópicos da mesa.", style_body)
+    secao("4. INTEGRANTES IDENTIFICADOS")
+    pessoas_table(dados.get("integrantes", []), "Nenhum integrante foi identificado automaticamente nos tópicos da mesa.")
     story.append(PageBreak())
 
-    # Página 5 — Painel
-    pdf_add_secao_titulo(story, "5. PAINEL DA ORGANIZAÇÃO", style_h1)
-    story.append(pdf_paragrafo(dados.get("resumos", {}).get("painel"), style_body))
-    pdf_add_imagens_evidencias(story, filtrar_evidencias_por_topico(dados.get("evidencias", []), ["painel"]), style_body, 6)
+    secao("5. PAINEL DA ORGANIZAÇÃO")
+    story.append(ptxt(dados.get("resumos", {}).get("painel")))
+    imagens_secao(filtrar_evidencias_por_topico(dados.get("evidencias", []), ["painel"]))
     story.append(PageBreak())
 
-    # Página 6 — Localização
-    pdf_add_secao_titulo(story, "6. LOCALIZAÇÃO", style_h1)
-    story.append(pdf_paragrafo(dados.get("resumos", {}).get("localizacao"), style_body))
-    story.append(pdf_paragrafo(f"Comunidade/Base: {dados.get('comunidade')}\nCanal de reabertura: {dados.get('reabrir_url')}", style_body))
-    pdf_add_imagens_evidencias(story, filtrar_evidencias_por_topico(dados.get("evidencias", []), ["localizacao"]), style_body, 6)
+    secao("6. LOCALIZAÇÃO")
+    story.append(ptxt(dados.get("resumos", {}).get("localizacao")))
+    story.append(ptxt(f"Comunidade/Base: {dados.get('comunidade')}\nCanal de reabertura: {dados.get('reabrir_url')}", style_body_left))
+    imagens_secao(filtrar_evidencias_por_topico(dados.get("evidencias", []), ["localizacao"]))
     story.append(PageBreak())
 
-    # Página 7 — Produção
-    pdf_add_secao_titulo(story, "7. PRODUÇÃO E FABRICAÇÃO", style_h1)
-    story.append(pdf_paragrafo(dados.get("resumos", {}).get("producao"), style_body))
-    pdf_add_imagens_evidencias(story, filtrar_evidencias_por_topico(dados.get("evidencias", []), ["producao"]), style_body, 6)
+    secao("7. PRODUÇÃO E FABRICAÇÃO")
+    story.append(ptxt(dados.get("resumos", {}).get("producao")))
+    imagens_secao(filtrar_evidencias_por_topico(dados.get("evidencias", []), ["producao", "farm", "ingredientes"]))
     story.append(PageBreak())
 
-    # Página 8 — Baús
-    pdf_add_secao_titulo(story, "8. BAÚS E ARMAZENAMENTO", style_h1)
-    story.append(pdf_paragrafo(dados.get("resumos", {}).get("baus"), style_body))
-    pdf_add_imagens_evidencias(story, filtrar_evidencias_por_topico(dados.get("evidencias", []), ["baus"]), style_body, 6)
+    secao("8. BAÚS E ARMAZENAMENTO")
+    story.append(ptxt(dados.get("resumos", {}).get("baus")))
+    imagens_secao(filtrar_evidencias_por_topico(dados.get("evidencias", []), ["baus", "bau", "baú"]))
     story.append(PageBreak())
 
-    # Página 9 — Informantes
-    pdf_add_secao_titulo(story, "9. INFORMANTES", style_h1)
-    pdf_add_pessoas(story, dados.get("informantes", []), "Nenhum informante foi identificado automaticamente nos tópicos da mesa.", style_body)
-    story.append(Spacer(1, 10))
-    story.append(pdf_paragrafo(dados.get("resumos", {}).get("informantes"), style_body))
+    secao("9. INFORMANTES")
+    pessoas_table(dados.get("informantes", []), "Nenhum informante foi identificado automaticamente nos tópicos da mesa.")
+    story.append(Spacer(1, 8))
+    story.append(ptxt(dados.get("resumos", {}).get("informantes")))
     story.append(PageBreak())
 
-    # Página 10 — Materiais apreendidos
-    pdf_add_secao_titulo(story, "10. MATERIAIS APREENDIDOS", style_h1)
+    secao("10. MATERIAIS APREENDIDOS")
     res = dados.get("resultados", {}) or {}
-    materiais = [
+    story.append(info_table([
         ["Categoria", "Registro"],
         ["Drogas", res.get("drogas", "Não informado")],
         ["Armas", res.get("armas", "Não informado")],
@@ -8799,20 +8931,18 @@ def gerar_pdf_dossie(dados: Dict[str, Any], caminho_pdf: Path) -> None:
         ["Dinheiro", res.get("dinheiro", "Não informado")],
         ["Veículos", res.get("veiculos", "Não informado")],
         ["Outros Itens", res.get("outros", "Não informado")],
-    ]
-    story.append(pdf_tabela_metadados(materiais, [4.2 * cm, 12.3 * cm], style_body))
-    story.append(Spacer(1, 10))
+    ]))
+    story.append(Spacer(1, 8))
     anexos = [["Tipo", "Arquivo", "Data", "Origem"]]
-    for ev in dados.get("evidencias", [])[:30]:
+    for ev in dados.get("evidencias", [])[:90]:
         anexos.append([ev.get("tipo"), ev.get("arquivo"), ev.get("data"), ev.get("origem")])
     story.append(Paragraph("Provas e anexos registrados", style_h2))
-    story.append(pdf_tabela_metadados(anexos or [["Sem anexos", "", "", ""]], [2.2 * cm, 6.2 * cm, 3.2 * cm, 4.9 * cm], style_body))
+    story.append(info_table(anexos, [2.1 * cm, 6.2 * cm, 3.1 * cm, 4.85 * cm]))
     story.append(PageBreak())
 
-    # Página 11 — Resultado
-    pdf_add_secao_titulo(story, "11. RESULTADO OPERACIONAL", style_h1)
+    secao("11. RESULTADO OPERACIONAL")
     est = dados.get("estatisticas", {}) or {}
-    tabela_resultado = [
+    story.append(info_table([
         ["Indicador", "Quantidade/Status"],
         ["Quantidade de presos", res.get("prisoes", "Não informado")],
         ["Procurados capturados", res.get("procurados_capturados", "Não informado")],
@@ -8822,24 +8952,21 @@ def gerar_pdf_dossie(dados: Dict[str, Any], caminho_pdf: Path) -> None:
         ["Vídeos anexados", est.get("videos", 0)],
         ["Links registrados", est.get("links", 0)],
         ["Tópicos analisados", est.get("threads", 0)],
-    ]
-    story.append(pdf_tabela_metadados(tabela_resultado, [5.5 * cm, 11 * cm], style_body))
+    ]))
     story.append(PageBreak())
 
-    # Página 12 — Conclusão
-    pdf_add_secao_titulo(story, "12. CONCLUSÃO", style_h1)
-    story.append(pdf_paragrafo(montar_conclusao_dossie(dados), style_body))
-    story.append(Spacer(1, 1.2 * cm))
-    pdf_add_assinaturas_dossie(story, dados, style_center)
-    story.append(Spacer(1, 0.6 * cm))
+    secao("12. CONCLUSÃO")
+    story.append(ptxt(montar_conclusao_dossie(dados)))
+    story.append(Spacer(1, 0.85 * cm))
+    assinaturas()
+    story.append(Spacer(1, 0.4 * cm))
     qr_path = dados.get("qr_reabertura")
-    qr_img = pdf_img_fit(qr_path, 2.5 * cm, 2.5 * cm) if qr_path else None
+    qr_img = pdf_img_fit(qr_path, 2.4 * cm, 2.4 * cm) if qr_path else None
     if qr_img:
         story.append(Paragraph("QR Code para reabrir a investigação arquivada", style_h2))
         story.append(qr_img)
 
-    doc.build(story, onFirstPage=lambda c, d: pdf_add_header_footer(c, d, dados), onLaterPages=lambda c, d: pdf_add_header_footer(c, d, dados))
-
+    doc.build(story, onFirstPage=on_page, onLaterPages=on_page)
 
 def docx_set_cell_shading(cell, fill: str) -> None:
     if OxmlElement is None:
