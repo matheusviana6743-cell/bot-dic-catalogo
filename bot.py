@@ -112,7 +112,31 @@ BOLETIM_TEMP_CATEGORY_ID = env_int("BOLETIM_TEMP_CATEGORY_ID", 0)
 
 # Atendimento automático de boletins
 BOLETIM_ATENDIMENTO_CHANNEL_ID = env_int("BOLETIM_ATENDIMENTO_CHANNEL_ID", 1525762770253910136)
-BOLETIM_RODIZIO_CARGOS_IDS = [int(x) for x in os.getenv("BOLETIM_RODIZIO_CARGOS_IDS", "1490200391239864352,1490200390426165290").replace(";", ",").split(",") if x.strip().isdigit()]
+# Rodízio do atendimento: somente Estagiário e Investigador.
+# Mesmo que a variável do Railway esteja errada ou tenha cargos da diretoria,
+# o bot filtra e mantém apenas estes dois cargos.
+BOLETIM_RODIZIO_CARGOS_FIXOS_IDS = {1490200391239864352, 1490200390426165290}
+_boletim_rodizio_env_ids = [
+    int(x)
+    for x in os.getenv(
+        "BOLETIM_RODIZIO_CARGOS_IDS",
+        "1490200391239864352,1490200390426165290",
+    ).replace(";", ",").split(",")
+    if x.strip().isdigit()
+]
+BOLETIM_RODIZIO_CARGOS_IDS = [
+    cid for cid in _boletim_rodizio_env_ids
+    if cid in BOLETIM_RODIZIO_CARGOS_FIXOS_IDS
+] or sorted(BOLETIM_RODIZIO_CARGOS_FIXOS_IDS)
+# Cargos superiores que NÃO devem entrar no rodízio, mesmo se também tiverem cargo de Investigador/Estagiário.
+BOLETIM_RODIZIO_EXCLUIR_CARGOS_IDS = {
+    int(x)
+    for x in os.getenv(
+        "BOLETIM_RODIZIO_EXCLUIR_CARGOS_IDS",
+        "1490200388912156692,1490200383614615725,1490200382776021132,1490200384818647051",
+    ).replace(";", ",").split(",")
+    if x.strip().isdigit()
+}
 
 # Mesas
 CATEGORIA_MESAS_ABERTAS_ID = env_int("CATEGORIA_MESAS_ABERTAS_ID", 1490200456855552192)
@@ -8854,6 +8878,22 @@ def buscar_atendimento_por_mensagem(message_id: int) -> Optional[Dict[str, Any]]
             return item
     return None
 
+
+def buscar_atendimento_por_numero(numero: str) -> Optional[Dict[str, Any]]:
+    alvo = str(numero or "").strip().upper()
+    if not alvo:
+        return None
+    for item in carregar_atendimentos_boletins():
+        atual = str(item.get("numero") or "").strip().upper()
+        if atual == alvo:
+            return item
+        try:
+            if numero_curto_boletim(atual) == numero_curto_boletim(alvo):
+                return item
+        except Exception:
+            pass
+    return None
+
 def buscar_atendimento_por_area(channel_id: int) -> Optional[Dict[str, Any]]:
     for item in carregar_atendimentos_boletins():
         ids = {str(item.get("area_id")), str(item.get("thread_id")), str(item.get("forum_thread_id"))}
@@ -8893,8 +8933,17 @@ def eh_boletim_valido_para_atendimento(message: discord.Message) -> bool:
     texto = coletar_texto_embed(message) if 'coletar_texto_embed' in globals() else (message.content or "")
     if not texto.strip() and not message.attachments:
         return False
+
     n = normalizar_busca(texto)
-    return "boletim de ocorrencia" in n or "bo-dicor" in n
+    # Não processar mensagens soltas de provas/anexos como se fossem outro boletim.
+    # Ex.: "Provas — BO-DICOR-002" ou "Anexos do boletim" não abre novo atendimento.
+    termos_provas = ["provas", "anexos do boletim", "anexo do boletim", "lote final"]
+    if any(t in n for t in termos_provas) and "boletim de ocorrencia" not in n:
+        return False
+
+    # A mensagem válida precisa ter o título/modelo de boletim.
+    # Apenas aparecer BO-DICOR-000 não é suficiente, porque anexos também usam esse número.
+    return "boletim de ocorrencia" in n
 
 def carregar_rodizio_boletim() -> Dict[str, Any]:
     dados = carregar_json(BOLETIM_RODIZIO_JSON, {})
@@ -8906,11 +8955,20 @@ def salvar_rodizio_boletim(dados: Dict[str, Any]) -> None:
 def membros_elegiveis_rodizio(guild: discord.Guild) -> List[discord.Member]:
     if guild is None:
         return []
-    cargos_alvo = set(BOLETIM_RODIZIO_CARGOS_IDS)
+    cargos_alvo = set(BOLETIM_RODIZIO_CARGOS_IDS) & set(BOLETIM_RODIZIO_CARGOS_FIXOS_IDS)
+    cargos_excluir = set(BOLETIM_RODIZIO_EXCLUIR_CARGOS_IDS)
     membros = {}
     for member in guild.members:
-        if not member.bot and any(role.id in cargos_alvo for role in member.roles):
-            membros[member.id] = member
+        if member.bot:
+            continue
+        roles_ids = {role.id for role in member.roles}
+        # Precisa ter Estagiário ou Investigador.
+        if not roles_ids.intersection(cargos_alvo):
+            continue
+        # Diretoria/Inspetor/Delegado não entra no rodízio de atendimento comum.
+        if roles_ids.intersection(cargos_excluir):
+            continue
+        membros[member.id] = member
     return sorted(membros.values(), key=lambda m: (m.display_name.lower(), m.id))
 
 async def escolher_agente_rodizio(guild: discord.Guild, numero: str) -> Optional[discord.Member]:
@@ -8992,40 +9050,106 @@ async def enviar_arquivos_em_lotes(destino, caminhos: List[Path], legenda: str =
 async def criar_area_atendimento_boletim(message: discord.Message) -> Optional[Dict[str, Any]]:
     if buscar_atendimento_por_mensagem(message.id):
         return None
+
     numero = numero_boletim_de_texto(coletar_texto_embed(message) or message.content or "")
+
+    # Impede dois atendimentos/tópicos para o mesmo número de boletim.
+    existente = buscar_atendimento_por_numero(numero)
+    if existente:
+        await enviar_log(
+            f"⚠️ Atendimento duplicado ignorado.\n"
+            f"Boletim: `{numero}`\n"
+            f"Mensagem ignorada: {message.jump_url}\n"
+            f"Área existente: <#{existente.get('area_id') or existente.get('thread_id')}>"
+        )
+        return None
+
     agente = await escolher_agente_rodizio(message.guild, numero)
     canal_atendimento = message.guild.get_channel(BOLETIM_ATENDIMENTO_CHANNEL_ID) if message.guild else None
     if canal_atendimento is None:
         await enviar_log(f"❌ Canal de atendimento de boletins `{BOLETIM_ATENDIMENTO_CHANNEL_ID}` não encontrado.")
         return None
+
     texto_original = coletar_texto_embed(message) or message.content or "Sem texto."
     pasta = BOLETIM_ARQUIVOS_DIR / numero.replace("/", "-")
     anexos = await arquivos_para_reenvio_de_mensagens([message], pasta, numero)
     titulo = f"📋 BOLETIM DE OCORRÊNCIA — Nº {numero_curto_boletim(numero)}"
-    conteudo_inicial = (
-        f"**📋 NOVO BOLETIM RECEBIDO**\n\n**Boletim:** Nº {numero_curto_boletim(numero)}\n"
+
+    # A menção do agente NÃO vai aqui. Ela será enviada por último dentro do atendimento,
+    # para ficar mais organizado e evitar parecer que existem dois tópicos/mensagens principais.
+    conteudo_abertura = (
+        f"**📋 NOVO BOLETIM RECEBIDO**\n\n"
+        f"**Boletim:** Nº {numero_curto_boletim(numero)}\n"
         f"**Responsável pelo atendimento:** {agente.mention if agente else 'Não definido'}\n"
         f"**Autor do boletim:** {message.author.mention if message.author else 'Não identificado'}\n"
-        f"**Data de recebimento:** {agora_br()}\n**Mensagem original:** {message.jump_url}\n\n"
-        f"{agente.mention if agente else ''}, este boletim foi encaminhado para sua análise."
+        f"**Data de recebimento:** {agora_br()}\n"
+        f"**Mensagem original:** {message.jump_url}\n"
     )
+
     try:
         if isinstance(canal_atendimento, discord.ForumChannel):
-            criado = await canal_atendimento.create_thread(name=titulo[:100], content=conteudo_inicial, allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False), reason="Atendimento automático de boletim DICOR")
+            criado = await canal_atendimento.create_thread(
+                name=titulo[:100],
+                content="📋 Atendimento criado. As informações do boletim serão organizadas abaixo.",
+                allowed_mentions=discord.AllowedMentions.none(),
+                reason="Atendimento automático de boletim DICOR",
+            )
             area = getattr(criado, "thread", criado)
         elif isinstance(canal_atendimento, discord.TextChannel):
-            msg_principal = await canal_atendimento.send(conteudo_inicial, allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False))
+            msg_principal = await canal_atendimento.send(
+                f"📋 Atendimento criado para **Boletim Nº {numero_curto_boletim(numero)}**. Use o tópico vinculado abaixo.",
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
             area = await msg_principal.create_thread(name=titulo[:100], auto_archive_duration=10080)
         else:
             await enviar_log(f"❌ Canal de atendimento `{BOLETIM_ATENDIMENTO_CHANNEL_ID}` não é texto/fórum compatível.")
             return None
+
+        # Tudo fica dentro do mesmo tópico/thread/postagem: dados, texto, anexos, painel e, por último, a menção.
+        await area.send(conteudo_abertura, allowed_mentions=discord.AllowedMentions(users=False, roles=False, everyone=False))
         await area.send(f"**Texto completo do boletim:**\n{cortar_discord(texto_original, 1800)}")
         if anexos:
             await enviar_arquivos_em_lotes(area, anexos, f"📎 Anexos do boletim {numero}")
         painel_msg = await area.send("🛠️ **Mini painel de gerenciamento do boletim**", view=BoletimAtendimentoView())
-        atendimento = {"id": f"ATD-{message.id}", "numero": numero, "mensagem_original_id": message.id, "mensagem_original_url": message.jump_url, "canal_origem_id": message.channel.id, "area_id": getattr(area, "id", None), "thread_id": getattr(area, "id", None), "painel_msg_id": painel_msg.id, "agente_id": agente.id if agente else None, "agente_nome": str(agente) if agente else "Não definido", "autor_id": message.author.id if message.author else None, "autor_nome": str(message.author) if message.author else "Não identificado", "status": "EM ATENDIMENTO", "data_criacao": agora_br(), "anexos_salvos": [str(p) for p in anexos], "historico": [{"acao": "Atendimento criado", "usuario": "Sistema", "data": agora_br()}], "comparecimento_status": "não solicitado", "procurado_status": "não solicitado"}
-        lista = carregar_atendimentos_boletins(); lista.append(atendimento); salvar_atendimentos_boletins(lista)
-        await enviar_log(f"📋 **Atendimento de boletim criado**\nBoletim: `{numero}`\nÁrea: <#{area.id}>\nAgente: {agente.mention if agente else 'Não definido'}\nOriginal: {message.jump_url}")
+
+        # Última mensagem: somente aqui o agente é mencionado.
+        if agente:
+            await area.send(
+                f"{agente.mention}, este boletim foi encaminhado para sua análise.",
+                allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
+            )
+
+        atendimento = {
+            "id": f"ATD-{message.id}",
+            "numero": numero,
+            "mensagem_original_id": message.id,
+            "mensagem_original_url": message.jump_url,
+            "canal_origem_id": message.channel.id,
+            "area_id": getattr(area, "id", None),
+            "thread_id": getattr(area, "id", None),
+            "painel_msg_id": painel_msg.id,
+            "agente_id": agente.id if agente else None,
+            "agente_nome": str(agente) if agente else "Não definido",
+            "autor_id": message.author.id if message.author else None,
+            "autor_nome": str(message.author) if message.author else "Não identificado",
+            "status": "EM ATENDIMENTO",
+            "data_criacao": agora_br(),
+            "anexos_salvos": [str(p) for p in anexos],
+            "historico": [{"acao": "Atendimento criado", "usuario": "Sistema", "data": agora_br()}],
+            "comparecimento_status": "não solicitado",
+            "procurado_status": "não solicitado",
+        }
+        lista = carregar_atendimentos_boletins()
+        lista.append(atendimento)
+        salvar_atendimentos_boletins(lista)
+        await enviar_log(
+            f"📋 **Atendimento de boletim criado**\n"
+            f"Boletim: `{numero}`\n"
+            f"Área: <#{area.id}>\n"
+            f"Agente: {agente.mention if agente else 'Não definido'}\n"
+            f"Original: {message.jump_url}\n"
+            f"Anexos salvos: `{len(anexos)}`"
+        )
         return atendimento
     except Exception as erro:
         await enviar_log(f"❌ Erro ao criar atendimento do boletim `{numero}`: {erro}")
@@ -9215,16 +9339,28 @@ async def finalizar_boletim_atendimento(interaction: discord.Interaction, result
 
 @bot.listen("on_message")
 async def atendimento_boletim_automatico(message: discord.Message):
+    numero_lock = None
     try:
-        if message.id in boletins_processando: return
-        if not eh_boletim_valido_para_atendimento(message): return
-        if buscar_atendimento_por_mensagem(message.id): return
+        if message.id in boletins_processando:
+            return
+        if not eh_boletim_valido_para_atendimento(message):
+            return
+        if buscar_atendimento_por_mensagem(message.id):
+            return
+        numero_lock = numero_boletim_de_texto(coletar_texto_embed(message) or message.content or "")
+        if buscar_atendimento_por_numero(numero_lock):
+            return
+        if numero_lock in boletins_processando:
+            return
         boletins_processando.add(message.id)
+        boletins_processando.add(numero_lock)
         await criar_area_atendimento_boletim(message)
     except Exception as erro:
         await enviar_log(f"❌ Erro no processamento automático de boletim `{getattr(message, 'id', 0)}`: {erro}")
     finally:
         boletins_processando.discard(getattr(message, 'id', 0))
+        if numero_lock is not None:
+            boletins_processando.discard(numero_lock)
 
 @bot.listen("on_ready")
 async def persistencia_boletim_atendimento_views():
