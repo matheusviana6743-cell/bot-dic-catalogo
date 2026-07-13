@@ -118,6 +118,8 @@ BOLETIM_TEMP_CATEGORY_ID = env_int("BOLETIM_TEMP_CATEGORY_ID", 0)
 BOLETIM_ATENDIMENTO_CHANNEL_ID = env_int("BOLETIM_ATENDIMENTO_CHANNEL_ID", 1525762770253910136)
 BOLETINS_ARQUIVADOS_CHANNEL_ID = env_int("BOLETINS_ARQUIVADOS_CHANNEL_ID", 1525762226269720696)
 MANDADOS_CHANNEL_ID = env_int("MANDADOS_CHANNEL_ID", 1490200515974271119)
+HIERARQUIA_CHANNEL_ID = env_int("HIERARQUIA_CHANNEL_ID", 1490200489319600300)
+HIERARQUIA_INTERVALO_DIAS = env_int("HIERARQUIA_INTERVALO_DIAS", 4)
 # Rodízio do atendimento: somente Estagiário e Investigador.
 # Mesmo que a variável do Railway esteja errada ou tenha cargos da diretoria,
 # o bot filtra e mantém apenas estes dois cargos.
@@ -2153,8 +2155,24 @@ async def retirar_procurado(
             f"Canal: {getattr(interaction.channel, 'mention', 'Sem canal')}\n"
             f"Data: {agora_br()}"
         )
+        aviso_autorizacao = (
+            f"{mencoes_inspetor_mais(interaction.guild) if 'mencoes_inspetor_mais' in globals() else 'Equipe Inspetor+'}\n"
+            "📁 **Solicitação de retirada de procurado aguardando autorização.**\n"
+            f"👮 **Solicitado por:** {interaction.user.mention}\n"
+            f"🪪 **RG informado:** `{rg}`\n"
+            f"📝 **Motivo:** {motivo}\n\n"
+            "⚠️ O procurado **só será retirado após confirmação de um Inspetor ou superior**."
+        )
+        try:
+            if interaction.channel:
+                await interaction.channel.send(
+                    aviso_autorizacao,
+                    allowed_mentions=discord.AllowedMentions(roles=True, users=False, everyone=False),
+                )
+        except Exception:
+            pass
         await interaction.followup.send(
-            "❌ Você não possui permissão para retirar procurados. Essa ação está disponível somente para Inspetor ou superior.",
+            "📩 Solicitação enviada. O procurado só será retirado após confirmação de Inspetor ou superior.",
             ephemeral=True,
         )
         return
@@ -2928,10 +2946,12 @@ def topico_dossie_por_nome(nome: str) -> str:
         return "baus"
     if "informante" in n:
         return "informantes"
-    if "crime" in n:
+    if any(p in n for p in ["crime", "crimes", "comunidade", "ocorrencia", "ocorrência"]):
         return "crimes"
-    if "radio" in n:
+    if any(p in n for p in ["radio", "rádio", "frequencia", "frequência", "qrr"]):
         return "radio"
+    if any(p in n for p in ["material", "apreendid", "item", "droga", "arma", "municao", "munição", "dinheiro", "veiculo", "veículo"]):
+        return "materiais"
     if "chat" in n:
         return "chat"
     return "geral"
@@ -3509,6 +3529,7 @@ async def coletar_dados_operacionais_mesa(
             "informantes": resumir_textos_topico(textos_por_topico.get("informantes", [])),
             "crimes": resumir_textos_topico(textos_por_topico.get("crimes", [])),
             "radio": resumir_textos_topico(textos_por_topico.get("radio", [])),
+            "materiais": resumir_textos_topico(textos_por_topico.get("materiais", [])),
             "chat": resumir_textos_topico(textos_por_topico.get("chat", []), 900),
         },
         "qr_reabertura": str(qr_path) if qr_path else "",
@@ -7932,6 +7953,98 @@ class ReabrirMesaView(discord.ui.View):
                 await interaction.response.send_message("❌ O botão deu erro. Veja os logs.", ephemeral=True)
         except Exception:
             pass
+
+
+# =====================================================
+# HIERARQUIA AUTOMÁTICA DICOR
+# =====================================================
+
+def _cargo_por_nome(guild: discord.Guild, termos: List[str]) -> Optional[discord.Role]:
+    termos_norm = [normalizar_busca(t) for t in termos]
+    for role in sorted(guild.roles, key=lambda r: r.position, reverse=True):
+        nome = normalizar_busca(role.name)
+        if all(t in nome for t in termos_norm):
+            return role
+    return None
+
+
+def _mencao_cargo(guild: discord.Guild, termos: List[str], fallback: str = "@") -> str:
+    role = _cargo_por_nome(guild, termos)
+    return role.mention if role else fallback
+
+
+def montar_mensagem_hierarquia_dicor(guild: discord.Guild) -> str:
+    delegado_geral = _mencao_cargo(guild, ["delegado", "geral"], "<@596518258291507221>")
+    delegado_adjunto = _mencao_cargo(guild, ["delegado", "adjunto"], "<@527894944904511498>")
+    delegado_dicor = _mencao_cargo(guild, ["delegado", "dicor"], "@Delegado DICOR")
+    vice_dicor = _mencao_cargo(guild, ["vice", "dicor"], "@Vice-Diretor DICOR")
+    inspetor_dicor = _mencao_cargo(guild, ["inspetor", "dicor"], "@Inspetor DICOR")
+    investigador_dicor = _mencao_cargo(guild, ["investigador"], "@Investigador DICOR")
+    estagiario_dicor = _mencao_cargo(guild, ["estagiario"], _mencao_cargo(guild, ["estagiário"], "@Estagiário DICOR"))
+    return f"""🏛️ **HIERARQUIA OFICIAL – DICOR** 🏛️
+
+
+👑 **ALTO COMANDO**
+
+🎖️ Delegado Geral - {delegado_geral}
+🎖️ Delegado Adjunto - {delegado_adjunto}
+
+
+🧠 **COMANDO DIC**
+
+🎖️ Delegado DICOR - {delegado_dicor}
+🎖️ Vice-Diretor DICOR - {vice_dicor}
+🎖️ Inspetor DICOR - {inspetor_dicor}
+🎖️ Inspetor DICOR - {inspetor_dicor}
+
+
+🔍 **SETOR INVESTIGATIVO**
+
+🕵️ DICOR – Investigador - {investigador_dicor}
+🕵️ DICOR – Investigador - {investigador_dicor}
+
+
+📡 **BASE OPERACIONAL**
+
+🧑‍🎓 DICOR – Estagiário - {estagiario_dicor}
+🧑‍🎓 DICOR – Estagiário - {estagiario_dicor}
+🧑‍🎓 DICOR – Estagiário - {estagiario_dicor}
+🧑‍🎓 DICOR – Estagiário - {estagiario_dicor}
+🧑‍🎓 DICOR – Estagiário - {estagiario_dicor}
+
+-----------------------------------------------------
+
+⚖️ **OBSERVAÇÕES GERAIS**
+
+• A hierarquia deve ser respeitada em todas as operações
+• Ordens superiores devem ser seguidas
+• Quebra de hierarquia pode resultar em punição
+• Toda ação deve ser reportada conforme o protocolo DICOR
+
+📍 **DICOR – Capital Morada Valley**"""
+
+
+@tasks.loop(hours=96)
+async def hierarquia_dicor_automatica():
+    if not HIERARQUIA_CHANNEL_ID:
+        return
+    try:
+        canal = bot.get_channel(HIERARQUIA_CHANNEL_ID) or await bot.fetch_channel(HIERARQUIA_CHANNEL_ID)
+        guild = getattr(canal, "guild", None)
+        if guild is None:
+            return
+        await canal.send(
+            montar_mensagem_hierarquia_dicor(guild),
+            allowed_mentions=discord.AllowedMentions(roles=True, users=True, everyone=False),
+        )
+    except Exception as erro:
+        await enviar_log(f"⚠️ Erro ao enviar hierarquia automática DICOR: {erro}")
+
+
+@hierarquia_dicor_automatica.before_loop
+async def antes_hierarquia_dicor_automatica():
+    await bot.wait_until_ready()
+
 @bot.event
 async def on_ready():
     global comandos_ja_sincronizados
@@ -7961,6 +8074,8 @@ async def on_ready():
         bot.add_view(ReabrirMesaView())
         bot.add_view(PainelOrganizacoesView())
         bot.add_view(PainelAdministrativoView())
+        if not hierarquia_dicor_automatica.is_running():
+            hierarquia_dicor_automatica.start()
         
         print("✅ Todas as persistências de botões (Relatórios com Tickets, Boletins e Sistemas) foram carregadas!")
     except Exception as e:
@@ -8982,25 +9097,35 @@ def gerar_pdf_dossie(dados: Dict[str, Any], caminho_pdf: Path) -> None:
     ], y, "6. LOCALIZAÇÃO")
     y = _imagens(filtrar_evidencias_por_topico(dados.get("evidencias", []), ["localizacao", "localização"]), y, "6. LOCALIZAÇÃO")
 
-    # 7. Produção
-    y = _secao("7. PRODUÇÃO E FABRICAÇÃO")
-    y = _texto(dados.get("resumos", {}).get("producao") or "Sem registros textuais adicionais.", y, "7. PRODUÇÃO E FABRICAÇÃO", tam=9.15)
-    y = _imagens(filtrar_evidencias_por_topico(dados.get("evidencias", []), ["producao", "produção", "farm", "ingredientes"]), y, "7. PRODUÇÃO E FABRICAÇÃO")
+    # 7. Rádio
+    y = _secao("7. RÁDIO")
+    y = _texto(dados.get("resumos", {}).get("radio") or "Sem registros textuais adicionais.", y, "7. RÁDIO", tam=9.15)
+    y = _imagens(filtrar_evidencias_por_topico(dados.get("evidencias", []), ["radio", "rádio", "frequencia", "frequência", "qrr"]), y, "7. RÁDIO")
 
-    # 8. Baús
-    y = _secao("8. BAÚS E ARMAZENAMENTO")
-    y = _texto(dados.get("resumos", {}).get("baus") or "Sem registros textuais adicionais.", y, "8. BAÚS E ARMAZENAMENTO", tam=9.15)
-    y = _imagens(filtrar_evidencias_por_topico(dados.get("evidencias", []), ["baus", "bau", "baú"]), y, "8. BAÚS E ARMAZENAMENTO")
+    # 8. Crimes da Comunidade
+    y = _secao("8. CRIMES DA COMUNIDADE")
+    y = _texto(dados.get("resumos", {}).get("crimes") or "Sem registros textuais adicionais.", y, "8. CRIMES DA COMUNIDADE", tam=9.15)
+    y = _imagens(filtrar_evidencias_por_topico(dados.get("evidencias", []), ["crimes", "crime", "comunidade", "ocorrencia", "ocorrência"]), y, "8. CRIMES DA COMUNIDADE")
 
-    # 9. Informantes
-    y = _secao("9. INFORMANTES")
-    y = _pessoas(dados.get("informantes", []), y, "9. INFORMANTES", "Nenhum informante foi identificado automaticamente nos tópicos da mesa.")
-    y = _subtitulo("OBSERVAÇÕES", y, "9. INFORMANTES")
-    y = _texto(dados.get("resumos", {}).get("informantes") or "Sem registros textuais adicionais.", y, "9. INFORMANTES", tam=9.15)
+    # 9. Produção
+    y = _secao("9. PRODUÇÃO E FABRICAÇÃO")
+    y = _texto(dados.get("resumos", {}).get("producao") or "Sem registros textuais adicionais.", y, "9. PRODUÇÃO E FABRICAÇÃO", tam=9.15)
+    y = _imagens(filtrar_evidencias_por_topico(dados.get("evidencias", []), ["producao", "produção", "farm", "ingredientes"]), y, "9. PRODUÇÃO E FABRICAÇÃO")
 
-    # 10. Materiais
+    # 10. Baús
+    y = _secao("10. BAÚS E ARMAZENAMENTO")
+    y = _texto(dados.get("resumos", {}).get("baus") or "Sem registros textuais adicionais.", y, "10. BAÚS E ARMAZENAMENTO", tam=9.15)
+    y = _imagens(filtrar_evidencias_por_topico(dados.get("evidencias", []), ["baus", "bau", "baú"]), y, "10. BAÚS E ARMAZENAMENTO")
+
+    # 11. Informantes
+    y = _secao("11. INFORMANTES")
+    y = _pessoas(dados.get("informantes", []), y, "11. INFORMANTES", "Nenhum informante foi identificado automaticamente nos tópicos da mesa.")
+    y = _subtitulo("OBSERVAÇÕES", y, "11. INFORMANTES")
+    y = _texto(dados.get("resumos", {}).get("informantes") or "Sem registros textuais adicionais.", y, "11. INFORMANTES", tam=9.15)
+
+    # 12. Materiais
     res = dados.get("resultados", {}) or {}
-    y = _secao("10. MATERIAIS APREENDIDOS")
+    y = _secao("12. MATERIAIS APREENDIDOS")
     y = _campos([
         ["Drogas", res.get("drogas", "Não informado")],
         ["Armas", res.get("armas", "Não informado")],
@@ -9008,15 +9133,13 @@ def gerar_pdf_dossie(dados: Dict[str, Any], caminho_pdf: Path) -> None:
         ["Dinheiro", res.get("dinheiro", "Não informado")],
         ["Veículos", res.get("veiculos", "Não informado")],
         ["Outros Itens", res.get("outros", "Não informado")],
-    ], y, "10. MATERIAIS APREENDIDOS")
-    y = _subtitulo("PROVAS E ANEXOS REGISTRADOS", y, "10. MATERIAIS APREENDIDOS")
-    anexos_texto = []
-    for ev in dados.get("evidencias", [])[:80]:
-        anexos_texto.append(f"- {ev.get('tipo','N/I')} | {ev.get('arquivo','Sem nome')} | {ev.get('data','N/I')} | {ev.get('origem','N/I')}")
-    y = _texto(chr(10).join(anexos_texto) or "Nenhum anexo registrado.", y, "10. MATERIAIS APREENDIDOS", tam=8.65)
+    ], y, "12. MATERIAIS APREENDIDOS")
+    y = _subtitulo("IMAGENS/PROVAS DESTE TÓPICO", y, "12. MATERIAIS APREENDIDOS")
+    y = _texto(dados.get("resumos", {}).get("materiais") or "Sem registros textuais adicionais.", y, "12. MATERIAIS APREENDIDOS", tam=9.05)
+    y = _imagens(filtrar_evidencias_por_topico(dados.get("evidencias", []), ["materiais", "material", "apreendido", "item", "droga", "arma", "municao", "munição", "dinheiro", "veiculo", "veículo"]), y, "12. MATERIAIS APREENDIDOS")
 
-    # 11. Resultado
-    y = _secao("11. RESULTADO OPERACIONAL")
+    # 13. Resultado
+    y = _secao("13. RESULTADO OPERACIONAL")
     y = _campos([
         ["Quantidade de presos", res.get("prisoes", "Não informado")],
         ["Procurados capturados", res.get("procurados_capturados", "Não informado")],
@@ -9026,16 +9149,16 @@ def gerar_pdf_dossie(dados: Dict[str, Any], caminho_pdf: Path) -> None:
         ["Vídeos anexados", est.get("videos", 0)],
         ["Links registrados", est.get("links", 0)],
         ["Tópicos analisados", est.get("threads", 0)],
-    ], y, "11. RESULTADO OPERACIONAL")
+    ], y, "13. RESULTADO OPERACIONAL")
 
-    # 12. Conclusão
-    y = _secao("12. CONCLUSÃO")
-    y = _texto(montar_conclusao_dossie(dados), y, "12. CONCLUSÃO", tam=9.25)
-    y = _subtitulo("ASSINATURAS DIGITAIS", y, "12. CONCLUSÃO")
-    y = _assinaturas(y, "12. CONCLUSÃO")
+    # 14. Conclusão
+    y = _secao("14. CONCLUSÃO")
+    y = _texto(montar_conclusao_dossie(dados), y, "14. CONCLUSÃO", tam=9.25)
+    y = _subtitulo("ASSINATURAS DIGITAIS", y, "14. CONCLUSÃO")
+    y = _assinaturas(y, "14. CONCLUSÃO")
     qr_path = dados.get("qr_reabertura")
     if qr_path and Path(str(qr_path)).exists():
-        y = _precisa(y, 3.0 * cm, "12. CONCLUSÃO")
+        y = _precisa(y, 3.0 * cm, "14. CONCLUSÃO")
         c.setFillColor(branco)
         c.setFont("Courier-Bold", 8.9)
         c.drawString(margem_x + 0.30 * cm, y, "QR Code para reabrir a investigação arquivada")
@@ -9972,7 +10095,7 @@ def gerar_pdf_comparecimento(registro: Dict[str, Any], caminho_pdf: Path) -> Non
         c.setFillColor(dourado)
         c.setFont("Courier-Bold", 9.9)
         c.drawString(margem_x + 0.42 * cm, y - 0.28 * cm, t.upper()[:78])
-        return y - 0.68 * cm
+        return y - 0.86 * cm
 
     def _texto(texto: Any, y: float, titulo: str, tam: float = 8.85, leading: float = 0.36 * cm) -> float:
         c.setFont("Courier", tam)
@@ -9986,25 +10109,17 @@ def gerar_pdf_comparecimento(registro: Dict[str, Any], caminho_pdf: Path) -> Non
             y -= leading
         return y
 
-    texto_oficial = f"""O Departamento de Inteligência e Combate ao Crime Organizado - DICOR, no uso de suas atribuições legais, conferidas pela legislação vigente, bem como em observância aos procedimentos administrativos e investigativos internos desta instituição, SOLICITA o comparecimento de Vossa Senhoria para prestar esclarecimentos relacionados à investigação em curso, vinculada ao processo identificado em epígrafe.
+    texto_oficial = f"""O Departamento de Inteligência e Combate ao Crime Organizado - DICOR, no uso de suas atribuições legais e em conformidade com os procedimentos administrativos e investigativos vigentes, SOLICITA o comparecimento de Vossa Senhoria para prestar esclarecimentos e colaborar com a investigação em andamento, vinculada ao processo em epígrafe.
 
-O presente comparecimento possui caráter oficial e tem como objetivo possibilitar a adequada instrução dos autos, a coleta de informações, o esclarecimento de circunstâncias relevantes, bem como a eventual apresentação de documentos ou demais elementos que possam contribuir para o completo esclarecimento dos fatos atualmente apurados por esta Diretoria.
+O comparecimento deverá ocorrer no local informado para comparecimento ({local_comparecimento}), na data e horário previamente estabelecidos para comparecimento ({data_comparecimento}), ocasião em que serão realizados os procedimentos pertinentes à instrução da investigação.
 
-Dessa forma, Vossa Senhoria deverá comparecer no local informado para comparecimento ({local_comparecimento}), na data e horário previamente designados para comparecimento ({data_comparecimento}), munido(a) de documento oficial de identificação com foto e, quando solicitado, de quaisquer documentos, registros ou informações pertinentes aos fatos investigados.
+A presente solicitação tem por finalidade possibilitar a coleta de informações relevantes para o regular prosseguimento dos trabalhos investigativos, assegurando a observância dos princípios da legalidade, da ampla apuração dos fatos e do devido procedimento administrativo.
 
-Durante o comparecimento poderão ser realizados os procedimentos administrativos cabíveis, incluindo a tomada de declarações, conferência de informações, apresentação de elementos probatórios e demais diligências necessárias ao regular desenvolvimento da investigação, sempre observando os princípios da legalidade, da imparcialidade, da transparência e do devido procedimento.
+Ressalta-se que o não comparecimento injustificado poderá ensejar a adoção das medidas administrativas e legais cabíveis, sem prejuízo de outras providências que se fizerem necessárias para o regular andamento da investigação.
 
-Esclarece-se que esta solicitação integra os atos formais de instrução do procedimento investigativo, não constituindo, por si só, juízo definitivo acerca da responsabilidade de qualquer pessoa envolvida, destinando-se exclusivamente ao completo esclarecimento dos fatos e à correta apuração das informações de interesse desta Diretoria.
+Solicita-se que Vossa Senhoria apresente documento oficial de identificação no momento do comparecimento e observe rigorosamente a data, o horário e o local indicados neste documento.
 
-Ressalta-se, ainda, que o comparecimento na data e horário estabelecidos contribuirá para a celeridade da investigação e para o regular andamento dos trabalhos desenvolvidos pelo Departamento de Inteligência e Combate ao Crime Organizado - DICOR.
-
-O não comparecimento injustificado poderá ensejar a adoção das medidas administrativas e legais cabíveis, conforme previsto na legislação aplicável e nos regulamentos internos, sem prejuízo da continuidade das diligências investigativas ou da expedição de novos atos processuais que se façam necessários.
-
-Caso exista impedimento relevante para o comparecimento na data estabelecida, Vossa Senhoria deverá comunicar previamente esta Diretoria pelos meios oficiais, apresentando justificativa idônea, a fim de possibilitar a análise da situação e eventual redesignação da data, caso seja considerada pertinente.
-
-Por fim, o Departamento de Inteligência e Combate ao Crime Organizado - DICOR reafirma seu compromisso com a legalidade, a imparcialidade, a preservação dos direitos individuais e a busca pela verdade dos fatos, colocando-se à disposição para prestar os esclarecimentos necessários acerca desta solicitação.
-
-Sem mais para o momento, renova-se protestos de elevada estima e distinta consideração."""
+Sem mais para o momento, renovamos nossos votos de elevada consideração e colocamo-nos à disposição para eventuais esclarecimentos que se façam necessários."""
 
     titulo_base = "SOLICITAÇÃO DE COMPARECIMENTO"
     y = _pagina(titulo_base)
@@ -10079,18 +10194,17 @@ def gerar_docx_comparecimento(registro: Dict[str, Any], caminho_docx: Path) -> N
         row[1].text = str(v)
     local_comparecimento = str(registro.get("local") or "Sede da Polícia Federal - DICOR")
     data_comparecimento = str(registro.get("data_hora") or "a definir")
-    texto = (
-        "O Departamento de Inteligência e Combate ao Crime Organizado - DICOR, no uso de suas atribuições legais, conferidas pela legislação vigente, bem como em observância aos procedimentos administrativos e investigativos internos desta instituição, SOLICITA o comparecimento de Vossa Senhoria para prestar esclarecimentos relacionados à investigação em curso, vinculada ao processo identificado em epígrafe.\n\n"
-        "O presente comparecimento possui caráter oficial e tem como objetivo possibilitar a adequada instrução dos autos, a coleta de informações, o esclarecimento de circunstâncias relevantes, bem como a eventual apresentação de documentos ou demais elementos que possam contribuir para o completo esclarecimento dos fatos atualmente apurados por esta Diretoria.\n\n"
-        f"Dessa forma, Vossa Senhoria deverá comparecer no local informado para comparecimento ({local_comparecimento}), na data e horário previamente designados para comparecimento ({data_comparecimento}), munido(a) de documento oficial de identificação com foto e, quando solicitado, de quaisquer documentos, registros ou informações pertinentes aos fatos investigados.\n\n"
-        "Durante o comparecimento poderão ser realizados os procedimentos administrativos cabíveis, incluindo a tomada de declarações, conferência de informações, apresentação de elementos probatórios e demais diligências necessárias ao regular desenvolvimento da investigação, sempre observando os princípios da legalidade, da imparcialidade, da transparência e do devido procedimento.\n\n"
-        "Esclarece-se que esta solicitação integra os atos formais de instrução do procedimento investigativo, não constituindo, por si só, juízo definitivo acerca da responsabilidade de qualquer pessoa envolvida, destinando-se exclusivamente ao completo esclarecimento dos fatos e à correta apuração das informações de interesse desta Diretoria.\n\n"
-        "Ressalta-se, ainda, que o comparecimento na data e horário estabelecidos contribuirá para a celeridade da investigação e para o regular andamento dos trabalhos desenvolvidos pelo Departamento de Inteligência e Combate ao Crime Organizado - DICOR.\n\n"
-        "O não comparecimento injustificado poderá ensejar a adoção das medidas administrativas e legais cabíveis, conforme previsto na legislação aplicável e nos regulamentos internos, sem prejuízo da continuidade das diligências investigativas ou da expedição de novos atos processuais que se façam necessários.\n\n"
-        "Caso exista impedimento relevante para o comparecimento na data estabelecida, Vossa Senhoria deverá comunicar previamente esta Diretoria pelos meios oficiais, apresentando justificativa idônea, a fim de possibilitar a análise da situação e eventual redesignação da data, caso seja considerada pertinente.\n\n"
-        "Por fim, o Departamento de Inteligência e Combate ao Crime Organizado - DICOR reafirma seu compromisso com a legalidade, a imparcialidade, a preservação dos direitos individuais e a busca pela verdade dos fatos, colocando-se à disposição para prestar os esclarecimentos necessários acerca desta solicitação.\n\n"
-        "Sem mais para o momento, renova-se protestos de elevada estima e distinta consideração."
-    )
+    texto = f"""O Departamento de Inteligência e Combate ao Crime Organizado - DICOR, no uso de suas atribuições legais e em conformidade com os procedimentos administrativos e investigativos vigentes, SOLICITA o comparecimento de Vossa Senhoria para prestar esclarecimentos e colaborar com a investigação em andamento, vinculada ao processo em epígrafe.
+
+O comparecimento deverá ocorrer no local informado para comparecimento ({local_comparecimento}), na data e horário previamente estabelecidos para comparecimento ({data_comparecimento}), ocasião em que serão realizados os procedimentos pertinentes à instrução da investigação.
+
+A presente solicitação tem por finalidade possibilitar a coleta de informações relevantes para o regular prosseguimento dos trabalhos investigativos, assegurando a observância dos princípios da legalidade, da ampla apuração dos fatos e do devido procedimento administrativo.
+
+Ressalta-se que o não comparecimento injustificado poderá ensejar a adoção das medidas administrativas e legais cabíveis, sem prejuízo de outras providências que se fizerem necessárias para o regular andamento da investigação.
+
+Solicita-se que Vossa Senhoria apresente documento oficial de identificação no momento do comparecimento e observe rigorosamente a data, o horário e o local indicados neste documento.
+
+Sem mais para o momento, renovamos nossos votos de elevada consideração e colocamo-nos à disposição para eventuais esclarecimentos que se façam necessários."""
     p = doc.add_paragraph(texto)
     p.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
     doc.add_paragraph("\n\n________________________________________")
