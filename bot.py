@@ -8679,122 +8679,152 @@ def pdf_add_assinaturas_dossie(story: List[Any], dados: Dict[str, Any], style_ce
 
 
 
+
 def gerar_pdf_dossie(dados: Dict[str, Any], caminho_pdf: Path) -> None:
-    """Gera o Dossiê no modelo aprovado PREVIA_MODELO_EXATO_DICOR_AJUSTE_FONTE: mesmo visual, fonte levemente maior e suporte a muitas fotos."""
+    """Gera o dossiê no modelo aprovado, sem sobreposição e com cada tópico iniciando em página própria."""
     if canvas is None or A4 is None:
         raise RuntimeError("Dependência ausente: instale reportlab, qrcode e pillow.")
 
     caminho_pdf = Path(caminho_pdf)
     caminho_pdf.parent.mkdir(parents=True, exist_ok=True)
+
     c = canvas.Canvas(str(caminho_pdf), pagesize=A4)
     largura, altura = A4
     template = caminho_modelo_visual_canva()
 
-    margem_x = 1.10 * cm
+    branco = colors.HexColor("#FFFFFF")
+    dourado = colors.HexColor("#D4AF37")
+    azul_claro = colors.HexColor("#8EB8C8")
+    preto = colors.HexColor("#050505")
+    gelo = colors.HexColor("#DCEEF4")
+
+    margem_x = 1.22 * cm
     largura_util = largura - 2 * margem_x
-    topo_conteudo = altura - 4.25 * cm
-    rodape_limite = 1.65 * cm
+    painel_topo = altura - 5.65 * cm
+    limite_baixo = 2.05 * cm
+    painel_altura = painel_topo - limite_baixo
 
-    def _limpar(txt: Any) -> str:
-        return str(txt if txt is not None else "Não informado").replace("\r", "").strip() or "Não informado"
+    def _safe(txt: Any) -> str:
+        return str(txt if txt is not None else "Não informado").replace(chr(13), "").strip() or "Não informado"
 
-    def _linhas(texto: Any, fonte: str = "Courier", tamanho: float = 9.4, largura_max: float = None) -> List[str]:
+    def _linhas(texto: Any, fonte: str = "Courier", tam: float = 9.2, largura_max: float = None) -> List[str]:
         largura_max = largura_max or largura_util
-        resultado: List[str] = []
-        for bloco in _limpar(texto).split("\n"):
+        saida: List[str] = []
+        for bloco in _safe(texto).splitlines():
             bloco = bloco.strip()
             if not bloco:
-                resultado.append("")
+                saida.append("")
                 continue
             try:
-                resultado.extend(_wrap_pdf(c, bloco, fonte, tamanho, largura_max))
+                saida.extend(_wrap_pdf(c, bloco, fonte, tam, largura_max))
             except Exception:
-                # fallback simples
                 import textwrap as _tw
-                resultado.extend(_tw.wrap(bloco, 88) or [""])
-        return resultado
+                chars = max(38, int((largura_max / (tam * 0.55))))
+                saida.extend(_tw.wrap(bloco, chars, break_long_words=False) or [""])
+        return saida
 
-    def _pagina(titulo: str) -> float:
+    def _draw_template() -> None:
         if template and Path(template).exists():
             try:
                 c.drawImage(str(template), 0, 0, width=largura, height=altura, preserveAspectRatio=False, mask="auto")
+                return
             except Exception:
-                c.setFillColor(colors.HexColor("#0B0B0B"))
-                c.rect(0, 0, largura, altura, stroke=0, fill=1)
-        else:
-            c.setFillColor(colors.HexColor("#0B0B0B"))
-            c.rect(0, 0, largura, altura, stroke=0, fill=1)
+                pass
+        c.setFillColor(colors.HexColor("#0B0B0B"))
+        c.rect(0, 0, largura, altura, stroke=0, fill=1)
 
-        # Título específico da página, mantendo o cabeçalho do modelo.
-        c.setFillColor(colors.HexColor("#FFFFFF"))
-        c.setFont("Courier-Bold", 14.2)
-        c.drawCentredString(largura / 2, altura - 3.75 * cm, titulo[:78])
-        c.setStrokeColor(colors.HexColor("#D4AF37"))
-        c.setLineWidth(0.7)
-        c.line(margem_x, altura - 3.98 * cm, largura - margem_x, altura - 3.98 * cm)
-        return topo_conteudo
+    def _set_alpha(fill=1, stroke=1):
+        try:
+            c.setFillAlpha(fill)
+            c.setStrokeAlpha(stroke)
+        except Exception:
+            pass
 
-    def _nova_se_precisar(y: float, precisa: float, titulo: str) -> float:
-        if y - precisa < rodape_limite:
-            c.showPage()
-            return _pagina(titulo + " • CONTINUAÇÃO")
+    def _pagina(titulo: str) -> float:
+        _draw_template()
+        # Painel único de conteúdo: impede texto em cima do cabeçalho/arte do fundo.
+        _set_alpha(0.86, 1)
+        c.setFillColor(preto)
+        c.roundRect(margem_x, limite_baixo, largura_util, painel_altura, 7, stroke=0, fill=1)
+        _set_alpha(1, 1)
+        c.setStrokeColor(azul_claro)
+        c.setLineWidth(0.85)
+        c.roundRect(margem_x, limite_baixo, largura_util, painel_altura, 7, stroke=1, fill=0)
+
+        # Faixa de título dentro do painel, abaixo do cabeçalho fixo do modelo.
+        faixa_h = 0.72 * cm
+        faixa_y = painel_topo - faixa_h
+        c.setFillColor(colors.HexColor("#111111"))
+        c.rect(margem_x + 0.08 * cm, faixa_y, largura_util - 0.16 * cm, faixa_h, stroke=0, fill=1)
+        c.setStrokeColor(dourado)
+        c.setLineWidth(0.75)
+        c.line(margem_x + 0.18 * cm, faixa_y + 0.12 * cm, largura - margem_x - 0.18 * cm, faixa_y + 0.12 * cm)
+        c.setFillColor(dourado)
+        c.setFont("Courier-Bold", 12.2)
+        c.drawString(margem_x + 0.28 * cm, faixa_y + 0.28 * cm, _safe(titulo).upper()[:82])
+        return faixa_y - 0.38 * cm
+
+    def _nova_pagina_mesmo_topico(titulo: str) -> float:
+        c.showPage()
+        return _pagina(f"{titulo} - CONTINUAÇÃO")
+
+    def _precisa(y: float, espaco: float, titulo: str) -> float:
+        if y - espaco < limite_baixo + 0.55 * cm:
+            return _nova_pagina_mesmo_topico(titulo)
         return y
 
-    def _texto(texto: Any, y: float, titulo_pagina: str, fonte: str = "Courier", tamanho: float = 9.4, leading: float = 0.42 * cm, cor="#FFFFFF", x: float = None, largura_max: float = None) -> float:
-        x = x if x is not None else margem_x
-        largura_max = largura_max if largura_max is not None else largura_util
+    def _texto(texto: Any, y: float, titulo: str, tam: float = 9.25, leading: float = 0.40 * cm, x: float = None, largura_max: float = None, cor: str = "#FFFFFF", fonte: str = "Courier") -> float:
+        x = x if x is not None else margem_x + 0.28 * cm
+        largura_max = largura_max if largura_max is not None else largura_util - 0.56 * cm
+        c.setFont(fonte, tam)
         c.setFillColor(colors.HexColor(cor))
-        c.setFont(fonte, tamanho)
-        for linha in _linhas(texto, fonte, tamanho, largura_max):
-            y = _nova_se_precisar(y, leading + 2, titulo_pagina)
+        for linha in _linhas(texto, fonte, tam, largura_max):
+            y = _precisa(y, leading + 0.08 * cm, titulo)
             if linha == "":
-                y -= leading * 0.65
+                y -= leading * 0.62
                 continue
-            c.drawString(x, y, linha[:220])
+            c.drawString(x, y, linha[:180])
             y -= leading
         return y
 
-    def _titulo_bloco(titulo: str, y: float, titulo_pagina: str) -> float:
-        y = _nova_se_precisar(y, 0.70 * cm, titulo_pagina)
-        c.setFillColor(colors.HexColor("#151515"))
-        c.setStrokeColor(colors.HexColor("#D4AF37"))
-        c.setLineWidth(0.8)
-        c.roundRect(margem_x, y - 0.46 * cm, largura_util, 0.56 * cm, 4, fill=1, stroke=1)
-        c.setFillColor(colors.HexColor("#D4AF37"))
-        c.setFont("Courier-Bold", 10.9)
-        c.drawString(margem_x + 0.18 * cm, y - 0.28 * cm, titulo[:92])
+    def _subtitulo(titulo_bloco: str, y: float, titulo: str) -> float:
+        y = _precisa(y, 0.82 * cm, titulo)
+        c.setFillColor(colors.HexColor("#0A0A0A"))
+        c.setStrokeColor(dourado)
+        c.setLineWidth(0.65)
+        h = 0.55 * cm
+        c.roundRect(margem_x + 0.18 * cm, y - h + 0.08 * cm, largura_util - 0.36 * cm, h, 4, fill=1, stroke=1)
+        c.setFillColor(dourado)
+        c.setFont("Courier-Bold", 10.2)
+        c.drawString(margem_x + 0.36 * cm, y - 0.28 * cm, _safe(titulo_bloco).upper()[:88])
         return y - 0.72 * cm
 
-    def _campo(label: str, valor: Any, y: float, titulo_pagina: str) -> float:
-        y = _nova_se_precisar(y, 0.55 * cm, titulo_pagina)
-        c.setFont("Courier-Bold", 9.4)
-        c.setFillColor(colors.HexColor("#D4AF37"))
-        c.drawString(margem_x, y, f"{label}:")
-        c.setFont("Courier", 9.4)
-        c.setFillColor(colors.HexColor("#FFFFFF"))
-        linhas = _linhas(valor, "Courier", 9.4, largura_util - 4.8 * cm)
+    def _campo(label: str, valor: Any, y: float, titulo: str, label_w: float = 4.55 * cm) -> float:
+        linhas = _linhas(valor, "Courier", 9.1, largura_util - label_w - 0.75 * cm)
         if not linhas:
             linhas = ["Não informado"]
-        c.drawString(margem_x + 4.65 * cm, y, linhas[0][:150])
-        y -= 0.38 * cm
-        for linha in linhas[1:]:
-            y = _nova_se_precisar(y, 0.36 * cm, titulo_pagina)
-            c.drawString(margem_x + 4.65 * cm, y, linha[:150])
-            y -= 0.38 * cm
-        return y
+        precisa = max(0.48 * cm, len(linhas) * 0.36 * cm + 0.12 * cm)
+        y = _precisa(y, precisa, titulo)
+        c.setFont("Courier-Bold", 9.2)
+        c.setFillColor(dourado)
+        c.drawString(margem_x + 0.32 * cm, y, f"{label}:")
+        c.setFont("Courier", 9.1)
+        c.setFillColor(branco)
+        vx = margem_x + 0.32 * cm + label_w
+        for idx, linha in enumerate(linhas[:5]):
+            c.drawString(vx, y - idx * 0.34 * cm, linha[:145])
+        return y - precisa
 
-    def _tabela_campos(campos: List[Tuple[str, Any]], y: float, titulo_pagina: str) -> float:
-        c.setStrokeColor(colors.HexColor("#7FA6AF"))
-        c.setLineWidth(0.55)
-        box_top = y + 0.22 * cm
+    def _campos(campos: List[List[Any]], y: float, titulo: str) -> float:
+        y = _precisa(y, 0.75 * cm, titulo)
+        box_top = y + 0.30 * cm
         for label, valor in campos:
-            y = _campo(label, valor, y, titulo_pagina)
-        box_bottom = y + 0.16 * cm
-        try:
-            c.roundRect(margem_x - 0.10 * cm, box_bottom, largura_util + 0.20 * cm, box_top - box_bottom, 5, stroke=1, fill=0)
-        except Exception:
-            pass
-        return y - 0.18 * cm
+            y = _campo(str(label), valor, y, titulo)
+        box_bottom = y + 0.12 * cm
+        c.setStrokeColor(azul_claro)
+        c.setLineWidth(0.55)
+        c.roundRect(margem_x + 0.16 * cm, box_bottom, largura_util - 0.32 * cm, box_top - box_bottom, 5, stroke=1, fill=0)
+        return y - 0.30 * cm
 
     def _imagem_fit(path: Any, x: float, y: float, w: float, h: float) -> bool:
         try:
@@ -8806,218 +8836,210 @@ def gerar_pdf_dossie(dados: Dict[str, Any], caminho_pdf: Path) -> None:
         except Exception:
             return False
 
-    def _imagens_grid(evidencias: List[Dict[str, Any]], y: float, titulo_pagina: str, limite: int = 200) -> float:
-        imgs = [ev for ev in evidencias if ev.get("tipo") == "imagem" and ev.get("local")][:limite]
+    def _imagens(imagens: List[Dict[str, Any]], y: float, titulo: str, limite: int = 220) -> float:
+        imgs = [ev for ev in imagens if ev.get("tipo") == "imagem" and ev.get("local")][:limite]
         if not imgs:
-            return _texto("Nenhuma imagem anexada nesta seção.", y, titulo_pagina, tamanho=9.2)
-        col_w = (largura_util - 0.35 * cm) / 2
-        card_h = 6.25 * cm
-        img_h = 4.45 * cm
-        x1 = margem_x
-        x2 = margem_x + col_w + 0.35 * cm
+            return _texto("Nenhuma imagem anexada nesta seção.", y, titulo, tam=9.0)
+        col_w = (largura_util - 0.62 * cm) / 2
+        card_h = 7.15 * cm
+        img_h = 5.35 * cm
+        x1 = margem_x + 0.24 * cm
+        x2 = x1 + col_w + 0.38 * cm
         for i in range(0, len(imgs), 2):
-            y = _nova_se_precisar(y, card_h + 0.25 * cm, titulo_pagina)
+            y = _precisa(y, card_h + 0.35 * cm, titulo)
             for j, x in enumerate([x1, x2]):
                 if i + j >= len(imgs):
                     continue
                 ev = imgs[i + j]
-                c.setFillColor(colors.HexColor("#101010"))
-                c.setStrokeColor(colors.HexColor("#7FA6AF"))
+                c.setFillColor(colors.HexColor("#0D0D0D"))
+                c.setStrokeColor(gelo)
+                c.setLineWidth(0.6)
                 c.roundRect(x, y - card_h, col_w, card_h, 5, stroke=1, fill=1)
-                _imagem_fit(ev.get("local"), x + 0.15 * cm, y - img_h - 0.25 * cm, col_w - 0.30 * cm, img_h)
-                c.setFillColor(colors.HexColor("#DCEEF4"))
-                c.setFont("Courier", 8.0)
-                cap = (
-                    f"Tópico: {ev.get('origem','N/I')} | Autor: {ev.get('autor','N/I')}\\n"
-                    f"Data: {ev.get('data','N/I')} | Arquivo: {ev.get('arquivo','Sem nome')}"
-                )
-                cap_y = y - img_h - 0.55 * cm
-                for linha in _linhas(cap, "Courier", 8.0, col_w - 0.35 * cm)[:3]:
-                    c.drawString(x + 0.18 * cm, cap_y, linha[:95])
-                    cap_y -= 0.28 * cm
-            y -= card_h + 0.28 * cm
+                _imagem_fit(ev.get("local"), x + 0.18 * cm, y - img_h - 0.28 * cm, col_w - 0.36 * cm, img_h)
+                legenda = f"Tópico: {ev.get('origem','N/I')} | Autor: {ev.get('autor','N/I')} | Data: {ev.get('data','N/I')} | Arquivo: {ev.get('arquivo','Sem nome')}"
+                c.setFillColor(gelo)
+                c.setFont("Courier", 7.5)
+                ly = y - img_h - 0.62 * cm
+                for linha in _linhas(legenda, "Courier", 7.5, col_w - 0.42 * cm)[:4]:
+                    c.drawString(x + 0.20 * cm, ly, linha[:92])
+                    ly -= 0.26 * cm
+            y -= card_h + 0.35 * cm
         return y
 
-    def _pessoas(pessoas: List[Dict[str, Any]], y: float, titulo_pagina: str, vazio: str) -> float:
+    def _pessoas(pessoas: List[Dict[str, Any]], y: float, titulo: str, vazio: str) -> float:
         if not pessoas:
-            return _texto(vazio, y, titulo_pagina, tamanho=9.2)
-        for idx, pessoa in enumerate(pessoas[:50], start=1):
-            y = _nova_se_precisar(y, 3.05 * cm, titulo_pagina)
-            c.setFillColor(colors.HexColor("#101010"))
-            c.setStrokeColor(colors.HexColor("#7FA6AF"))
-            c.roundRect(margem_x, y - 2.75 * cm, largura_util, 2.75 * cm, 5, stroke=1, fill=1)
-            foto = pessoa.get("foto")
-            _imagem_fit(foto, margem_x + 0.15 * cm, y - 2.35 * cm, 2.2 * cm, 2.2 * cm)
-            c.setFont("Courier-Bold", 9.8)
-            c.setFillColor(colors.HexColor("#D4AF37"))
-            c.drawString(margem_x + 2.55 * cm, y - 0.38 * cm, f"{idx}. {str(pessoa.get('nome','Não informado'))[:55]}")
-            c.setFont("Courier", 9.5)
-            c.setFillColor(colors.white)
+            return _texto(vazio, y, titulo, tam=9.1)
+        card_h = 2.65 * cm
+        for idx, pessoa in enumerate(pessoas[:60], 1):
+            y = _precisa(y, card_h + 0.20 * cm, titulo)
+            c.setFillColor(colors.HexColor("#0D0D0D"))
+            c.setStrokeColor(azul_claro)
+            c.roundRect(margem_x + 0.24 * cm, y - card_h, largura_util - 0.48 * cm, card_h, 5, fill=1, stroke=1)
+            _imagem_fit(pessoa.get("foto"), margem_x + 0.38 * cm, y - 2.35 * cm, 2.1 * cm, 2.1 * cm)
+            tx = margem_x + 2.85 * cm
+            c.setFont("Courier-Bold", 9.6)
+            c.setFillColor(dourado)
+            c.drawString(tx, y - 0.40 * cm, f"{idx}. {str(pessoa.get('nome','Não informado'))[:58]}")
+            c.setFillColor(branco)
+            c.setFont("Courier", 8.9)
             linhas = [
                 f"RG: {pessoa.get('rg','Não informado')}",
                 f"Função/Cargo: {pessoa.get('funcao') or pessoa.get('cargo') or 'Não informado'}",
-                f"Periculosidade/Obs.: {pessoa.get('periculosidade','Não informado')} {pessoa.get('observacoes','')}",
+                f"Observações: {pessoa.get('periculosidade','Não informado')} {pessoa.get('observacoes','')}",
             ]
-            yy = y - 0.82 * cm
+            ly = y - 0.82 * cm
             for linha in linhas:
-                for sub in _linhas(linha, "Courier", 9.1, largura_util - 2.9 * cm)[:2]:
-                    c.drawString(margem_x + 2.55 * cm, yy, sub[:140])
-                    yy -= 0.34 * cm
-            y -= 3.00 * cm
+                for sub in _linhas(linha, "Courier", 8.9, largura_util - 3.35 * cm)[:2]:
+                    c.drawString(tx, ly, sub[:135])
+                    ly -= 0.30 * cm
+            y -= card_h + 0.22 * cm
         return y
 
-    def _assinaturas(y: float, titulo_pagina: str) -> float:
-        y = _nova_se_precisar(y, 3.7 * cm, titulo_pagina)
+    def _assinaturas(y: float, titulo: str) -> float:
+        y = _precisa(y, 3.15 * cm, titulo)
         assinaturas = obter_assinaturas_dossie(dados)
-        col_w = largura_util / 3
-        for idx, ass in enumerate(assinaturas):
-            x = margem_x + idx * col_w
+        col_w = (largura_util - 0.60 * cm) / 3
+        base_x = margem_x + 0.30 * cm
+        for idx, ass in enumerate(assinaturas[:3]):
+            x = base_x + idx * col_w
             imagem = limpar_imagem_assinatura_dossie(ass.get("imagem")) or ass.get("imagem")
             if imagem and Path(str(imagem)).exists():
-                _imagem_fit(imagem, x + 0.25 * cm, y - 1.35 * cm, col_w - 0.50 * cm, 1.25 * cm)
+                _imagem_fit(imagem, x + 0.12 * cm, y - 1.18 * cm, col_w - 0.24 * cm, 1.05 * cm)
             elif ass.get("texto"):
-                c.setFillColor(colors.white)
-                c.setFont("Courier-Oblique", 9.0)
-                c.drawCentredString(x + col_w / 2, y - 0.65 * cm, str(ass.get("texto"))[:38])
-            c.setStrokeColor(colors.HexColor("#D4AF37"))
-            c.line(x + 0.25 * cm, y - 1.65 * cm, x + col_w - 0.25 * cm, y - 1.65 * cm)
-            c.setFillColor(colors.white)
-            c.setFont("Courier-Bold", 9.1)
-            c.drawCentredString(x + col_w / 2, y - 2.05 * cm, str(ass.get("titulo") or "ASSINATURA")[:28])
-        return y - 2.7 * cm
+                c.setFillColor(branco)
+                c.setFont("Courier-Oblique", 8.6)
+                c.drawCentredString(x + col_w / 2, y - 0.72 * cm, str(ass.get("texto"))[:32])
+            c.setStrokeColor(dourado)
+            c.line(x + 0.18 * cm, y - 1.42 * cm, x + col_w - 0.18 * cm, y - 1.42 * cm)
+            c.setFillColor(branco)
+            c.setFont("Courier-Bold", 8.6)
+            c.drawCentredString(x + col_w / 2, y - 1.78 * cm, str(ass.get("titulo") or "ASSINATURA")[:25])
+        return y - 2.35 * cm
 
-    # Página 1 — capa com todas as informações principais
+    def _secao(titulo: str) -> float:
+        c.showPage()
+        return _pagina(titulo)
+
+    # 1. Capa
     y = _pagina("DOSSIÊ OPERACIONAL DICOR")
-    c.setFont("Courier-Bold", 16.0)
-    c.setFillColor(colors.white)
-    c.drawCentredString(largura/2, y, "DOSSIÊ DE INTELIGÊNCIA OPERACIONAL")
-    y -= 0.65 * cm
-    y = _tabela_campos([
-        ("Processo Nº", dados.get("processo")),
-        ("Investigação Nº", dados.get("numero_investigacao")),
-        ("Nome da Operação", dados.get("nome_operacao")),
-        ("Comunidade Investigada", dados.get("comunidade")),
-        ("Cidade Operacional", dados.get("cidade_operacional", DOSSIE_CIDADE_OPERACIONAL)),
-        ("Data de Abertura", dados.get("data_abertura")),
-        ("Data de Encerramento", dados.get("data_encerramento")),
-        ("Delegado Responsável", dados.get("delegado_responsavel")),
-        ("Agente do Encerramento", dados.get("agente_encerramento")),
-        ("Integrantes da Investigação", ", ".join(dados.get("integrantes_investigacao", [])) or "Não informado"),
+    y = _subtitulo("IDENTIFICAÇÃO DO PROCEDIMENTO", y, "DOSSIÊ OPERACIONAL DICOR")
+    y = _campos([
+        ["Processo Nº", dados.get("processo")],
+        ["Investigação Nº", dados.get("numero_investigacao")],
+        ["Nome da Operação", dados.get("nome_operacao")],
+        ["Comunidade Investigada", dados.get("comunidade")],
+        ["Cidade Operacional", dados.get("cidade_operacional", DOSSIE_CIDADE_OPERACIONAL)],
+        ["Data de Abertura", dados.get("data_abertura")],
+        ["Data de Encerramento", dados.get("data_encerramento")],
+        ["Delegado Responsável", dados.get("delegado_responsavel")],
+        ["Agente do Encerramento", dados.get("agente_encerramento")],
+        ["Integrantes", ", ".join(dados.get("integrantes_investigacao", [])) or "Não informado"],
     ], y, "DOSSIÊ OPERACIONAL DICOR")
-
     est = dados.get("estatisticas", {}) or {}
-    y -= 0.15 * cm
-    y = _titulo_bloco("INDICADORES DO DOSSIÊ", y, "DOSSIÊ OPERACIONAL DICOR")
-    y = _tabela_campos([
-        ("Mensagens analisadas", est.get("mensagens_analisadas", 0)),
-        ("Evidências coletadas", est.get("evidencias", 0)),
-        ("Imagens anexadas", est.get("imagens", 0)),
-        ("Vídeos anexados", est.get("videos", 0)),
-        ("Links registrados", est.get("links", 0)),
+    y = _subtitulo("INDICADORES", y, "DOSSIÊ OPERACIONAL DICOR")
+    y = _campos([
+        ["Mensagens analisadas", est.get("mensagens_analisadas", 0)],
+        ["Evidências coletadas", est.get("evidencias", 0)],
+        ["Imagens anexadas", est.get("imagens", 0)],
+        ["Vídeos anexados", est.get("videos", 0)],
+        ["Links registrados", est.get("links", 0)],
     ], y, "DOSSIÊ OPERACIONAL DICOR")
 
-    # Resumo Executivo
-    c.showPage()
-    y = _pagina("2. RESUMO EXECUTIVO")
-    y = _titulo_bloco("OBJETIVO DA INVESTIGAÇÃO", y, "2. RESUMO EXECUTIVO")
-    y = _texto(dados.get("objetivo") or "Objetivo não informado.", y, "2. RESUMO EXECUTIVO", tamanho=9.8)
-    y = _titulo_bloco("CONTEXTO OPERACIONAL", y, "2. RESUMO EXECUTIVO")
-    y = _texto(resumo_contexto_operacional(dados), y, "2. RESUMO EXECUTIVO", tamanho=9.8)
-    y = _titulo_bloco("STATUS E CLASSIFICAÇÃO", y, "2. RESUMO EXECUTIVO")
-    y = _tabela_campos([
-        ("Status da Investigação", dados.get("status")),
-        ("Prioridade", dados.get("prioridade")),
-        ("Facção Investigada", dados.get("faccao")),
-        ("Agente Responsável", dados.get("agente_encerramento")),
-        ("Integrantes", ", ".join(dados.get("integrantes_investigacao", [])) or "Não informado"),
+    # 2. Resumo
+    y = _secao("2. RESUMO EXECUTIVO")
+    y = _subtitulo("OBJETIVO DA INVESTIGAÇÃO", y, "2. RESUMO EXECUTIVO")
+    y = _texto(dados.get("objetivo") or "Objetivo não informado.", y, "2. RESUMO EXECUTIVO", tam=9.35)
+    y = _subtitulo("CONTEXTO OPERACIONAL", y, "2. RESUMO EXECUTIVO")
+    y = _texto(resumo_contexto_operacional(dados), y, "2. RESUMO EXECUTIVO", tam=9.35)
+    y = _subtitulo("STATUS E CLASSIFICAÇÃO", y, "2. RESUMO EXECUTIVO")
+    y = _campos([
+        ["Status da Investigação", dados.get("status")],
+        ["Prioridade", dados.get("prioridade")],
+        ["Facção Investigada", dados.get("faccao")],
+        ["Agente Responsável", dados.get("agente_encerramento")],
     ], y, "2. RESUMO EXECUTIVO")
 
-    # Pessoas
-    c.showPage()
-    y = _pagina("3. LIDERANÇAS IDENTIFICADAS")
+    # 3. Lideranças
+    y = _secao("3. LIDERANÇAS IDENTIFICADAS")
     y = _pessoas(dados.get("liderancas", []), y, "3. LIDERANÇAS IDENTIFICADAS", "Nenhuma liderança foi identificada automaticamente nos tópicos da mesa.")
 
-    c.showPage()
-    y = _pagina("4. INTEGRANTES IDENTIFICADOS")
+    # 4. Integrantes
+    y = _secao("4. INTEGRANTES IDENTIFICADOS")
     y = _pessoas(dados.get("integrantes", []), y, "4. INTEGRANTES IDENTIFICADOS", "Nenhum integrante foi identificado automaticamente nos tópicos da mesa.")
 
-    # Evidências por seção
-    c.showPage()
-    y = _pagina("5. PAINEL DA ORGANIZAÇÃO")
-    y = _texto(dados.get("resumos", {}).get("painel") or "Sem registros textuais adicionais.", y, "5. PAINEL DA ORGANIZAÇÃO", tamanho=9.4)
-    y -= 0.15 * cm
-    y = _imagens_grid(filtrar_evidencias_por_topico(dados.get("evidencias", []), ["painel"]), y, "5. PAINEL DA ORGANIZAÇÃO")
+    # 5. Painel
+    y = _secao("5. PAINEL DA ORGANIZAÇÃO")
+    y = _texto(dados.get("resumos", {}).get("painel") or "Sem registros textuais adicionais.", y, "5. PAINEL DA ORGANIZAÇÃO", tam=9.15)
+    y = _imagens(filtrar_evidencias_por_topico(dados.get("evidencias", []), ["painel"]), y - 0.12 * cm, "5. PAINEL DA ORGANIZAÇÃO")
 
-    c.showPage()
-    y = _pagina("6. LOCALIZAÇÃO")
-    y = _texto(dados.get("resumos", {}).get("localizacao") or "Sem registros textuais adicionais.", y, "6. LOCALIZAÇÃO", tamanho=9.4)
-    y = _tabela_campos([
-        ("Comunidade/Base", dados.get("comunidade")),
-        ("Canal de reabertura", dados.get("reabrir_url") or "Não informado"),
-        ("Cidade operacional", dados.get("cidade_operacional", DOSSIE_CIDADE_OPERACIONAL)),
+    # 6. Localização
+    y = _secao("6. LOCALIZAÇÃO")
+    y = _texto(dados.get("resumos", {}).get("localizacao") or "Sem registros textuais adicionais.", y, "6. LOCALIZAÇÃO", tam=9.15)
+    y = _campos([
+        ["Comunidade/Base", dados.get("comunidade")],
+        ["Canal de reabertura", dados.get("reabrir_url") or "Não informado"],
+        ["Cidade operacional", dados.get("cidade_operacional", DOSSIE_CIDADE_OPERACIONAL)],
     ], y, "6. LOCALIZAÇÃO")
-    y = _imagens_grid(filtrar_evidencias_por_topico(dados.get("evidencias", []), ["localizacao", "localização"]), y, "6. LOCALIZAÇÃO")
+    y = _imagens(filtrar_evidencias_por_topico(dados.get("evidencias", []), ["localizacao", "localização"]), y, "6. LOCALIZAÇÃO")
 
-    c.showPage()
-    y = _pagina("7. PRODUÇÃO E FABRICAÇÃO")
-    y = _texto(dados.get("resumos", {}).get("producao") or "Sem registros textuais adicionais.", y, "7. PRODUÇÃO E FABRICAÇÃO", tamanho=9.4)
-    y = _imagens_grid(filtrar_evidencias_por_topico(dados.get("evidencias", []), ["producao", "produção", "farm", "ingredientes", "produto"]), y, "7. PRODUÇÃO E FABRICAÇÃO")
+    # 7. Produção
+    y = _secao("7. PRODUÇÃO E FABRICAÇÃO")
+    y = _texto(dados.get("resumos", {}).get("producao") or "Sem registros textuais adicionais.", y, "7. PRODUÇÃO E FABRICAÇÃO", tam=9.15)
+    y = _imagens(filtrar_evidencias_por_topico(dados.get("evidencias", []), ["producao", "produção", "farm", "ingredientes"]), y, "7. PRODUÇÃO E FABRICAÇÃO")
 
-    c.showPage()
-    y = _pagina("8. BAÚS E ARMAZENAMENTO")
-    y = _texto(dados.get("resumos", {}).get("baus") or "Sem registros textuais adicionais.", y, "8. BAÚS E ARMAZENAMENTO", tamanho=9.4)
-    y = _imagens_grid(filtrar_evidencias_por_topico(dados.get("evidencias", []), ["baus", "bau", "baú"]), y, "8. BAÚS E ARMAZENAMENTO")
+    # 8. Baús
+    y = _secao("8. BAÚS E ARMAZENAMENTO")
+    y = _texto(dados.get("resumos", {}).get("baus") or "Sem registros textuais adicionais.", y, "8. BAÚS E ARMAZENAMENTO", tam=9.15)
+    y = _imagens(filtrar_evidencias_por_topico(dados.get("evidencias", []), ["baus", "bau", "baú"]), y, "8. BAÚS E ARMAZENAMENTO")
 
-    c.showPage()
-    y = _pagina("9. INFORMANTES")
+    # 9. Informantes
+    y = _secao("9. INFORMANTES")
     y = _pessoas(dados.get("informantes", []), y, "9. INFORMANTES", "Nenhum informante foi identificado automaticamente nos tópicos da mesa.")
-    y = _titulo_bloco("INFORMAÇÕES DO TÓPICO", y, "9. INFORMANTES")
-    y = _texto(dados.get("resumos", {}).get("informantes") or "Sem registros textuais adicionais.", y, "9. INFORMANTES", tamanho=9.4)
+    y = _subtitulo("OBSERVAÇÕES", y, "9. INFORMANTES")
+    y = _texto(dados.get("resumos", {}).get("informantes") or "Sem registros textuais adicionais.", y, "9. INFORMANTES", tam=9.15)
 
-    c.showPage()
-    y = _pagina("10. MATERIAIS APREENDIDOS")
+    # 10. Materiais
     res = dados.get("resultados", {}) or {}
-    y = _tabela_campos([
-        ("Drogas", res.get("drogas", "Não informado")),
-        ("Armas", res.get("armas", "Não informado")),
-        ("Munições", res.get("municoes", "Não informado")),
-        ("Dinheiro", res.get("dinheiro", "Não informado")),
-        ("Veículos", res.get("veiculos", "Não informado")),
-        ("Outros Itens", res.get("outros", "Não informado")),
+    y = _secao("10. MATERIAIS APREENDIDOS")
+    y = _campos([
+        ["Drogas", res.get("drogas", "Não informado")],
+        ["Armas", res.get("armas", "Não informado")],
+        ["Munições", res.get("municoes", "Não informado")],
+        ["Dinheiro", res.get("dinheiro", "Não informado")],
+        ["Veículos", res.get("veiculos", "Não informado")],
+        ["Outros Itens", res.get("outros", "Não informado")],
     ], y, "10. MATERIAIS APREENDIDOS")
-    y = _titulo_bloco("ARQUIVOS E PROVAS REGISTRADAS", y, "10. MATERIAIS APREENDIDOS")
-    for ev in (dados.get("evidencias", []) or [])[:120]:
-        linha = f"{ev.get('tipo','arquivo')} • {ev.get('arquivo','Sem nome')} • {ev.get('data','Sem data')} • {ev.get('origem','Sem origem')}"
-        y = _texto(linha, y, "10. MATERIAIS APREENDIDOS", tamanho=8.4, leading=0.28*cm, cor="#DCEEF4")
+    y = _subtitulo("PROVAS E ANEXOS REGISTRADOS", y, "10. MATERIAIS APREENDIDOS")
+    anexos_texto = []
+    for ev in dados.get("evidencias", [])[:80]:
+        anexos_texto.append(f"- {ev.get('tipo','N/I')} | {ev.get('arquivo','Sem nome')} | {ev.get('data','N/I')} | {ev.get('origem','N/I')}")
+    y = _texto(chr(10).join(anexos_texto) or "Nenhum anexo registrado.", y, "10. MATERIAIS APREENDIDOS", tam=8.65)
 
-    c.showPage()
-    y = _pagina("11. RESULTADO OPERACIONAL")
-    y = _tabela_campos([
-        ("Quantidade de presos", res.get("prisoes", "Não informado")),
-        ("Procurados capturados", res.get("procurados_capturados", "Não informado")),
-        ("Mensagens analisadas", est.get("mensagens_analisadas", 0)),
-        ("Evidências coletadas", est.get("evidencias", 0)),
-        ("Imagens anexadas", est.get("imagens", 0)),
-        ("Vídeos anexados", est.get("videos", 0)),
-        ("Links registrados", est.get("links", 0)),
-        ("Tópicos analisados", est.get("threads", 0)),
+    # 11. Resultado
+    y = _secao("11. RESULTADO OPERACIONAL")
+    y = _campos([
+        ["Quantidade de presos", res.get("prisoes", "Não informado")],
+        ["Procurados capturados", res.get("procurados_capturados", "Não informado")],
+        ["Mensagens analisadas", est.get("mensagens_analisadas", 0)],
+        ["Evidências coletadas", est.get("evidencias", 0)],
+        ["Imagens anexadas", est.get("imagens", 0)],
+        ["Vídeos anexados", est.get("videos", 0)],
+        ["Links registrados", est.get("links", 0)],
+        ["Tópicos analisados", est.get("threads", 0)],
     ], y, "11. RESULTADO OPERACIONAL")
-    y = _titulo_bloco("SÍNTESE OPERACIONAL", y, "11. RESULTADO OPERACIONAL")
-    y = _texto("Os indicadores acima representam a consolidação automática do conteúdo da mesa e dos anexos vinculados ao procedimento investigativo.", y, "11. RESULTADO OPERACIONAL", tamanho=9.7)
 
-    c.showPage()
-    y = _pagina("12. CONCLUSÃO")
-    y = _texto(montar_conclusao_dossie(dados), y, "12. CONCLUSÃO", tamanho=9.7)
-    y = _titulo_bloco("ASSINATURAS DIGITAIS", y, "12. CONCLUSÃO")
+    # 12. Conclusão
+    y = _secao("12. CONCLUSÃO")
+    y = _texto(montar_conclusao_dossie(dados), y, "12. CONCLUSÃO", tam=9.25)
+    y = _subtitulo("ASSINATURAS DIGITAIS", y, "12. CONCLUSÃO")
     y = _assinaturas(y, "12. CONCLUSÃO")
     qr_path = dados.get("qr_reabertura")
     if qr_path and Path(str(qr_path)).exists():
-        y = _nova_se_precisar(y, 3.0 * cm, "12. CONCLUSÃO")
-        c.setFillColor(colors.white)
-        c.setFont("Courier-Bold", 9.0)
-        c.drawString(margem_x, y, "QR Code para reabrir a investigação arquivada")
-        _imagem_fit(qr_path, margem_x, y - 2.75 * cm, 2.5 * cm, 2.5 * cm)
-        y -= 2.9 * cm
+        y = _precisa(y, 3.0 * cm, "12. CONCLUSÃO")
+        c.setFillColor(branco)
+        c.setFont("Courier-Bold", 8.9)
+        c.drawString(margem_x + 0.30 * cm, y, "QR Code para reabrir a investigação arquivada")
+        _imagem_fit(qr_path, margem_x + 0.30 * cm, y - 2.55 * cm, 2.35 * cm, 2.35 * cm)
 
     c.save()
 
@@ -9835,8 +9857,9 @@ def _draw_logo_comparecimento(c, caminho: Optional[Path], x: float, y: float, w:
 
 
 
+
 def gerar_pdf_comparecimento(registro: Dict[str, Any], caminho_pdf: Path) -> None:
-    """Gera o mandado/solicitação no modelo aprovado, sem sobrepor o cabeçalho da imagem."""
+    """Gera a solicitação de comparecimento no modelo aprovado, com texto longo paginado e sem sobreposição."""
     if canvas is None or A4 is None:
         raise RuntimeError("Dependência ausente: instale reportlab.")
     caminho_pdf.parent.mkdir(parents=True, exist_ok=True)
@@ -9845,31 +9868,44 @@ def gerar_pdf_comparecimento(registro: Dict[str, Any], caminho_pdf: Path) -> Non
     largura, altura = A4
     template = caminho_modelo_visual_canva()
 
-    if template and Path(template).exists():
-        try:
-            c.drawImage(str(template), 0, 0, width=largura, height=altura, preserveAspectRatio=False, mask="auto")
-        except Exception:
-            c.setFillColor(colors.HexColor("#0B0B0B"))
-            c.rect(0, 0, largura, altura, fill=1, stroke=0)
-    else:
-        c.setFillColor(colors.HexColor("#0B0B0B"))
-        c.rect(0, 0, largura, altura, fill=1, stroke=0)
-
     branco = colors.HexColor("#FFFFFF")
     dourado = colors.HexColor("#D4AF37")
     azul_claro = colors.HexColor("#8EB8C8")
-    preto_caixa = colors.HexColor("#050505")
+    preto = colors.HexColor("#050505")
 
-    margem_x = 1.18 * cm
+    margem_x = 1.22 * cm
     largura_util = largura - 2 * margem_x
+    painel_topo = altura - 5.65 * cm
+    limite_baixo = 2.15 * cm
+    painel_altura = painel_topo - limite_baixo
+
+    local_comparecimento = str(registro.get("local") or "Sede da Polícia Federal - DICOR")
+    data_comparecimento = str(registro.get("data_hora") or "a definir")
 
     def _safe(txt: Any) -> str:
-        return str(txt if txt is not None else "Não informado").replace("\r", "").strip() or "Não informado"
+        return str(txt if txt is not None else "Não informado").replace(chr(13), "").strip() or "Não informado"
 
-    def _linhas(texto: Any, fonte="Courier", tam=9.3, largura_max=None) -> List[str]:
-        largura_max = largura_max or largura_util
+    def _set_alpha(fill=1, stroke=1):
+        try:
+            c.setFillAlpha(fill)
+            c.setStrokeAlpha(stroke)
+        except Exception:
+            pass
+
+    def _draw_template() -> None:
+        if template and Path(template).exists():
+            try:
+                c.drawImage(str(template), 0, 0, width=largura, height=altura, preserveAspectRatio=False, mask="auto")
+                return
+            except Exception:
+                pass
+        c.setFillColor(colors.HexColor("#0B0B0B"))
+        c.rect(0, 0, largura, altura, fill=1, stroke=0)
+
+    def _linhas(texto: Any, fonte="Courier", tam=8.95, largura_max=None) -> List[str]:
+        largura_max = largura_max or (largura_util - 0.70 * cm)
         saida: List[str] = []
-        for bloco in _safe(texto).split("\n"):
+        for bloco in _safe(texto).splitlines():
             bloco = bloco.strip()
             if not bloco:
                 saida.append("")
@@ -9878,103 +9914,123 @@ def gerar_pdf_comparecimento(registro: Dict[str, Any], caminho_pdf: Path) -> Non
                 saida.extend(_wrap_pdf(c, bloco, fonte, tam, largura_max))
             except Exception:
                 import textwrap as _tw
-                saida.extend(_tw.wrap(bloco, 72) or [""])
+                chars = max(40, int(largura_max / (tam * 0.55)))
+                saida.extend(_tw.wrap(bloco, chars, break_long_words=False) or [""])
         return saida
 
-    def _painel(x, y, w, h, titulo: str = ""):
-        try:
-            c.setFillAlpha(0.84)
-        except Exception:
-            pass
-        c.setFillColor(preto_caixa)
-        c.roundRect(x, y, w, h, 7, fill=1, stroke=0)
-        try:
-            c.setFillAlpha(1)
-            c.setStrokeAlpha(1)
-        except Exception:
-            pass
+    def _pagina(titulo: str) -> float:
+        _draw_template()
+        _set_alpha(0.86, 1)
+        c.setFillColor(preto)
+        c.roundRect(margem_x, limite_baixo, largura_util, painel_altura, 7, fill=1, stroke=0)
+        _set_alpha(1, 1)
         c.setStrokeColor(azul_claro)
+        c.setLineWidth(0.85)
+        c.roundRect(margem_x, limite_baixo, largura_util, painel_altura, 7, fill=0, stroke=1)
+        faixa_h = 0.72 * cm
+        faixa_y = painel_topo - faixa_h
+        c.setFillColor(colors.HexColor("#111111"))
+        c.rect(margem_x + 0.08 * cm, faixa_y, largura_util - 0.16 * cm, faixa_h, stroke=0, fill=1)
+        c.setStrokeColor(dourado)
         c.setLineWidth(0.75)
-        c.roundRect(x, y, w, h, 7, fill=0, stroke=1)
-        if titulo:
-            c.setFillColor(dourado)
-            c.setFont("Courier-Bold", 10.7)
-            c.drawString(x + 0.22 * cm, y + h - 0.45 * cm, titulo.upper()[:80])
-            c.setStrokeColor(dourado)
-            c.line(x + 0.20 * cm, y + h - 0.58 * cm, x + w - 0.20 * cm, y + h - 0.58 * cm)
+        c.line(margem_x + 0.18 * cm, faixa_y + 0.12 * cm, largura - margem_x - 0.18 * cm, faixa_y + 0.12 * cm)
+        c.setFillColor(dourado)
+        c.setFont("Courier-Bold", 11.7)
+        c.drawString(margem_x + 0.28 * cm, faixa_y + 0.28 * cm, titulo.upper()[:78])
+        return faixa_y - 0.36 * cm
 
-    def _kv(rows, x, y, label_w=4.45*cm, tam=9.4, leading=0.49*cm):
-        for label, value in rows:
-            c.setFont("Courier-Bold", tam)
-            c.setFillColor(dourado)
-            c.drawString(x, y, f"{label}:")
-            c.setFont("Courier", tam)
-            c.setFillColor(branco)
-            linhas = _linhas(value, "Courier", tam, largura_util - label_w - 0.4*cm)
-            if not linhas:
-                linhas = ["Não informado"]
-            c.drawString(x + label_w, y, linhas[0][:130])
-            for extra in linhas[1:2]:
-                y -= leading * 0.78
-                c.drawString(x + label_w, y, extra[:130])
+    def _nova_pagina(titulo: str) -> float:
+        c.showPage()
+        return _pagina(titulo)
+
+    def _precisa(y: float, espaco: float, titulo: str) -> float:
+        if y - espaco < limite_baixo + 0.55 * cm:
+            return _nova_pagina(titulo + " - CONTINUAÇÃO")
+        return y
+
+    def _campo(label: str, valor: Any, y: float, titulo: str, label_w: float = 4.4 * cm) -> float:
+        linhas = _linhas(valor, "Courier", 9.15, largura_util - label_w - 0.70 * cm)
+        if not linhas:
+            linhas = ["Não informado"]
+        precisa = max(0.46 * cm, len(linhas) * 0.35 * cm + 0.08 * cm)
+        y = _precisa(y, precisa, titulo)
+        c.setFont("Courier-Bold", 9.2)
+        c.setFillColor(dourado)
+        c.drawString(margem_x + 0.32 * cm, y, f"{label}:")
+        c.setFont("Courier", 9.15)
+        c.setFillColor(branco)
+        vx = margem_x + 0.32 * cm + label_w
+        for idx, linha in enumerate(linhas[:4]):
+            c.drawString(vx, y - idx * 0.34 * cm, linha[:145])
+        return y - precisa
+
+    def _subtitulo(t: str, y: float, titulo: str) -> float:
+        y = _precisa(y, 0.72 * cm, titulo)
+        c.setStrokeColor(dourado)
+        c.setFillColor(colors.HexColor("#0A0A0A"))
+        c.roundRect(margem_x + 0.22 * cm, y - 0.46 * cm, largura_util - 0.44 * cm, 0.55 * cm, 4, fill=1, stroke=1)
+        c.setFillColor(dourado)
+        c.setFont("Courier-Bold", 9.9)
+        c.drawString(margem_x + 0.42 * cm, y - 0.28 * cm, t.upper()[:78])
+        return y - 0.68 * cm
+
+    def _texto(texto: Any, y: float, titulo: str, tam: float = 8.85, leading: float = 0.36 * cm) -> float:
+        c.setFont("Courier", tam)
+        c.setFillColor(branco)
+        for linha in _linhas(texto, "Courier", tam, largura_util - 0.70 * cm):
+            y = _precisa(y, leading + 0.06 * cm, titulo)
+            if linha == "":
+                y -= leading * 0.70
+                continue
+            c.drawString(margem_x + 0.35 * cm, y, linha[:170])
             y -= leading
         return y
 
-    # O cabeçalho da arte já ocupa a parte de cima. O conteúdo começa abaixo dele.
-    y_top = altura - 5.35 * cm
+    texto_oficial = f"""O Departamento de Inteligência e Combate ao Crime Organizado - DICOR, no uso de suas atribuições legais, conferidas pela legislação vigente, bem como em observância aos procedimentos administrativos e investigativos internos desta instituição, SOLICITA o comparecimento de Vossa Senhoria para prestar esclarecimentos relacionados à investigação em curso, vinculada ao processo identificado em epígrafe.
 
-    _painel(margem_x, y_top - 2.25*cm, largura_util, 2.25*cm, "Solicitação de Comparecimento")
-    _kv([
-        ("Solicitação", registro.get("numero", "00000-0000")),
-        ("Data de Expedição", registro.get("data_expedicao", agora_br())),
-        ("Nº do Processo", registro.get("processo", "Não informado")),
-    ], margem_x + 0.28*cm, y_top - 0.82*cm, label_w=4.55*cm, tam=9.6, leading=0.45*cm)
+O presente comparecimento possui caráter oficial e tem como objetivo possibilitar a adequada instrução dos autos, a coleta de informações, o esclarecimento de circunstâncias relevantes, bem como a eventual apresentação de documentos ou demais elementos que possam contribuir para o completo esclarecimento dos fatos atualmente apurados por esta Diretoria.
 
-    y2 = y_top - 2.65*cm
-    _painel(margem_x, y2 - 1.55*cm, largura_util, 1.55*cm, "Identificação do Convocado")
-    _kv([
-        ("A(o) Sr.(a)", registro.get("nome", "Não informado")),
-        ("RG", registro.get("rg", "Não informado")),
-    ], margem_x + 0.28*cm, y2 - 0.72*cm, label_w=3.25*cm, tam=9.8, leading=0.48*cm)
+Dessa forma, Vossa Senhoria deverá comparecer no local informado para comparecimento ({local_comparecimento}), na data e horário previamente designados para comparecimento ({data_comparecimento}), munido(a) de documento oficial de identificação com foto e, quando solicitado, de quaisquer documentos, registros ou informações pertinentes aos fatos investigados.
 
-    y3 = y2 - 1.95*cm
-    _painel(margem_x, y3 - 2.15*cm, largura_util, 2.15*cm, "Local e Data para Comparecimento")
-    _kv([
-        ("Local", registro.get("local", "Sede da Polícia Federal - DICOR")),
-        ("Data/Horário", registro.get("data_hora", "a definir")),
-        ("Motivo", registro.get("motivo", "Não informado")),
-    ], margem_x + 0.28*cm, y3 - 0.72*cm, label_w=3.65*cm, tam=9.25, leading=0.46*cm)
+Durante o comparecimento poderão ser realizados os procedimentos administrativos cabíveis, incluindo a tomada de declarações, conferência de informações, apresentação de elementos probatórios e demais diligências necessárias ao regular desenvolvimento da investigação, sempre observando os princípios da legalidade, da imparcialidade, da transparência e do devido procedimento.
 
-    y4 = y3 - 2.55*cm
-    altura_texto = max(4.10 * cm, y4 - 2.70 * cm)
-    _painel(margem_x, 2.75*cm, largura_util, altura_texto, "Texto Oficial")
-    texto = (
-        "O Departamento de Inteligência e Combate ao Crime Organizado - DICOR, no uso de suas atribuições legais e "
-        "com fundamento nos procedimentos internos, SOLICITA o comparecimento de Vossa Senhoria para prestar "
-        "esclarecimentos referentes à investigação em curso relacionada ao processo em epígrafe. "
-        f"O comparecimento deverá ocorrer no local informado para comparecimento ({registro.get('local', 'Sede da Polícia Federal - DICOR')}), "
-        f"na data/horário informado para comparecimento ({registro.get('data_hora', 'a definir')}). "
-        "Ressalta-se que o não comparecimento injustificado poderá ensejar a adoção das medidas legais cabíveis. "
-        "Sem mais para o momento, colocamo-nos à disposição para eventuais esclarecimentos."
-    )
+Esclarece-se que esta solicitação integra os atos formais de instrução do procedimento investigativo, não constituindo, por si só, juízo definitivo acerca da responsabilidade de qualquer pessoa envolvida, destinando-se exclusivamente ao completo esclarecimento dos fatos e à correta apuração das informações de interesse desta Diretoria.
 
-    c.setFillColor(branco)
-    c.setFont("Courier", 9.15)
-    y_text = 2.75*cm + altura_texto - 0.92*cm
-    for linha in _linhas(texto, "Courier", 9.15, largura_util - 0.62*cm):
-        if y_text < 3.15 * cm:
-            break
-        c.drawString(margem_x + 0.30*cm, y_text, linha[:160])
-        y_text -= 0.39 * cm
+Ressalta-se, ainda, que o comparecimento na data e horário estabelecidos contribuirá para a celeridade da investigação e para o regular andamento dos trabalhos desenvolvidos pelo Departamento de Inteligência e Combate ao Crime Organizado - DICOR.
 
-    # Assinatura dentro da área livre inferior, sem jogar texto em cima da arte.
+O não comparecimento injustificado poderá ensejar a adoção das medidas administrativas e legais cabíveis, conforme previsto na legislação aplicável e nos regulamentos internos, sem prejuízo da continuidade das diligências investigativas ou da expedição de novos atos processuais que se façam necessários.
+
+Caso exista impedimento relevante para o comparecimento na data estabelecida, Vossa Senhoria deverá comunicar previamente esta Diretoria pelos meios oficiais, apresentando justificativa idônea, a fim de possibilitar a análise da situação e eventual redesignação da data, caso seja considerada pertinente.
+
+Por fim, o Departamento de Inteligência e Combate ao Crime Organizado - DICOR reafirma seu compromisso com a legalidade, a imparcialidade, a preservação dos direitos individuais e a busca pela verdade dos fatos, colocando-se à disposição para prestar os esclarecimentos necessários acerca desta solicitação.
+
+Sem mais para o momento, renova-se protestos de elevada estima e distinta consideração."""
+
+    titulo_base = "SOLICITAÇÃO DE COMPARECIMENTO"
+    y = _pagina(titulo_base)
+    y = _subtitulo("IDENTIFICAÇÃO", y, titulo_base)
+    y = _campo("Solicitação", registro.get("numero", "00000-0000"), y, titulo_base)
+    y = _campo("Data de Expedição", registro.get("data_expedicao", agora_br()), y, titulo_base)
+    y = _campo("Nº do Processo", registro.get("processo", "Não informado"), y, titulo_base)
+    y = _subtitulo("IDENTIFICAÇÃO DO CONVOCADO", y, titulo_base)
+    y = _campo("A(o) Sr.(a)", registro.get("nome", "Não informado"), y, titulo_base)
+    y = _campo("RG", registro.get("rg", "Não informado"), y, titulo_base)
+    y = _subtitulo("LOCAL E DATA PARA COMPARECIMENTO", y, titulo_base)
+    y = _campo("Local para comparecimento", local_comparecimento, y, titulo_base)
+    y = _campo("Data para comparecimento", data_comparecimento, y, titulo_base)
+    y = _campo("Motivo", registro.get("motivo", "Não informado"), y, titulo_base)
+    y = _subtitulo("TEXTO OFICIAL", y, titulo_base)
+    y = _texto(texto_oficial, y, titulo_base, tam=8.75, leading=0.34 * cm)
+
+    # assinatura na última página; cria nova se não couber
+    y = _precisa(y, 2.25 * cm, titulo_base)
     c.setStrokeColor(colors.HexColor("#CCCCCC"))
-    c.line(5.35*cm, 2.13*cm, largura-5.35*cm, 2.13*cm)
+    c.line(5.15 * cm, y - 0.45 * cm, largura - 5.15 * cm, y - 0.45 * cm)
     c.setFillColor(branco)
-    c.setFont("Courier-Bold", 9.2)
-    c.drawCentredString(largura/2, 1.74*cm, "POLÍCIA FEDERAL - DICOR")
-    c.setFont("Courier", 7.9)
-    c.drawCentredString(largura/2, 1.43*cm, f"Emitido por: {registro.get('solicitado_por_nome', 'Sistema DICOR')}")
+    c.setFont("Courier-Bold", 8.9)
+    c.drawCentredString(largura / 2, y - 0.82 * cm, "POLÍCIA FEDERAL - DICOR")
+    c.setFont("Courier", 7.8)
+    c.drawCentredString(largura / 2, y - 1.12 * cm, f"Emitido por: {registro.get('solicitado_por_nome', 'Sistema DICOR')}")
     c.save()
 
 def gerar_docx_comparecimento(registro: Dict[str, Any], caminho_docx: Path) -> None:
@@ -10021,11 +10077,19 @@ def gerar_docx_comparecimento(registro: Dict[str, Any], caminho_docx: Path) -> N
         row = tabela.add_row().cells
         row[0].text = str(k)
         row[1].text = str(v)
+    local_comparecimento = str(registro.get("local") or "Sede da Polícia Federal - DICOR")
+    data_comparecimento = str(registro.get("data_hora") or "a definir")
     texto = (
-        "O Departamento de Inteligência e Combate ao Crime Organizado - DICOR, no uso de suas atribuições legais e com fundamento nos procedimentos internos, "
-        "SOLICITA o comparecimento de Vossa Senhoria para prestar esclarecimentos referentes à investigação em curso relacionada ao processo em epígrafe. "
-        f"O comparecimento deverá ocorrer no local informado para comparecimento ({registro.get('local', 'Sede da Polícia Federal - DICOR')}), na data/horário informado para comparecimento ({registro.get('data_hora', 'a definir')}). "
-        "Ressalta-se que o não comparecimento injustificado poderá ensejar a adoção das medidas legais cabíveis. Sem mais para o momento, colocamo-nos à disposição para eventuais esclarecimentos."
+        "O Departamento de Inteligência e Combate ao Crime Organizado - DICOR, no uso de suas atribuições legais, conferidas pela legislação vigente, bem como em observância aos procedimentos administrativos e investigativos internos desta instituição, SOLICITA o comparecimento de Vossa Senhoria para prestar esclarecimentos relacionados à investigação em curso, vinculada ao processo identificado em epígrafe.\n\n"
+        "O presente comparecimento possui caráter oficial e tem como objetivo possibilitar a adequada instrução dos autos, a coleta de informações, o esclarecimento de circunstâncias relevantes, bem como a eventual apresentação de documentos ou demais elementos que possam contribuir para o completo esclarecimento dos fatos atualmente apurados por esta Diretoria.\n\n"
+        f"Dessa forma, Vossa Senhoria deverá comparecer no local informado para comparecimento ({local_comparecimento}), na data e horário previamente designados para comparecimento ({data_comparecimento}), munido(a) de documento oficial de identificação com foto e, quando solicitado, de quaisquer documentos, registros ou informações pertinentes aos fatos investigados.\n\n"
+        "Durante o comparecimento poderão ser realizados os procedimentos administrativos cabíveis, incluindo a tomada de declarações, conferência de informações, apresentação de elementos probatórios e demais diligências necessárias ao regular desenvolvimento da investigação, sempre observando os princípios da legalidade, da imparcialidade, da transparência e do devido procedimento.\n\n"
+        "Esclarece-se que esta solicitação integra os atos formais de instrução do procedimento investigativo, não constituindo, por si só, juízo definitivo acerca da responsabilidade de qualquer pessoa envolvida, destinando-se exclusivamente ao completo esclarecimento dos fatos e à correta apuração das informações de interesse desta Diretoria.\n\n"
+        "Ressalta-se, ainda, que o comparecimento na data e horário estabelecidos contribuirá para a celeridade da investigação e para o regular andamento dos trabalhos desenvolvidos pelo Departamento de Inteligência e Combate ao Crime Organizado - DICOR.\n\n"
+        "O não comparecimento injustificado poderá ensejar a adoção das medidas administrativas e legais cabíveis, conforme previsto na legislação aplicável e nos regulamentos internos, sem prejuízo da continuidade das diligências investigativas ou da expedição de novos atos processuais que se façam necessários.\n\n"
+        "Caso exista impedimento relevante para o comparecimento na data estabelecida, Vossa Senhoria deverá comunicar previamente esta Diretoria pelos meios oficiais, apresentando justificativa idônea, a fim de possibilitar a análise da situação e eventual redesignação da data, caso seja considerada pertinente.\n\n"
+        "Por fim, o Departamento de Inteligência e Combate ao Crime Organizado - DICOR reafirma seu compromisso com a legalidade, a imparcialidade, a preservação dos direitos individuais e a busca pela verdade dos fatos, colocando-se à disposição para prestar os esclarecimentos necessários acerca desta solicitação.\n\n"
+        "Sem mais para o momento, renova-se protestos de elevada estima e distinta consideração."
     )
     p = doc.add_paragraph(texto)
     p.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
