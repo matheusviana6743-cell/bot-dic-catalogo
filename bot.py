@@ -8045,6 +8045,249 @@ async def hierarquia_dicor_automatica():
 async def antes_hierarquia_dicor_automatica():
     await bot.wait_until_ready()
 
+
+# =====================================================
+# RECUPERAÇÃO AUTOMÁTICA V3 DOS RELATÓRIOS ANTIGOS
+# =====================================================
+
+def _texto_completo_mensagem_relatorio(msg: discord.Message) -> str:
+    partes = [msg.content or ""]
+    for emb in msg.embeds:
+        if emb.title:
+            partes.append(str(emb.title))
+        if emb.description:
+            partes.append(str(emb.description))
+        for campo in emb.fields:
+            partes.append(f"{campo.name}: {campo.value}")
+        try:
+            if emb.image and emb.image.url:
+                partes.append(str(emb.image.url))
+            if emb.thumbnail and emb.thumbnail.url:
+                partes.append(str(emb.thumbnail.url))
+        except Exception:
+            pass
+    return "\n".join(p for p in partes if p).strip()
+
+
+def _eh_inicio_relatorio_antigo(texto: str, tipo: str) -> bool:
+    t = unicodedata.normalize('NFKD', str(texto or '')).encode('ascii', 'ignore').decode('ascii').upper()
+    if tipo == 'tocaia':
+        return 'RELATORIO DE TOCAIA' in t
+    if tipo == 'olb':
+        return 'RELATORIO DE OLB' in t
+    if tipo == 'pericia_externa':
+        return 'RELATORIO DE PERICIA EXTERNA' in t or 'PERICIA EXTERNA N' in t
+    return False
+
+
+def _urls_discord_em_texto(texto: str) -> List[str]:
+    urls = re.findall(r'https?://[^\s)>\]"\']+', str(texto or ''))
+    saida = []
+    for u in urls:
+        u = u.rstrip('.,;')
+        if ('cdn.discordapp.com/attachments/' in u or 'media.discordapp.net/attachments/' in u) and u not in saida:
+            saida.append(u)
+    return saida
+
+
+async def _baixar_url_recuperacao(url: str, destino: Path) -> Optional[Path]:
+    destino.parent.mkdir(parents=True, exist_ok=True)
+    limite = max(1, RELATORIOS_MAX_ARQUIVO_MB) * 1024 * 1024
+    urls = [url]
+    # Tenta os dois domínios e também sem parâmetros assinados antigos.
+    if 'cdn.discordapp.com' in url:
+        urls.append(url.replace('cdn.discordapp.com', 'media.discordapp.net'))
+    elif 'media.discordapp.net' in url:
+        urls.append(url.replace('media.discordapp.net', 'cdn.discordapp.com'))
+    base = url.split('?', 1)[0]
+    if base not in urls:
+        urls.append(base)
+    if 'cdn.discordapp.com' in base:
+        urls.append(base.replace('cdn.discordapp.com', 'media.discordapp.net'))
+    elif 'media.discordapp.net' in base:
+        urls.append(base.replace('media.discordapp.net', 'cdn.discordapp.com'))
+
+    timeout = ClientTimeout(total=50)
+    headers = {"User-Agent": "DiscordBot (DICOR Recovery, 3.0)"}
+    async with ClientSession(timeout=timeout, headers=headers) as session:
+        for tentativa in dict.fromkeys(urls):
+            try:
+                async with session.get(tentativa, allow_redirects=True) as resp:
+                    if resp.status == 200:
+                        dados = await resp.read()
+                        if dados and len(dados) <= limite:
+                            destino.write_bytes(dados)
+                            return destino
+            except Exception:
+                continue
+    return None
+
+
+async def _recuperar_arquivos_bloco_relatorio(bloco: List[discord.Message], pasta: Path) -> tuple[List[Path], List[str]]:
+    recuperados: List[Path] = []
+    falhas: List[str] = []
+    vistos = set()
+    ordem = 0
+
+    for msg in bloco:
+        # Objetos Attachment são a melhor chance, pois a API devolve URL atualizada.
+        for anexo in msg.attachments:
+            chave = f'att:{anexo.id}'
+            if chave in vistos:
+                continue
+            vistos.add(chave)
+            ordem += 1
+            destino_dir = pasta / f'{ordem:03d}'
+            caminho = await _baixar_anexo_relatorio(anexo, destino_dir)
+            if caminho:
+                recuperados.append(caminho)
+            else:
+                falhas.append(getattr(anexo, 'filename', chave))
+
+        # Links escritos no conteúdo/embeds.
+        texto = _texto_completo_mensagem_relatorio(msg)
+        for url in _urls_discord_em_texto(texto):
+            chave = url.split('?', 1)[0]
+            if chave in vistos:
+                continue
+            vistos.add(chave)
+            ordem += 1
+            nome = _safe_filename(Path(urlparse(chave).path).name or f'imagem-{ordem}.bin') if '_safe_filename' in globals() else f'imagem-{ordem}.bin'
+            destino = pasta / f'{ordem:03d}' / nome
+            caminho = await _baixar_url_recuperacao(url, destino)
+            if caminho:
+                recuperados.append(caminho)
+            else:
+                falhas.append(url)
+    return recuperados, falhas
+
+
+async def executar_recuperacao_automatica_relatorios_v3() -> None:
+    global _relatorios_migracao_iniciada
+    if _relatorios_migracao_iniciada or not RELATORIOS_MIGRACAO_ATIVA:
+        return
+    _relatorios_migracao_iniciada = True
+    await bot.wait_until_ready()
+    await asyncio.sleep(5)
+
+    estado = carregar_json(RELATORIOS_MIGRACAO_V3_JSON, {})
+    if isinstance(estado, dict) and estado.get('concluida') is True:
+        print('✅ Recuperação V3 já havia sido concluída; não será repetida.')
+        return
+
+    estado = estado if isinstance(estado, dict) else {}
+    processados = set(str(x) for x in estado.get('mensagens_processadas', []))
+    resultado = {
+        'versao': 3,
+        'iniciada_em': estado.get('iniciada_em') or agora_br(),
+        'concluida': False,
+        'mensagens_processadas': list(processados),
+        'reenviados': int(estado.get('reenviados', 0) or 0),
+        'arquivos_recuperados': int(estado.get('arquivos_recuperados', 0) or 0),
+        'sem_arquivo': list(estado.get('sem_arquivo', [])),
+        'falhas': list(estado.get('falhas', [])),
+    }
+    salvar_json(RELATORIOS_MIGRACAO_V3_JSON, resultado)
+    print('🔄 Recuperação automática V3 dos relatórios antigos iniciada.')
+    try:
+        await enviar_log('🔄 **Recuperação automática V3 iniciada**\nVarrendo relatórios antigos e tentando recuperar todas as fotos disponíveis.')
+    except Exception:
+        pass
+
+    guild = bot.get_guild(GUILD_ID) if GUILD_ID else (bot.guilds[0] if bot.guilds else None)
+    if guild is None:
+        resultado['falhas'].append('Servidor não encontrado.')
+        salvar_json(RELATORIOS_MIGRACAO_V3_JSON, resultado)
+        return
+
+    limite = None if RELATORIOS_MIGRACAO_SCAN_LIMIT <= 0 else RELATORIOS_MIGRACAO_SCAN_LIMIT
+    for tipo, canal_id in CANAIS_RELATORIOS.items():
+        canal = guild.get_channel(canal_id)
+        if canal is None:
+            try:
+                canal = await bot.fetch_channel(canal_id)
+            except Exception as erro:
+                resultado['falhas'].append(f'Canal {canal_id}: {erro}')
+                continue
+
+        mensagens = []
+        try:
+            async for msg in canal.history(limit=limite, oldest_first=True):
+                mensagens.append(msg)
+        except Exception as erro:
+            resultado['falhas'].append(f'Histórico {canal_id}: {erro}')
+            continue
+
+        indices = [i for i, m in enumerate(mensagens) if _eh_inicio_relatorio_antigo(_texto_completo_mensagem_relatorio(m), tipo)]
+        for pos, indice in enumerate(indices):
+            inicio = mensagens[indice]
+            chave = str(inicio.id)
+            if chave in processados:
+                continue
+            fim = indices[pos + 1] if pos + 1 < len(indices) else len(mensagens)
+            bloco = mensagens[indice:fim]
+            # Impede capturar conversa muito distante: até 25 mensagens por relatório.
+            bloco = bloco[:25]
+            numero = extrair_numero_relatorio_tipo(_texto_completo_mensagem_relatorio(inicio), tipo) or inicio.id
+            pasta = RELATORIOS_ARQUIVOS_DIR / 'migrados_v3' / tipo / str(numero) / chave
+            pasta.mkdir(parents=True, exist_ok=True)
+            try:
+                arquivos, falhas = await _recuperar_arquivos_bloco_relatorio(bloco, pasta)
+                if arquivos:
+                    texto_original = inicio.content or _texto_completo_mensagem_relatorio(inicio)
+                    marcador = f"\n\n`RECUPERADO-V3:{inicio.id}`"
+                    enviados = await _enviar_relatorio_com_arquivos(canal, texto_original + marcador, arquivos)
+                    resultado['reenviados'] += 1
+                    resultado['arquivos_recuperados'] += len(arquivos)
+                    registrar_relatorio_operacional({
+                        'id': f'migrado-v3-{inicio.id}',
+                        'tipo': tipo,
+                        'tipo_nome': nome_tipo_relatorio(tipo),
+                        'numero': str(numero),
+                        'autor_id': getattr(inicio.author, 'id', 0),
+                        'autor_nome': str(inicio.author),
+                        'data': agora_br(),
+                        'data_original': inicio.created_at.isoformat(),
+                        'canal_destino_id': canal_id,
+                        'mensagem_original_id': inicio.id,
+                        'mensagem_url': enviados[0].jump_url if enviados else '',
+                        'provas': [str(p.relative_to(BASE_DIR)) if BASE_DIR in p.parents else str(p) for p in arquivos],
+                        'quantidade_provas': len(arquivos),
+                        'migracao': 'v3',
+                    })
+                else:
+                    resultado['sem_arquivo'].append({
+                        'mensagem_id': inicio.id,
+                        'canal_id': canal_id,
+                        'tipo': tipo,
+                        'numero': str(numero),
+                        'links_falhos': falhas[:20],
+                    })
+                processados.add(chave)
+                resultado['mensagens_processadas'] = list(processados)
+                salvar_json(RELATORIOS_MIGRACAO_V3_JSON, resultado)
+                await asyncio.sleep(1.2)
+            except Exception as erro:
+                resultado['falhas'].append(f'{canal_id}/{inicio.id}: {erro}')
+                salvar_json(RELATORIOS_MIGRACAO_V3_JSON, resultado)
+
+    resultado['concluida'] = True
+    resultado['concluida_em'] = agora_br()
+    resultado['mensagens_processadas'] = list(processados)
+    salvar_json(RELATORIOS_MIGRACAO_V3_JSON, resultado)
+    resumo = (
+        '✅ **Recuperação automática V3 finalizada**\n'
+        f"Relatórios reenviados com fotos: `{resultado['reenviados']}`\n"
+        f"Arquivos recuperados: `{resultado['arquivos_recuperados']}`\n"
+        f"Relatórios sem foto recuperável: `{len(resultado['sem_arquivo'])}`\n"
+        f"Falhas técnicas: `{len(resultado['falhas'])}`"
+    )
+    print(resumo.replace('**', '').replace('`', ''))
+    try:
+        await enviar_log(resumo)
+    except Exception:
+        pass
+
 @bot.event
 async def on_ready():
     global comandos_ja_sincronizados
@@ -8056,7 +8299,6 @@ async def on_ready():
         bot.add_view(IniciarFormularioRelatorioView(tipo="tocaia"))
         bot.add_view(IniciarFormularioRelatorioView(tipo="olb"))
         bot.add_view(IniciarFormularioRelatorioView(tipo="pericia_externa"))
-        bot.add_view(FinalizarRelatorioOperacionalView())
         
         # Painel de Boletins
         bot.add_view(PainelBoletimView())
@@ -8077,9 +8319,6 @@ async def on_ready():
         bot.add_view(PainelAdministrativoView())
         if not hierarquia_dicor_automatica.is_running():
             hierarquia_dicor_automatica.start()
-        if RELATORIOS_MIGRAR_AUTOMATICAMENTE and not getattr(bot, "_migracao_relatorios_v2_iniciada", False):
-            bot._migracao_relatorios_v2_iniciada = True
-            asyncio.create_task(migrar_relatorios_antigos_automaticamente_v2())
         
         print("✅ Todas as persistências de botões (Relatórios com Tickets, Boletins e Sistemas) foram carregadas!")
     except Exception as e:
@@ -8112,6 +8351,9 @@ async def on_ready():
 
     print('VERSAO COMPLETA: mesas | procurados | catalogo | boletins | organizacoes | relatorios')
     print(f"Bot online como {bot.user}")
+    if RELATORIOS_MIGRACAO_ATIVA and not _relatorios_migracao_iniciada:
+        asyncio.create_task(executar_recuperacao_automatica_relatorios_v3())
+        print("🔄 Recuperação V3 agendada para iniciar automaticamente em alguns segundos.")
 
 # =====================================================
 # REGISTRO LOCAL DE RELATÓRIOS OPERACIONAIS
@@ -8148,12 +8390,6 @@ def nome_tipo_relatorio(tipo: str) -> str:
 # =====================================================
 
 RELATORIOS_CONTADOR_JSON = DATA_DIR / "relatorios_contador.json"
-RELATORIOS_PENDENTES_JSON = DATA_DIR / "relatorios_pendentes.json"
-RELATORIOS_ARQUIVOS_DIR = DATA_DIR / "relatorios_arquivos"
-RELATORIOS_MIGRACAO_V2_JSON = DATA_DIR / "relatorios_migracao_v2.json"
-RELATORIOS_MIGRAR_AUTOMATICAMENTE = os.getenv("RELATORIOS_MIGRAR_AUTOMATICAMENTE", "1").strip().lower() not in {"0", "false", "nao", "não", "off"}
-RELATORIOS_MIGRACAO_SCAN_LIMIT = env_int("RELATORIOS_MIGRACAO_SCAN_LIMIT", 0)
-RELATORIOS_MAX_ARQUIVO_MB = env_int("RELATORIOS_MAX_ARQUIVO_MB", 24)
 CATEGORIA_RELATORIOS_TEMPORARIOS = 1490200421661147187
 
 CANAIS_RELATORIOS = {
@@ -8161,6 +8397,15 @@ CANAIS_RELATORIOS = {
     "olb": 1490200479995789374,
     "pericia_externa": 1490200524367200297
 }
+
+# Recuperação definitiva de relatórios e armazenamento permanente de anexos
+RELATORIOS_ARQUIVOS_DIR = DATA_DIR / "relatorios_arquivos"
+RELATORIOS_MIGRACAO_V3_JSON = DATA_DIR / "relatorios_migracao_v3.json"
+RELATORIOS_MIGRACAO_ATIVA = str(os.getenv("RELATORIOS_MIGRAR_AUTOMATICAMENTE", "1") or "1").strip().lower() not in {"0", "false", "nao", "não", "off"}
+RELATORIOS_MIGRACAO_SCAN_LIMIT = env_int("RELATORIOS_MIGRACAO_SCAN_LIMIT", 0)
+RELATORIOS_MAX_ARQUIVO_MB = env_int("RELATORIOS_MAX_ARQUIVO_MB", 25)
+_relatorios_migracao_iniciada = False
+
 
 def maior_numero_relatorio_local(tipo_relatorio: str) -> int:
     maior = 0
@@ -8257,309 +8502,72 @@ class RelatoriosPainelView(View):
     def __init__(self):
         super().__init__(timeout=None)
 
+    async def criar_canal_temporario_operacional(self, interaction: discord.Interaction, tipo_nome: str) -> Optional[discord.TextChannel]:
+        guild = interaction.guild
+        if not guild:
+            return None
+        
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(view_channel=False),
+            interaction.user: discord.PermissionOverwrite(
+                view_channel=True, send_messages=True, attach_files=True, embed_links=True, read_message_history=True
+            )
+        }
+        try:
+            if 'cargos_equipe_permissoes' in globals():
+                overwrites = cargos_equipe_permissoes(guild)
+                overwrites[interaction.user] = discord.PermissionOverwrite(
+                    view_channel=True, send_messages=True, attach_files=True, embed_links=True, read_message_history=True
+                )
+        except Exception:
+            pass
+
+        categoria = guild.get_channel(CATEGORIA_RELATORIOS_TEMPORARIOS)
+        nome_canal = f"relatorio-{tipo_nome}-{interaction.user.name}".lower().replace(" ", "-")
+        
+        try:
+            canal = await guild.create_text_channel(name=nome_canal, category=categoria, overwrites=overwrites, reason="Abertura de canal temporário de relatório.")
+            return canal
+        except Exception as e:
+            print(f"Erro crítico ao criar canal de relatório: {e}")
+            return None
+
+    async def gerenciar_abertura_ticket(self, interaction: discord.Interaction, tipo: str, titulo_bonito: str):
+        await interaction.response.defer(ephemeral=True)
+        canal = await self.criar_canal_temporario_operacional(interaction, tipo)
+        if not canal:
+            return await interaction.followup.send("❌ Não foi possível criar o canal temporário. Verifique as permissões da categoria.", ephemeral=True)
+        
+        await interaction.followup.send(f"✅ Canal de relatório criado: {canal.mention}", ephemeral=True)
+        
+        embed = discord.Embed(
+            title=f"📝 {titulo_bonito.upper()} — INSTRUÇÕES",
+            description=(
+                f"Olá {interaction.user.mention}, o seu canal de relatório provisório foi gerado com sucesso!\n\n"
+                "**Siga os passos abaixo para concluir o procedimento:**\n\n"
+                "📸 **1. ENVIE AS PROVAS NESTE CANAL**\n"
+                "Antes de preencher o formulário, faça o upload de todas as imagens, prints, links ou registros fotográficos necessários diretamente aqui no chat.\n\n"
+                "✍️ **2. PREENCHA O FORMULÁRIO A SEGUIR**\n"
+                "Clique no botão azul abaixo para abrir o formulário oficial e preencher os dados requeridos. Ao enviar, o relatório será gerado automaticamente."
+            ),
+            color=discord.Color.blue()
+        )
+        embed.set_footer(text="DICOR • Procedimento Operacional Padrão")
+        await canal.send(content=interaction.user.mention, embed=embed, view=IniciarFormularioRelatorioView(tipo))
+
     @discord.ui.button(label="👀 TOCAIA", style=discord.ButtonStyle.secondary, custom_id="rel_btn_tocaia")
     async def btn_tocaia(self, interaction: discord.Interaction, button: Button):
-        await interaction.response.send_modal(TocaiaModal())
+        await self.gerenciar_abertura_ticket(interaction, "tocaia", "Relatório de Tocaia")
 
     @discord.ui.button(label="🚔 OLB", style=discord.ButtonStyle.secondary, custom_id="rel_btn_olb")
     async def btn_olb(self, interaction: discord.Interaction, button: Button):
-        await interaction.response.send_modal(OlbModal())
+        await self.gerenciar_abertura_ticket(interaction, "olb", "Relatório de OLB")
 
     @discord.ui.button(label="🧪 PERÍCIA EXTERNA", style=discord.ButtonStyle.secondary, custom_id="rel_btn_pericia_ext")
     async def btn_pericia_ext(self, interaction: discord.Interaction, button: Button):
-        await interaction.response.send_modal(PericiaExternaModal())
+        await self.gerenciar_abertura_ticket(interaction, "pericia_externa", "Perícia Externa")
 
 
-def _carregar_pendentes_relatorios() -> Dict[str, Any]:
-    dados = carregar_json(RELATORIOS_PENDENTES_JSON, {})
-    return dados if isinstance(dados, dict) else {}
-
-
-def _salvar_pendentes_relatorios(dados: Dict[str, Any]) -> None:
-    salvar_json(RELATORIOS_PENDENTES_JSON, dados)
-
-
-def _nome_seguro_arquivo(nome: str, indice: int = 0) -> str:
-    nome = Path(str(nome or f"arquivo_{indice}")).name
-    nome = re.sub(r"[^A-Za-z0-9._-]+", "_", nome).strip("._")
-    return nome[:120] or f"arquivo_{indice}.bin"
-
-
-async def _criar_canal_relatorio_apos_formulario(
-    interaction: discord.Interaction,
-    tipo: str,
-    texto: str,
-    numero: str,
-) -> Optional[discord.TextChannel]:
-    guild = interaction.guild
-    if guild is None:
-        return None
-
-    overwrites = {
-        guild.default_role: discord.PermissionOverwrite(view_channel=False),
-        interaction.user: discord.PermissionOverwrite(
-            view_channel=True,
-            send_messages=True,
-            attach_files=True,
-            embed_links=True,
-            read_message_history=True,
-        ),
-        guild.me: discord.PermissionOverwrite(
-            view_channel=True,
-            send_messages=True,
-            manage_channels=True,
-            manage_messages=True,
-            attach_files=True,
-            read_message_history=True,
-        ),
-    }
-    for cargo_id in CARGOS_EQUIPE_IDS:
-        cargo = guild.get_role(cargo_id)
-        if cargo:
-            overwrites[cargo] = discord.PermissionOverwrite(
-                view_channel=True,
-                send_messages=True,
-                attach_files=True,
-                read_message_history=True,
-            )
-
-    categoria = guild.get_channel(CATEGORIA_RELATORIOS_TEMPORARIOS)
-    nome = re.sub(r"[^a-z0-9-]", "", f"relatorio-{tipo}-{numero}-{interaction.user.name}".lower().replace("_", "-").replace(" ", "-"))[:95]
-    try:
-        canal = await guild.create_text_channel(
-            name=nome or f"relatorio-{tipo}-{numero}",
-            category=categoria if isinstance(categoria, discord.CategoryChannel) else None,
-            overwrites=overwrites,
-            reason="Canal provisório para anexar provas do relatório DICOR",
-        )
-    except Exception as erro:
-        await enviar_log(f"❌ Erro ao criar canal provisório de relatório: `{erro}`")
-        return None
-
-    pendentes = _carregar_pendentes_relatorios()
-    pendentes[str(canal.id)] = {
-        "tipo": tipo,
-        "numero": numero,
-        "texto": texto,
-        "autor_id": interaction.user.id,
-        "autor_nome": str(interaction.user),
-        "criado_em": agora_br(),
-        "status": "aguardando_fotos",
-    }
-    _salvar_pendentes_relatorios(pendentes)
-
-    embed = discord.Embed(
-        title=f"📸 ANEXAR PROVAS — {nome_tipo_relatorio(tipo).upper()} Nº {numero}",
-        description=(
-            "O formulário foi salvo. Agora envie **todas as fotos, vídeos e arquivos** diretamente neste canal.\n\n"
-            "Quando terminar, clique em **Finalizar relatório**. O bot vai baixar os arquivos, salvar uma cópia e só depois publicar no canal oficial."
-        ),
-        color=discord.Color.blurple(),
-    )
-    embed.add_field(name="Prévia do formulário", value=cortar_discord(texto.replace("*", ""), 950), inline=False)
-    embed.set_footer(text="O canal só será apagado após confirmação do envio completo.")
-    await canal.send(content=interaction.user.mention, embed=embed, view=FinalizarRelatorioOperacionalView())
-    return canal
-
-
-async def _baixar_attachment_seguro(anexo: discord.Attachment, pasta: Path, indice: int) -> Tuple[Optional[Path], str]:
-    pasta.mkdir(parents=True, exist_ok=True)
-    nome = _nome_seguro_arquivo(anexo.filename, indice)
-    destino = pasta / f"{indice:03d}_{nome}"
-    erros = []
-
-    try:
-        dados = await anexo.read(use_cached=True)
-        if dados:
-            destino.write_bytes(dados)
-            return destino, "attachment.read(use_cached=True)"
-    except Exception as erro:
-        erros.append(f"cached:{erro}")
-
-    urls = []
-    for valor in (getattr(anexo, "proxy_url", None), getattr(anexo, "url", None)):
-        if valor and valor not in urls:
-            urls.append(valor)
-    timeout = ClientTimeout(total=45)
-    async with ClientSession(timeout=timeout) as sessao:
-        for url in urls:
-            try:
-                async with sessao.get(url, allow_redirects=True) as resp:
-                    if resp.status == 200:
-                        dados = await resp.read()
-                        if dados:
-                            destino.write_bytes(dados)
-                            return destino, f"http:{url[:80]}"
-                    erros.append(f"http{resp.status}:{url[:80]}")
-            except Exception as erro:
-                erros.append(f"url:{erro}")
-    return None, "; ".join(erros)[-800:]
-
-
-async def _baixar_url_segura(url: str, pasta: Path, indice: int, nome_sugerido: str = "imagem.png") -> Tuple[Optional[Path], str]:
-    pasta.mkdir(parents=True, exist_ok=True)
-    nome_url = Path(urlparse(url).path).name or nome_sugerido
-    destino = pasta / f"{indice:03d}_{_nome_seguro_arquivo(nome_url, indice)}"
-    tentativas = [url]
-    # URLs assinadas antigas às vezes ainda funcionam via media.discordapp.net.
-    if "cdn.discordapp.com" in url:
-        tentativas.append(url.replace("cdn.discordapp.com", "media.discordapp.net"))
-    erros = []
-    timeout = ClientTimeout(total=45)
-    async with ClientSession(timeout=timeout) as sessao:
-        for alvo in dict.fromkeys(tentativas):
-            try:
-                async with sessao.get(alvo, allow_redirects=True) as resp:
-                    if resp.status == 200:
-                        dados = await resp.read()
-                        if dados:
-                            destino.write_bytes(dados)
-                            return destino, f"url:{alvo[:100]}"
-                    erros.append(f"HTTP {resp.status}: {alvo[:120]}")
-            except Exception as erro:
-                erros.append(str(erro))
-    return None, "; ".join(erros)[-800:]
-
-
-def _urls_discord_no_texto(texto: str) -> List[str]:
-    urls = re.findall(r"https?://[^\s<>]+", str(texto or ""))
-    saida = []
-    for url in urls:
-        url = url.rstrip(").,]>`'")
-        if any(host in url for host in ("cdn.discordapp.com", "media.discordapp.net", "discord.com/attachments")):
-            if url not in saida:
-                saida.append(url)
-    return saida
-
-
-async def _coletar_e_salvar_anexos_canal(canal: discord.TextChannel, pasta: Path) -> Tuple[List[Path], List[Dict[str, Any]]]:
-    salvos: List[Path] = []
-    falhas: List[Dict[str, Any]] = []
-    indice = 0
-    async for msg in canal.history(limit=None, oldest_first=True):
-        if bot.user and msg.author.id == bot.user.id:
-            continue
-        for anexo in msg.attachments:
-            indice += 1
-            caminho, origem = await _baixar_attachment_seguro(anexo, pasta, indice)
-            if caminho:
-                salvos.append(caminho)
-            else:
-                falhas.append({"mensagem_id": msg.id, "arquivo": anexo.filename, "erro": origem})
-    return salvos, falhas
-
-
-async def _enviar_relatorio_com_arquivos(
-    canal_destino,
-    texto: str,
-    caminhos: List[Path],
-) -> List[discord.Message]:
-    mensagens = []
-    if not caminhos:
-        mensagens.append(await canal_destino.send(texto, allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False)))
-        return mensagens
-
-    # Discord aceita até 10 anexos por mensagem. Mantemos a ordem original.
-    for inicio in range(0, len(caminhos), 10):
-        lote = caminhos[inicio:inicio + 10]
-        arquivos = [discord.File(str(p), filename=p.name.split("_", 1)[-1]) for p in lote]
-        conteudo = texto if inicio == 0 else f"📎 **Continuação das provas — arquivos {inicio + 1} a {inicio + len(lote)}**"
-        mensagens.append(await canal_destino.send(
-            conteudo,
-            files=arquivos,
-            allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
-        ))
-    return mensagens
-
-
-class FinalizarRelatorioOperacionalView(View):
-    def __init__(self):
-        super().__init__(timeout=None)
-
-    @discord.ui.button(label="Finalizar relatório", emoji="✅", style=discord.ButtonStyle.success, custom_id="dicor_finalizar_relatorio_fotos_v2")
-    async def finalizar(self, interaction: discord.Interaction, button: Button):
-        if not isinstance(interaction.channel, discord.TextChannel):
-            return await interaction.response.send_message("❌ Use este botão no canal provisório.", ephemeral=True)
-        pendentes = _carregar_pendentes_relatorios()
-        registro = pendentes.get(str(interaction.channel.id))
-        if not registro:
-            return await interaction.response.send_message("❌ Não encontrei os dados salvos deste relatório.", ephemeral=True)
-        if interaction.user.id != int(registro.get("autor_id", 0)) and not usuario_tem_admin(interaction.user):
-            return await interaction.response.send_message("❌ Apenas o autor ou a administração pode finalizar.", ephemeral=True)
-
-        await interaction.response.defer(ephemeral=True, thinking=True)
-        pasta = RELATORIOS_ARQUIVOS_DIR / f"{registro['tipo']}_{registro['numero']}_{interaction.channel.id}"
-        caminhos, falhas = await _coletar_e_salvar_anexos_canal(interaction.channel, pasta)
-        if not caminhos:
-            return await interaction.followup.send(
-                "⚠️ Nenhum arquivo foi encontrado. Envie ao menos uma foto ou arquivo antes de finalizar.",
-                ephemeral=True,
-            )
-        if falhas:
-            return await interaction.followup.send(
-                f"⚠️ Consegui salvar {len(caminhos)} arquivo(s), mas {len(falhas)} falharam. O canal foi preservado. Tente reenviar os arquivos que falharam.",
-                ephemeral=True,
-            )
-
-        canal_id = CANAIS_RELATORIOS.get(registro["tipo"])
-        canal_destino = interaction.guild.get_channel(canal_id) if interaction.guild else None
-        if canal_destino is None and canal_id:
-            try:
-                canal_destino = await bot.fetch_channel(canal_id)
-            except Exception:
-                canal_destino = None
-        if canal_destino is None:
-            return await interaction.followup.send("❌ Canal oficial não encontrado. O canal provisório foi preservado.", ephemeral=True)
-
-        try:
-            mensagens = await _enviar_relatorio_com_arquivos(canal_destino, registro["texto"], caminhos)
-        except Exception as erro:
-            await enviar_log(f"❌ Falha ao publicar relatório com anexos: `{erro}`")
-            return await interaction.followup.send("❌ O envio falhou. Nada foi apagado; tente novamente.", ephemeral=True)
-
-        principal = mensagens[0]
-        registrar_relatorio_operacional({
-            "id": str(principal.id),
-            "tipo": registro["tipo"],
-            "tipo_nome": nome_tipo_relatorio(registro["tipo"]),
-            "numero": registro["numero"],
-            "autor_id": registro["autor_id"],
-            "autor_nome": registro["autor_nome"],
-            "data": registro["criado_em"],
-            "canal_destino_id": canal_id,
-            "mensagem_url": principal.jump_url,
-            "mensagens_ids": [m.id for m in mensagens],
-            "resumo": cortar_discord(registro["texto"].replace("*", ""), 800),
-            "provas": [str(p.relative_to(BASE_DIR)) for p in caminhos],
-            "arquivos_salvos": True,
-        })
-        pendentes.pop(str(interaction.channel.id), None)
-        _salvar_pendentes_relatorios(pendentes)
-        await interaction.followup.send(f"✅ Relatório publicado com {len(caminhos)} arquivo(s) salvos e anexados.", ephemeral=True)
-        await interaction.channel.send("✅ Envio confirmado. Este canal será apagado em 8 segundos.")
-        await asyncio.sleep(8)
-        try:
-            await interaction.channel.delete(reason="Relatório publicado e arquivos preservados")
-        except Exception:
-            pass
-
-    @discord.ui.button(label="Cancelar", emoji="❌", style=discord.ButtonStyle.danger, custom_id="dicor_cancelar_relatorio_fotos_v2")
-    async def cancelar(self, interaction: discord.Interaction, button: Button):
-        pendentes = _carregar_pendentes_relatorios()
-        registro = pendentes.get(str(getattr(interaction.channel, "id", 0)))
-        if registro and interaction.user.id != int(registro.get("autor_id", 0)) and not usuario_tem_admin(interaction.user):
-            return await interaction.response.send_message("❌ Apenas o autor ou a administração pode cancelar.", ephemeral=True)
-        pendentes.pop(str(getattr(interaction.channel, "id", 0)), None)
-        _salvar_pendentes_relatorios(pendentes)
-        await interaction.response.send_message("🗑️ Relatório cancelado. O canal será apagado.", ephemeral=True)
-        await asyncio.sleep(3)
-        try:
-            await interaction.channel.delete(reason="Relatório operacional cancelado")
-        except Exception:
-            pass
-
-
-# Compatibilidade com mensagens antigas que ainda possuem o botão de formulário.
 class IniciarFormularioRelatorioView(View):
     def __init__(self, tipo: str = "tocaia"):
         super().__init__(timeout=None)
@@ -8567,19 +8575,182 @@ class IniciarFormularioRelatorioView(View):
 
     @discord.ui.button(label="✍️ Preencher Formulário", style=discord.ButtonStyle.primary, custom_id="rel_btn_preencher")
     async def preencher(self, interaction: discord.Interaction, button: Button):
-        tipo = self.tipo
-        nome = getattr(interaction.channel, "name", "")
-        if "olb" in nome:
-            tipo = "olb"
-        elif "pericia" in nome:
-            tipo = "pericia_externa"
-        if tipo == "olb":
-            await interaction.response.send_modal(OlbModal())
-        elif tipo == "pericia_externa":
-            await interaction.response.send_modal(PericiaExternaModal())
-        else:
-            await interaction.response.send_modal(TocaiaModal())
+        tipo_atual = self.tipo
+        nome_canal = interaction.channel.name if interaction.channel else ""
+        if "olb" in nome_canal:
+            tipo_atual = "olb"
+        elif "pericia" in nome_canal or "externa" in nome_canal:
+            tipo_atual = "pericia_externa"
+        elif "tocaia" in nome_canal:
+            tipo_atual = "tocaia"
 
+        if tipo_atual == "tocaia":
+            await interaction.response.send_modal(TocaiaModal())
+        elif tipo_atual == "olb":
+            await interaction.response.send_modal(OlbModal())
+        elif tipo_atual == "pericia_externa":
+            await interaction.response.send_modal(PericiaExternaModal())
+
+async def _baixar_anexo_relatorio(anexo: discord.Attachment, destino: Path) -> Optional[Path]:
+    """Baixa um anexo antes de apagar o canal temporário, tentando API, cache e URLs."""
+    destino.parent.mkdir(parents=True, exist_ok=True)
+    limite = max(1, RELATORIOS_MAX_ARQUIVO_MB) * 1024 * 1024
+    if getattr(anexo, "size", 0) and int(anexo.size) > limite:
+        return None
+
+    nome = _safe_filename(getattr(anexo, "filename", "arquivo")) if '_safe_filename' in globals() else re.sub(r'[^A-Za-z0-9_.-]+', '_', getattr(anexo, 'filename', 'arquivo'))
+    caminho = destino / nome
+    if caminho.exists():
+        caminho = destino / f"{int(time.time()*1000)}_{nome}"
+
+    # 1) leitura oficial pela API do Discord; use_cached tenta o proxy/cache.
+    for cached in (True, False):
+        try:
+            dados = await anexo.read(use_cached=cached)
+            if dados:
+                caminho.write_bytes(dados)
+                return caminho
+        except TypeError:
+            try:
+                dados = await anexo.read()
+                if dados:
+                    caminho.write_bytes(dados)
+                    return caminho
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    # 2) URLs atuais retornadas pela API.
+    urls = []
+    for valor in (getattr(anexo, 'url', None), getattr(anexo, 'proxy_url', None)):
+        if valor and str(valor) not in urls:
+            urls.append(str(valor))
+    timeout = ClientTimeout(total=45)
+    headers = {"User-Agent": "DICOR-Report-Recovery/3.0"}
+    async with ClientSession(timeout=timeout, headers=headers) as session:
+        for url in urls:
+            try:
+                async with session.get(url, allow_redirects=True) as resp:
+                    if resp.status == 200:
+                        dados = await resp.read()
+                        if dados and len(dados) <= limite:
+                            caminho.write_bytes(dados)
+                            return caminho
+            except Exception:
+                pass
+    return None
+
+
+async def _enviar_relatorio_com_arquivos(canal_destino, texto: str, caminhos: List[Path]) -> List[discord.Message]:
+    """Publica texto e anexos reais em lotes, preservando a ordem das fotos."""
+    enviados: List[discord.Message] = []
+    caminhos_validos = [Path(p) for p in caminhos if Path(p).exists()]
+    if not caminhos_validos:
+        enviados.append(await canal_destino.send(
+            texto,
+            allowed_mentions=discord.AllowedMentions(users=False, roles=False, everyone=False),
+        ))
+        return enviados
+
+    # Primeira mensagem: relatório + primeiro lote. Discord aceita até 10 anexos por mensagem.
+    for indice in range(0, len(caminhos_validos), 10):
+        lote = caminhos_validos[indice:indice + 10]
+        arquivos = [discord.File(str(p), filename=p.name) for p in lote]
+        conteudo = texto if indice == 0 else f"📎 **Continuação das provas — lote {indice // 10 + 1}**"
+        msg = await canal_destino.send(
+            conteudo,
+            files=arquivos,
+            allowed_mentions=discord.AllowedMentions(users=False, roles=False, everyone=False),
+        )
+        enviados.append(msg)
+    return enviados
+
+
+async def finalizar_e_postar_relatorio(interaction: discord.Interaction, tipo: str, texto_conteudo: str):
+    """
+    Finaliza com segurança: baixa todos os anexos, salva cópias persistentes,
+    publica como arquivos reais e só depois remove o canal provisório.
+    """
+    canal_id = CANAIS_RELATORIOS.get(tipo)
+    canal_destino = interaction.guild.get_channel(canal_id) if interaction.guild and canal_id else None
+    if canal_destino is None and canal_id:
+        try:
+            canal_destino = await bot.fetch_channel(canal_id)
+        except Exception:
+            canal_destino = None
+    if canal_destino is None:
+        return await interaction.followup.send("❌ Canal oficial do relatório não foi encontrado. O canal provisório foi mantido.", ephemeral=True)
+
+    canal_atual = interaction.channel
+    anexos: List[discord.Attachment] = []
+    if isinstance(canal_atual, (discord.TextChannel, discord.Thread)):
+        async for msg in canal_atual.history(limit=None, oldest_first=True):
+            anexos.extend(msg.attachments)
+
+    numero_match = re.search(r"Nº\s*([0-9]+)", texto_conteudo, flags=re.I)
+    numero = numero_match.group(1) if numero_match else str(int(time.time()))
+    pasta = RELATORIOS_ARQUIVOS_DIR / tipo / numero
+    pasta.mkdir(parents=True, exist_ok=True)
+
+    caminhos: List[Path] = []
+    falhas: List[str] = []
+    for ordem, anexo in enumerate(anexos, start=1):
+        subpasta = pasta / f"{ordem:03d}"
+        caminho = await _baixar_anexo_relatorio(anexo, subpasta)
+        if caminho:
+            caminhos.append(caminho)
+        else:
+            falhas.append(getattr(anexo, 'filename', f'arquivo-{ordem}'))
+
+    # Nunca apaga o canal quando algum anexo não pôde ser salvo.
+    if falhas:
+        await interaction.followup.send(
+            "❌ Não consegui salvar todas as provas. O canal provisório continuará aberto. "
+            "Reenvie os arquivos indicados e tente novamente:\n" + "\n".join(f"• `{x}`" for x in falhas[:20]),
+            ephemeral=True,
+        )
+        if hasattr(canal_atual, 'send'):
+            await canal_atual.send("⚠️ **FINALIZAÇÃO INTERROMPIDA:** algumas provas não puderam ser salvas. Nenhuma mensagem foi apagada.")
+        return
+
+    try:
+        mensagens_publicadas = await _enviar_relatorio_com_arquivos(canal_destino, texto_conteudo, caminhos)
+    except Exception as erro:
+        await enviar_log(f"❌ Falha ao publicar relatório `{tipo}`: {erro}")
+        await interaction.followup.send("❌ A publicação falhou. As fotos e o canal provisório foram preservados.", ephemeral=True)
+        return
+
+    mensagem_principal = mensagens_publicadas[0] if mensagens_publicadas else None
+    try:
+        registrar_relatorio_operacional({
+            "id": str(mensagem_principal.id if mensagem_principal else f"TEMP-{data_caso()}"),
+            "tipo": tipo,
+            "tipo_nome": nome_tipo_relatorio(tipo),
+            "numero": numero,
+            "autor_id": interaction.user.id,
+            "autor_nome": str(interaction.user),
+            "autor_mention": interaction.user.mention,
+            "data": agora_br(),
+            "canal_destino_id": canal_id,
+            "mensagem_url": mensagem_principal.jump_url if mensagem_principal else "",
+            "mensagens_ids": [m.id for m in mensagens_publicadas],
+            "resumo": cortar_discord(texto_conteudo.replace("*", ""), 800),
+            "provas": [str(p.relative_to(BASE_DIR)) if BASE_DIR in p.parents else str(p) for p in caminhos],
+            "quantidade_provas": len(caminhos),
+            "status_arquivos": "salvos_e_publicados",
+        })
+    except Exception as erro:
+        await enviar_log(f"⚠️ Relatório publicado, mas não consegui registrar no JSON: {erro}")
+
+    await interaction.followup.send(f"✅ Relatório publicado com `{len(caminhos)}` prova(s) anexada(s).", ephemeral=True)
+    if isinstance(canal_atual, (discord.TextChannel, discord.Thread)):
+        await canal_atual.send("✅ Relatório e provas enviados com sucesso. Este canal será apagado em 8 segundos.")
+        await asyncio.sleep(8)
+        try:
+            await canal_atual.delete(reason="Relatório operacional concluído com anexos salvos e publicados.")
+        except Exception as erro:
+            await enviar_log(f"⚠️ Relatório concluído, mas o canal provisório não foi apagado: {erro}")
 
 class TocaiaModal(Modal, title="Relatório de Tocaia"):
     local = TextInput(label="Local", placeholder="Local de interesse observado", max_length=150)
@@ -8587,20 +8758,18 @@ class TocaiaModal(Modal, title="Relatório de Tocaia"):
     infos = TextInput(label="Informações obtidas", style=discord.TextStyle.paragraph, placeholder="Detalhes colhidos durante a tocaia", max_length=1000)
 
     async def on_submit(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True, thinking=True)
+        await interaction.response.defer(ephemeral=True)
         num = await obter_proximo_numero_relatorio_async("tocaia", interaction.guild)
         data_hora = agora_br()
         texto = (
-            "━" * 15 + f"\n**👀 RELATÓRIO DE TOCAIA Nº {num}**\n" + "━" * 15 + "\n"
+            f"━" * 15 + f"\n**👀 RELATÓRIO DE TOCAIA Nº {num}**\n" + f"━" * 15 + "\n"
             f"**👤 RESPONSÁVEL:** {interaction.user.mention}\n"
             f"**📍 LOCAL OBSERVADO:** {self.local.value}\n"
             f"**⏱️ TEMPO DE VIGILÂNCIA:** {self.tempo.value}\n\n"
             f"**📝 INFORMAÇÕES OBTIDAS:**\n{self.infos.value}\n\n"
             f"📅 *Enviado em {data_hora.split()[0]} às {data_hora.split()[1]}*"
         )
-        canal = await _criar_canal_relatorio_apos_formulario(interaction, "tocaia", texto, num)
-        await interaction.followup.send(f"✅ Formulário salvo. Envie as fotos em {canal.mention}." if canal else "❌ Não consegui criar o canal provisório.", ephemeral=True)
-
+        await finalizar_e_postar_relatorio(interaction, "tocaia", texto)
 
 class OlbModal(Modal, title="Relatório de OLB"):
     dicors = TextInput(label="DICORs envolvidos", placeholder="Agentes participantes da operação", max_length=200)
@@ -8610,11 +8779,11 @@ class OlbModal(Modal, title="Relatório de OLB"):
     prejuizo = TextInput(label="Prejuízo estimado", placeholder="Valor aproximado do impacto", max_length=100)
 
     async def on_submit(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True, thinking=True)
+        await interaction.response.defer(ephemeral=True)
         num = await obter_proximo_numero_relatorio_async("olb", interaction.guild)
         data_hora = agora_br()
         texto = (
-            "━" * 15 + f"\n**🚔 RELATÓRIO DE OLB Nº {num}**\n" + "━" * 15 + "\n"
+            f"━" * 15 + f"\n**🚔 RELATÓRIO DE OLB Nº {num}**\n" + f"━" * 15 + "\n"
             f"**👤 RESPONSÁVEL:** {interaction.user.mention}\n"
             f"**👥 AGENTES ENVOLVIDOS:** {self.dicors.value}\n\n"
             f"**💥 RELATO DA OPERAÇÃO:**\n{self.relato.value}\n\n"
@@ -8623,9 +8792,7 @@ class OlbModal(Modal, title="Relatório de OLB"):
             f"**💰 PREJUÍZO ESTIMADO:** ≈ {self.prejuizo.value}\n\n"
             f"📅 *Enviado em {data_hora.split()[0]} às {data_hora.split()[1]}*"
         )
-        canal = await _criar_canal_relatorio_apos_formulario(interaction, "olb", texto, num)
-        await interaction.followup.send(f"✅ Formulário salvo. Envie as fotos em {canal.mention}." if canal else "❌ Não consegui criar o canal provisório.", ephemeral=True)
-
+        await finalizar_e_postar_relatorio(interaction, "olb", texto)
 
 class PericiaExternaModal(Modal, title="Perícia Externa"):
     codigo = TextInput(label="Código da ocorrência", placeholder="Número de referência", max_length=100)
@@ -8634,11 +8801,11 @@ class PericiaExternaModal(Modal, title="Perícia Externa"):
     conclusao = TextInput(label="Conclusão", style=discord.TextStyle.paragraph, placeholder="Resultados das análises", max_length=1000)
 
     async def on_submit(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True, thinking=True)
+        await interaction.response.defer(ephemeral=True)
         num = await obter_proximo_numero_relatorio_async("pericia_externa", interaction.guild)
         data_hora = agora_br()
         texto = (
-            "━" * 15 + f"\n**🔬 RELATÓRIO DE PERÍCIA EXTERNA Nº {num}**\n" + "━" * 15 + "\n"
+            f"━" * 15 + f"\n**🔬 RELATÓRIO DE PERÍCIA EXTERNA Nº {num}**\n" + f"━" * 15 + "\n"
             f"**👤 PERITO:** {interaction.user.mention}\n"
             f"**🔢 CÓD. OCORRÊNCIA:** {self.codigo.value}\n"
             f"**📍 LOCALIZAÇÃO:** {self.local.value}\n"
@@ -8646,168 +8813,7 @@ class PericiaExternaModal(Modal, title="Perícia Externa"):
             f"**📋 CONCLUSÃO DO LAUDO:**\n{self.conclusao.value}\n\n"
             f"📅 *Enviado em {data_hora.split()[0]} às {data_hora.split()[1]}*"
         )
-        canal = await _criar_canal_relatorio_apos_formulario(interaction, "pericia_externa", texto, num)
-        await interaction.followup.send(f"✅ Formulário salvo. Envie as fotos em {canal.mention}." if canal else "❌ Não consegui criar o canal provisório.", ephemeral=True)
-
-
-async def _fontes_midia_mensagem(msg: discord.Message) -> List[Tuple[str, Any]]:
-    fontes: List[Tuple[str, Any]] = []
-    for anexo in msg.attachments:
-        fontes.append(("attachment", anexo))
-    textos = [msg.content or ""]
-    for embed in msg.embeds:
-        textos.extend([embed.title or "", embed.description or ""])
-        if embed.image and embed.image.url:
-            fontes.append(("url", embed.image.url))
-        if embed.thumbnail and embed.thumbnail.url:
-            fontes.append(("url", embed.thumbnail.url))
-        for campo in embed.fields:
-            textos.append(str(campo.value or ""))
-    for texto in textos:
-        for url in _urls_discord_no_texto(texto):
-            fontes.append(("url", url))
-    # Remove URLs repetidas, mantendo attachments separados.
-    vistos = set()
-    unicos = []
-    for tipo, fonte in fontes:
-        chave = (tipo, getattr(fonte, "id", None) or str(fonte))
-        if chave not in vistos:
-            vistos.add(chave)
-            unicos.append((tipo, fonte))
-    return unicos
-
-
-def _eh_inicio_relatorio_antigo(texto: str, tipo: str) -> bool:
-    t = normalizar_busca(texto)
-    chaves = {
-        "tocaia": ("relatorio de tocaia",),
-        "olb": ("relatorio de olb",),
-        "pericia_externa": ("relatorio de pericia externa", "pericia externa"),
-    }[tipo]
-    return any(ch in t for ch in chaves)
-
-
-async def migrar_relatorios_antigos_automaticamente_v2() -> None:
-    if not RELATORIOS_MIGRAR_AUTOMATICAMENTE:
-        return
-    await bot.wait_until_ready()
-    await asyncio.sleep(8)
-
-    estado = carregar_json(RELATORIOS_MIGRACAO_V2_JSON, {})
-    if not isinstance(estado, dict):
-        estado = {}
-    if estado.get("versao") == 2 and estado.get("concluida") is True:
-        return
-
-    estado.setdefault("versao", 2)
-    estado.setdefault("processados", {})
-    estado.setdefault("recuperados", [])
-    estado.setdefault("sem_arquivo", [])
-    estado["iniciada_em"] = estado.get("iniciada_em") or agora_br()
-    estado["concluida"] = False
-    salvar_json(RELATORIOS_MIGRACAO_V2_JSON, estado)
-    await enviar_log("🔄 **Recuperação V2 dos relatórios antigos iniciada automaticamente.** Nenhuma mensagem antiga será apagada.")
-
-    total_recuperados = 0
-    total_falhas = 0
-    for tipo, canal_id in CANAIS_RELATORIOS.items():
-        canal = bot.get_channel(canal_id)
-        if canal is None:
-            try:
-                canal = await bot.fetch_channel(canal_id)
-            except Exception as erro:
-                estado["sem_arquivo"].append({"canal_id": canal_id, "erro": f"canal indisponível: {erro}"})
-                continue
-        if not hasattr(canal, "history"):
-            continue
-
-        limite = None if RELATORIOS_MIGRACAO_SCAN_LIMIT <= 0 else RELATORIOS_MIGRACAO_SCAN_LIMIT
-        mensagens = []
-        try:
-            async for msg in canal.history(limit=limite, oldest_first=True):
-                mensagens.append(msg)
-        except Exception as erro:
-            estado["sem_arquivo"].append({"canal_id": canal_id, "erro": str(erro)})
-            continue
-
-        indices_relatorio = []
-        for i, msg in enumerate(mensagens):
-            texto = coletar_texto_embed(msg) if "coletar_texto_embed" in globals() else (msg.content or "")
-            if _eh_inicio_relatorio_antigo(texto, tipo):
-                indices_relatorio.append(i)
-
-        for pos, inicio in enumerate(indices_relatorio):
-            msg = mensagens[inicio]
-            chave = f"{canal_id}:{msg.id}"
-            if estado["processados"].get(chave, {}).get("publicado"):
-                continue
-            fim = indices_relatorio[pos + 1] if pos + 1 < len(indices_relatorio) else min(len(mensagens), inicio + 30)
-            bloco = mensagens[inicio:fim]
-            pasta = RELATORIOS_ARQUIVOS_DIR / "migrados_v2" / str(canal_id) / str(msg.id)
-            pasta.mkdir(parents=True, exist_ok=True)
-            caminhos: List[Path] = []
-            falhas = []
-            idx = 0
-            for bm in bloco:
-                for fonte_tipo, fonte in await _fontes_midia_mensagem(bm):
-                    idx += 1
-                    if fonte_tipo == "attachment":
-                        caminho, origem = await _baixar_attachment_seguro(fonte, pasta, idx)
-                    else:
-                        caminho, origem = await _baixar_url_segura(str(fonte), pasta, idx)
-                    if caminho and caminho not in caminhos:
-                        caminhos.append(caminho)
-                    elif not caminho:
-                        falhas.append({"mensagem_id": bm.id, "fonte": str(fonte)[:300], "erro": origem})
-
-            texto_original = msg.content or ""
-            if not texto_original and msg.embeds:
-                texto_original = coletar_texto_embed(msg)
-            texto_original = re.sub(r"\n\s*\*\*?🔗?\s*REGISTROS FOTOGRÁFICOS.*", "", texto_original, flags=re.I | re.S).strip()
-
-            registro_estado = {
-                "tipo": tipo,
-                "mensagem_original_id": msg.id,
-                "mensagem_original_url": msg.jump_url,
-                "arquivos_recuperados": len(caminhos),
-                "falhas": falhas,
-                "publicado": False,
-                "tentado_em": agora_br(),
-            }
-            if caminhos:
-                cabecalho = "♻️ **RELATÓRIO ANTIGO RECUPERADO AUTOMATICAMENTE**\n" + texto_original
-                try:
-                    novas = await _enviar_relatorio_com_arquivos(canal, cabecalho, caminhos)
-                    registro_estado["publicado"] = True
-                    registro_estado["novas_mensagens_ids"] = [m.id for m in novas]
-                    registro_estado["nova_mensagem_url"] = novas[0].jump_url
-                    estado["recuperados"].append(chave)
-                    total_recuperados += 1
-                except Exception as erro:
-                    registro_estado["erro_publicacao"] = str(erro)
-                    total_falhas += 1
-            else:
-                estado["sem_arquivo"].append({
-                    "chave": chave,
-                    "tipo": tipo,
-                    "mensagem_url": msg.jump_url,
-                    "tentativas": falhas,
-                })
-                total_falhas += 1
-            estado["processados"][chave] = registro_estado
-            salvar_json(RELATORIOS_MIGRACAO_V2_JSON, estado)
-            await asyncio.sleep(1.2)
-
-    estado["concluida"] = True
-    estado["concluida_em"] = agora_br()
-    estado["resumo_ultima_execucao"] = {"recuperados": total_recuperados, "sem_arquivo": total_falhas}
-    salvar_json(RELATORIOS_MIGRACAO_V2_JSON, estado)
-    await enviar_log(
-        "✅ **Recuperação V2 dos relatórios antigos finalizada.**\n"
-        f"Relatórios reenviados com arquivos: `{total_recuperados}`\n"
-        f"Relatórios sem arquivo recuperável nesta tentativa: `{total_falhas}`\n"
-        f"Controle: `{RELATORIOS_MIGRACAO_V2_JSON.name}`"
-    )
+        await finalizar_e_postar_relatorio(interaction, "pericia_externa", texto)
 
 
 @bot.tree.command(name="painel-relatorios", description="Envia o painel com os Relatórios Operacionais.")
