@@ -12014,7 +12014,7 @@ async def _salvar_anexos_canal(canal: discord.TextChannel, pasta: Path) -> List[
     return itens
 
 
-async def _enviar_relatorio_com_arquivos(canal_destino, texto: str, arquivos: List[Dict[str, Any]]) -> List[discord.Message]:
+async def _enviar_relatorio_com_arquivos(canal_destino, texto: str, arquivos: List[Dict[str, Any]], view: Optional[View] = None) -> List[discord.Message]:
     mensagens=[]
     for inicio in range(0, max(1, len(arquivos)), 10):
         lote=arquivos[inicio:inicio+10]
@@ -12027,12 +12027,130 @@ async def _enviar_relatorio_com_arquivos(canal_destino, texto: str, arquivos: Li
         msg=await canal_destino.send(
             content=conteudo,
             files=files,
+            view=view if inicio == 0 else None,
             allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
         )
         mensagens.append(msg)
         if not arquivos:
             break
     return mensagens
+
+
+
+def _localizar_relatorio_por_mensagem(mensagem_id: int) -> Tuple[Optional[Dict[str, Any]], int]:
+    lista = carregar_relatorios_operacionais()
+    alvo = str(mensagem_id)
+    for indice, registro in enumerate(lista):
+        ids = [str(x) for x in (registro.get("mensagens_ids") or [])]
+        if str(registro.get("id") or "") == alvo or alvo in ids:
+            return registro, indice
+    return None, -1
+
+
+def _atualizar_relatorio_registrado(indice: int, registro: Dict[str, Any]) -> None:
+    lista = carregar_relatorios_operacionais()
+    if 0 <= indice < len(lista):
+        lista[indice] = registro
+    else:
+        lista.append(registro)
+    salvar_relatorios_operacionais(lista)
+
+
+async def _apagar_mensagens_relatorio(canal, ids: List[int]) -> None:
+    for mensagem_id in ids:
+        try:
+            msg = await canal.fetch_message(int(mensagem_id))
+            await msg.delete(reason="Relatório substituído pelo sistema de edição DICOR")
+        except Exception:
+            pass
+
+
+class EditarTextoRelatorioModal(Modal):
+    def __init__(self, registro: Dict[str, Any]):
+        super().__init__(title="Editar relatório DICOR", timeout=600)
+        self.registro = registro
+        texto_atual = str(registro.get("texto_completo") or "")[:4000]
+        self.texto = TextInput(
+            label="Texto completo do relatório",
+            style=discord.TextStyle.paragraph,
+            default=texto_atual,
+            max_length=4000,
+            required=True,
+        )
+        self.add_item(self.texto)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        guild = interaction.guild
+        if guild is None:
+            return await interaction.followup.send("❌ Servidor não encontrado.", ephemeral=True)
+
+        registro, indice = _localizar_relatorio_por_mensagem(int(self.registro.get("id") or 0))
+        if not registro:
+            return await interaction.followup.send("❌ O registro desse relatório não foi encontrado.", ephemeral=True)
+
+        tipo = str(registro.get("tipo") or "relatorio")
+        numero = str(registro.get("numero") or "000")
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(view_channel=False),
+            interaction.user: discord.PermissionOverwrite(view_channel=True, send_messages=True, attach_files=True, embed_links=True, read_message_history=True),
+            guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True, manage_channels=True, manage_messages=True, attach_files=True, read_message_history=True),
+        }
+        for role in guild.roles:
+            if role.id in set(CARGOS_EQUIPE_IDS + CARGOS_ADMIN_IDS):
+                overwrites[role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, attach_files=True, read_message_history=True)
+        categoria = guild.get_channel(CATEGORIA_RELATORIOS_TEMPORARIOS)
+        slug = re.sub(r"[^a-z0-9-]+", "-", normalizar_busca(interaction.user.display_name)).strip("-")[:25]
+        canal = await guild.create_text_channel(
+            name=f"editar-{tipo}-{numero}-{slug}"[:95],
+            category=categoria,
+            overwrites=overwrites,
+            reason="Edição de relatório operacional DICOR",
+        )
+        _salvar_draft(canal.id, {
+            "modo": "editar",
+            "tipo": tipo,
+            "numero": numero,
+            "texto": str(self.texto.value).strip(),
+            "autor_id": registro.get("autor_id"),
+            "autor_nome": registro.get("autor_nome"),
+            "editor_id": interaction.user.id,
+            "editor_nome": str(interaction.user),
+            "criado_em": agora_br(),
+            "canal_destino_id": registro.get("canal_destino_id"),
+            "registro_indice": indice,
+            "mensagens_antigas_ids": registro.get("mensagens_ids") or [registro.get("id")],
+            "registro_antigo": registro,
+        })
+        embed = discord.Embed(
+            title="✏️ EDITAR FOTOS DO RELATÓRIO",
+            description=(
+                "O texto editado foi salvo. Agora envie neste canal **somente as fotos e arquivos corretos**.\n\n"
+                "Ao finalizar, o bot apagará as mensagens antigas e publicará novamente o relatório com os novos anexos. "
+                "Os links antigos não serão mantidos."
+            ),
+            color=discord.Color.orange(),
+        )
+        embed.add_field(name="Prévia atualizada", value=cortar_discord(str(self.texto.value).replace("*", ""), 1000), inline=False)
+        await canal.send(content=interaction.user.mention, embed=embed, view=FinalizarRelatorioFotosView())
+        await interaction.followup.send(f"✅ Edição iniciada. Anexe as fotos corretas em {canal.mention}.", ephemeral=True)
+
+
+class EditarRelatorioView(View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Editar relatório", emoji="✏️", style=discord.ButtonStyle.primary, custom_id="dicor_relatorio_editar")
+    async def editar(self, interaction: discord.Interaction, button: Button):
+        if interaction.message is None:
+            return await interaction.response.send_message("❌ Mensagem do relatório não encontrada.", ephemeral=True)
+        registro, _ = _localizar_relatorio_por_mensagem(interaction.message.id)
+        if not registro:
+            return await interaction.response.send_message(
+                "❌ Este relatório ainda não possui registro editável. Relatórios novos terão o botão funcionando normalmente.",
+                ephemeral=True,
+            )
+        await interaction.response.send_modal(EditarTextoRelatorioModal(registro))
 
 
 class FinalizarRelatorioFotosView(View):
@@ -12048,7 +12166,7 @@ class FinalizarRelatorioFotosView(View):
         draft=_obter_draft(canal.id)
         if not draft:
             return await interaction.followup.send("❌ Rascunho não encontrado. Nada foi apagado.", ephemeral=True)
-        if interaction.user.id != int(draft.get("autor_id",0)) and not (isinstance(interaction.user,discord.Member) and usuario_tem_admin(interaction.user)):
+        if draft.get("modo") != "editar" and interaction.user.id != int(draft.get("autor_id",0)) and not (isinstance(interaction.user,discord.Member) and usuario_tem_admin(interaction.user)):
             return await interaction.followup.send("❌ Apenas o autor ou a administração pode finalizar.", ephemeral=True)
         pasta=RELATORIOS_ARQUIVOS_DIR / str(draft.get("tipo")) / str(draft.get("numero"))
         anexos=await _salvar_anexos_canal(canal,pasta)
@@ -12062,7 +12180,7 @@ class FinalizarRelatorioFotosView(View):
         if destino is None:
             return await interaction.followup.send("❌ Canal oficial não encontrado. O canal provisório foi preservado.", ephemeral=True)
         try:
-            msgs=await _enviar_relatorio_com_arquivos(destino,str(draft.get("texto","")),anexos)
+            msgs=await _enviar_relatorio_com_arquivos(destino,str(draft.get("texto","")),anexos,view=EditarRelatorioView())
         except Exception as erro:
             await enviar_log(f"❌ Falha no envio do relatório com fotos: {erro}")
             return await interaction.followup.send("❌ Falha ao enviar. O canal e os arquivos foram preservados para nova tentativa.", ephemeral=True)
@@ -12073,10 +12191,30 @@ class FinalizarRelatorioFotosView(View):
             "mensagens_ids": [m.id for m in msgs], "texto_completo": draft.get("texto"), "provas": anexos,
             "resumo": cortar_discord(str(draft.get("texto","")).replace("*",""),800),
         }
-        registrar_relatorio_operacional(registro)
+        if draft.get("modo") == "editar":
+            antigo = draft.get("registro_antigo") or {}
+            registro["criado_em_original"] = antigo.get("criado_em_original") or antigo.get("data")
+            registro["editado_em"] = agora_br()
+            registro["editado_por_id"] = draft.get("editor_id")
+            registro["editado_por_nome"] = draft.get("editor_nome")
+            await _apagar_mensagens_relatorio(destino, [int(x) for x in (draft.get("mensagens_antigas_ids") or []) if str(x).isdigit()])
+            _atualizar_relatorio_registrado(int(draft.get("registro_indice", -1)), registro)
+            await enviar_log(
+                f"✏️ Relatório {nome_tipo_relatorio(str(draft.get('tipo')))} Nº {draft.get('numero')} editado por "
+                f"<@{draft.get('editor_id')}>. Texto e anexos antigos foram substituídos."
+            )
+        else:
+            registrar_relatorio_operacional(registro)
         _remover_draft(canal.id)
-        await interaction.followup.send(f"✅ Relatório enviado com {len(anexos)} arquivo(s).", ephemeral=True)
-        await canal.send("✅ Formulário e fotos enviados juntos com sucesso. Este canal será apagado em 8 segundos.")
+        await interaction.followup.send(
+            f"✅ Relatório {'editado e substituído' if draft.get('modo') == 'editar' else 'enviado'} com {len(anexos)} arquivo(s).",
+            ephemeral=True,
+        )
+        await canal.send(
+            "✅ Relatório atualizado com sucesso. Este canal será apagado em 8 segundos."
+            if draft.get("modo") == "editar"
+            else "✅ Formulário e fotos enviados juntos com sucesso. Este canal será apagado em 8 segundos."
+        )
         await asyncio.sleep(8)
         try: await canal.delete(reason="Relatório concluído e anexos salvos")
         except Exception: pass
@@ -12252,6 +12390,7 @@ hierarquia_dicor_automatica = hierarquia_dicor_pessoas_automatica
 async def iniciar_atualizacao_completa_dicor():
     try:
         bot.add_view(FinalizarRelatorioFotosView())
+        bot.add_view(EditarRelatorioView())
     except Exception: pass
     if not hierarquia_dicor_pessoas_automatica.is_running():
         hierarquia_dicor_pessoas_automatica.start()
