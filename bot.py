@@ -12225,13 +12225,143 @@ class FinalizarRelatorioFotosView(View):
         if not isinstance(canal,discord.TextChannel):
             return await interaction.response.send_message("❌ Canal inválido.",ephemeral=True)
         draft=_obter_draft(canal.id) or {}
-        if interaction.user.id != int(draft.get("autor_id",0)) and not (isinstance(interaction.user,discord.Member) and usuario_tem_admin(interaction.user)):
-            return await interaction.response.send_message("❌ Sem permissão.",ephemeral=True)
+        permitido = (
+            interaction.user.id == int(draft.get("autor_id", 0) or 0)
+            or interaction.user.id == int(draft.get("editor_id", 0) or 0)
+            or (isinstance(interaction.user, discord.Member) and usuario_tem_admin(interaction.user))
+        )
+        if not permitido:
+            return await interaction.response.send_message("❌ Sem permissão.", ephemeral=True)
         _remover_draft(canal.id)
         await interaction.response.send_message("🗑️ Relatório cancelado. O canal será apagado.",ephemeral=True)
         await asyncio.sleep(3)
         try: await canal.delete(reason="Relatório cancelado")
         except Exception: pass
+
+
+def _limpar_links_provas_relatorio(texto: str) -> str:
+    """Remove URLs antigas de CDN/Discord para que a edição use anexos reais."""
+    linhas = []
+    ignorar_cabecalho = False
+    for linha in str(texto or "").splitlines():
+        norm = normalizar_busca(linha) if 'normalizar_busca' in globals() else linha.lower()
+        if "registros fotograficos" in norm or "provas em anexo" in norm:
+            ignorar_cabecalho = True
+            continue
+        if re.search(r"https?://(?:cdn|media)\.discordapp\.com/", linha, flags=re.I):
+            continue
+        if ignorar_cabecalho and (not linha.strip() or linha.lstrip().startswith(("•", "-"))):
+            continue
+        ignorar_cabecalho = False
+        linhas.append(linha)
+    return "\n".join(linhas).strip()
+
+
+async def _localizar_relatorio_antigo(tipo: str, numero: int, guild: Optional[discord.Guild]) -> Tuple[Optional[Dict[str, Any]], int]:
+    # Primeiro tenta o banco local dos relatórios novos/migrados.
+    lista = carregar_relatorios_operacionais()
+    for indice, registro in enumerate(lista):
+        try:
+            mesmo_numero = int(str(registro.get("numero") or 0)) == int(numero)
+        except Exception:
+            mesmo_numero = False
+        if str(registro.get("tipo") or "") == tipo and mesmo_numero:
+            return registro, indice
+
+    if guild is None:
+        return None, -1
+    canal_id = CANAIS_RELATORIOS.get(tipo)
+    canal = guild.get_channel(canal_id) if canal_id else None
+    if canal is None and canal_id:
+        try:
+            canal = await bot.fetch_channel(canal_id)
+        except Exception:
+            canal = None
+    if canal is None or not hasattr(canal, "history"):
+        return None, -1
+
+    # Procura no histórico inteiro para também aceitar relatórios criados antes da atualização.
+    async for msg in canal.history(limit=None, oldest_first=False):
+        texto = coletar_texto_embed(msg) if 'coletar_texto_embed' in globals() else (msg.content or "")
+        if extrair_numero_relatorio_tipo(texto, tipo) != int(numero):
+            continue
+        texto_limpo = _limpar_links_provas_relatorio(msg.content or texto)
+        registro = {
+            "id": str(msg.id),
+            "tipo": tipo,
+            "tipo_nome": nome_tipo_relatorio(tipo),
+            "numero": f"{int(numero):03d}",
+            "autor_id": getattr(msg.author, "id", 0),
+            "autor_nome": str(msg.author),
+            "data": agora_br(),
+            "canal_destino_id": canal_id,
+            "mensagem_url": msg.jump_url,
+            "mensagens_ids": [msg.id],
+            "texto_completo": texto_limpo,
+            "provas": [],
+            "resumo": cortar_discord(texto_limpo.replace("*", ""), 800),
+            "importado_para_edicao": True,
+        }
+        lista.append(registro)
+        salvar_relatorios_operacionais(lista)
+        return registro, len(lista) - 1
+    return None, -1
+
+
+class BuscarRelatorioAntigoModal(Modal, title="Editar relatório antigo"):
+    tipo = TextInput(
+        label="Tipo do relatório",
+        placeholder="tocaia, OLB ou perícia externa",
+        max_length=40,
+        required=True,
+    )
+    numero = TextInput(
+        label="Número do relatório",
+        placeholder="Exemplo: 12",
+        max_length=6,
+        required=True,
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        tipo_norm = normalizar_busca(self.tipo.value) if 'normalizar_busca' in globals() else self.tipo.value.lower()
+        if "tocaia" in tipo_norm:
+            tipo = "tocaia"
+        elif "olb" in tipo_norm:
+            tipo = "olb"
+        elif "pericia" in tipo_norm or "externa" in tipo_norm:
+            tipo = "pericia_externa"
+        else:
+            return await interaction.followup.send(
+                "❌ Tipo inválido. Use **Tocaia**, **OLB** ou **Perícia Externa**.", ephemeral=True
+            )
+        numero_txt = re.sub(r"\D+", "", str(self.numero.value))
+        if not numero_txt:
+            return await interaction.followup.send("❌ Informe um número válido.", ephemeral=True)
+
+        registro, _ = await _localizar_relatorio_antigo(tipo, int(numero_txt), interaction.guild)
+        if not registro:
+            return await interaction.followup.send(
+                f"❌ Não encontrei o relatório **{nome_tipo_relatorio(tipo)} Nº {int(numero_txt):03d}** no canal oficial.",
+                ephemeral=True,
+            )
+
+        # Como a interação já foi respondida com defer, enviamos um botão temporário para abrir o modal de texto.
+        await interaction.followup.send(
+            f"✅ Relatório localizado: **{nome_tipo_relatorio(tipo)} Nº {int(numero_txt):03d}**. Clique abaixo para editar.",
+            view=AbrirEditorRelatorioEncontradoView(registro),
+            ephemeral=True,
+        )
+
+
+class AbrirEditorRelatorioEncontradoView(View):
+    def __init__(self, registro: Dict[str, Any]):
+        super().__init__(timeout=300)
+        self.registro = registro
+
+    @discord.ui.button(label="Abrir editor", emoji="✏️", style=discord.ButtonStyle.primary)
+    async def abrir(self, interaction: discord.Interaction, button: Button):
+        await interaction.response.send_modal(EditarTextoRelatorioModal(self.registro))
 
 
 # O botão agora abre o formulário primeiro; o canal de fotos só nasce após o envio.
@@ -12243,6 +12373,9 @@ class RelatoriosPainelView(View):
     async def btn_olb(self, interaction: discord.Interaction, button: Button): await interaction.response.send_modal(OlbModal())
     @discord.ui.button(label="🧪 PERÍCIA EXTERNA", style=discord.ButtonStyle.secondary, custom_id="rel_btn_pericia_ext")
     async def btn_pericia_ext(self, interaction: discord.Interaction, button: Button): await interaction.response.send_modal(PericiaExternaModal())
+    @discord.ui.button(label="✏️ EDITAR ANTIGO", style=discord.ButtonStyle.primary, custom_id="rel_btn_editar_antigo", row=1)
+    async def btn_editar_antigo(self, interaction: discord.Interaction, button: Button):
+        await interaction.response.send_modal(BuscarRelatorioAntigoModal())
 
 
 class IniciarFormularioRelatorioView(View):
