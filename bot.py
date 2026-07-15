@@ -202,9 +202,17 @@ def _ids_env(nome: str) -> List[int]:
             ids.append(int(parte))
     return ids
 
-CARGOS_ADMIN_IDS = _ids_env("CARGOS_ADMIN_IDS")
-CARGOS_EQUIPE_IDS = _ids_env("CARGOS_EQUIPE_IDS") or CARGOS_ADMIN_IDS
-CARGOS_FECHAR_MESA_IDS = _ids_env("CARGOS_FECHAR_MESA_IDS")
+# Cargos centrais autorizadores DICOR. Estes IDs sempre permanecem ativos,
+# mesmo se as variáveis do Railway estiverem vazias ou incompletas.
+CARGOS_AUTORIZADORES = {
+    1490200388912156692,  # Inspetor
+    1490200383614615725,  # Vice Diretor
+    1490200382776021132,  # Diretor
+}
+
+CARGOS_ADMIN_IDS = list(dict.fromkeys(_ids_env("CARGOS_ADMIN_IDS") + sorted(CARGOS_AUTORIZADORES)))
+CARGOS_EQUIPE_IDS = list(dict.fromkeys((_ids_env("CARGOS_EQUIPE_IDS") or CARGOS_ADMIN_IDS) + sorted(CARGOS_AUTORIZADORES)))
+CARGOS_FECHAR_MESA_IDS = list(dict.fromkeys(_ids_env("CARGOS_FECHAR_MESA_IDS") + sorted(CARGOS_AUTORIZADORES)))
 
 BASE_DIR = Path(__file__).parent
 DATA_DIR = BASE_DIR / "data"
@@ -646,45 +654,52 @@ async def enviar_log(texto: str) -> None:
 
         for parte in [texto[i:i + 1900] for i in range(0, len(texto), 1900)]:
             await canal.send(parte)
+    except Exception as erro:
+        print(f"⚠️ Falha ao enviar log para o Discord: {erro}")
+
+
+
+async def registrar_erro_interacao(nome_funcao: str, interaction: Optional[discord.Interaction], erro: Exception) -> None:
+    usuario = getattr(getattr(interaction, "user", None), "id", "desconhecido")
+    canal = getattr(getattr(interaction, "channel", None), "id", "desconhecido")
+    detalhe = traceback.format_exc()[-1500:]
+    await enviar_log(
+        f"❌ Erro em `{nome_funcao}` | usuário `{usuario}` | canal `{canal}` | "
+        f"tipo `{type(erro).__name__}` | motivo: {erro}\n```{detalhe}```"
+    )
+    if interaction is None:
+        return
+    try:
+        mensagem = "❌ Ocorreu um erro ao executar essa ação. O erro foi registrado para análise."
+        if interaction.response.is_done():
+            await interaction.followup.send(mensagem, ephemeral=True)
+        else:
+            await interaction.response.send_message(mensagem, ephemeral=True)
     except Exception:
         pass
 
+def tem_permissao_autorizadora(member: Optional[discord.Member]) -> bool:
+    """Permissão central para toda autorização e ação administrativa DICOR."""
+    if member is None or not isinstance(member, discord.Member):
+        return False
+    if member.guild_permissions.administrator:
+        return True
+    return any(role.id in CARGOS_AUTORIZADORES for role in member.roles)
+
 
 def usuario_tem_admin(member: discord.Member) -> bool:
-    if not CARGOS_ADMIN_IDS:
-        return True
-    cargos = {role.id for role in member.roles}
-    return any(cargo in cargos for cargo in CARGOS_ADMIN_IDS)
+    # Mantém compatibilidade com funções antigas, mas usa a regra central.
+    return tem_permissao_autorizadora(member)
 
 
 def usuario_pode_fechar_mesa(member: discord.Member) -> bool:
-    """Permite fechar mesa apenas para ADM DICOR / Inspetor para cima."""
-    if not isinstance(member, discord.Member):
-        return False
-
-    if member.guild_permissions.administrator:
-        return True
-
-    cargos_usuario = {role.id for role in member.roles}
-
-    # Lista direta de cargos autorizados.
-    cargos_autorizados = set(CARGOS_FECHAR_MESA_IDS or CARGOS_ADMIN_IDS)
-    if cargos_autorizados and cargos_usuario.intersection(cargos_autorizados):
-        return True
-
-    # Cargo mínimo: quem estiver no cargo informado ou acima dele também pode.
-    if DOSSIE_CARGO_MINIMO_FECHAR_ID:
-        cargo_minimo = member.guild.get_role(DOSSIE_CARGO_MINIMO_FECHAR_ID)
-        if cargo_minimo and member.top_role.position >= cargo_minimo.position:
-            return True
-
-    return False
-
+    """Compatibilidade: toda ação restrita usa a função central autorizadora."""
+    return tem_permissao_autorizadora(member)
 
 def mensagem_sem_permissao_fechar_mesa() -> str:
     return (
-        "❌ Apenas a administração da DICOR pode fechar mesas.\n"
-        "Cargo mínimo recomendado: **Inspetor DICOR para cima**."
+        "❌ Você não possui permissão para executar esta ação.\n"
+        "Cargos autorizados: **Inspetor, Vice Diretor ou Diretor**."
     )
 
 
@@ -7990,7 +8005,7 @@ def _mencao_cargo(guild: discord.Guild, termos: List[str], fallback: str = "@") 
     return role.mention if role else fallback
 
 
-def montar_mensagem_hierarquia_dicor(guild: discord.Guild) -> str:
+def montar_mensagem_hierarquia_dicor_legacy(guild: discord.Guild) -> str:
     delegado_geral = _mencao_cargo(guild, ["delegado", "geral"], "<@596518258291507221>")
     delegado_adjunto = _mencao_cargo(guild, ["delegado", "adjunto"], "<@527894944904511498>")
     delegado_dicor = _mencao_cargo(guild, ["delegado", "dicor"], "@Delegado DICOR")
@@ -8260,7 +8275,7 @@ def obter_proximo_numero_relatorio(tipo_relatorio: str) -> str:
     salvar_json(RELATORIOS_CONTADOR_JSON, contadores)
     return f"{proximo:03d}"
 
-class RelatoriosPainelView(View):
+class RelatoriosPainelViewLegacy(View):
     def __init__(self):
         super().__init__(timeout=None)
 
@@ -8317,25 +8332,25 @@ class RelatoriosPainelView(View):
         embed.set_footer(text="DICOR • Procedimento Operacional Padrão")
         await canal.send(content=interaction.user.mention, embed=embed, view=IniciarFormularioRelatorioView(tipo))
 
-    @discord.ui.button(label="👀 TOCAIA", style=discord.ButtonStyle.secondary, custom_id="rel_btn_tocaia")
+    @discord.ui.button(label="👀 TOCAIA", style=discord.ButtonStyle.secondary, custom_id="legacy_rel_btn_tocaia")
     async def btn_tocaia(self, interaction: discord.Interaction, button: Button):
         await self.gerenciar_abertura_ticket(interaction, "tocaia", "Relatório de Tocaia")
 
-    @discord.ui.button(label="🚔 OLB", style=discord.ButtonStyle.secondary, custom_id="rel_btn_olb")
+    @discord.ui.button(label="🚔 OLB", style=discord.ButtonStyle.secondary, custom_id="legacy_rel_btn_olb")
     async def btn_olb(self, interaction: discord.Interaction, button: Button):
         await self.gerenciar_abertura_ticket(interaction, "olb", "Relatório de OLB")
 
-    @discord.ui.button(label="🧪 PERÍCIA EXTERNA", style=discord.ButtonStyle.secondary, custom_id="rel_btn_pericia_ext")
+    @discord.ui.button(label="🧪 PERÍCIA EXTERNA", style=discord.ButtonStyle.secondary, custom_id="legacy_rel_btn_pericia_ext")
     async def btn_pericia_ext(self, interaction: discord.Interaction, button: Button):
         await self.gerenciar_abertura_ticket(interaction, "pericia_externa", "Perícia Externa")
 
 
-class IniciarFormularioRelatorioView(View):
+class IniciarFormularioRelatorioViewLegacy(View):
     def __init__(self, tipo: str = "tocaia"):
         super().__init__(timeout=None)
         self.tipo = tipo
 
-    @discord.ui.button(label="✍️ Preencher Formulário", style=discord.ButtonStyle.primary, custom_id="rel_btn_preencher")
+    @discord.ui.button(label="✍️ Preencher Formulário", style=discord.ButtonStyle.primary, custom_id="legacy_rel_btn_preencher")
     async def preencher(self, interaction: discord.Interaction, button: Button):
         tipo_atual = self.tipo
         nome_canal = interaction.channel.name if interaction.channel else ""
@@ -8353,7 +8368,7 @@ class IniciarFormularioRelatorioView(View):
         elif tipo_atual == "pericia_externa":
             await interaction.response.send_modal(PericiaExternaModal())
 
-async def finalizar_e_postar_relatorio(interaction: discord.Interaction, tipo: str, texto_conteudo: str):
+async def finalizar_e_postar_relatorio_legacy(interaction: discord.Interaction, tipo: str, texto_conteudo: str):
     canal_id = CANAIS_RELATORIOS.get(tipo)
     canal_destino = interaction.guild.get_channel(canal_id) if interaction.guild and canal_id else None
     
@@ -10694,7 +10709,7 @@ def mencoes_inspetor_mais(guild: Optional[discord.Guild]) -> str:
     if guild is None:
         return "Equipe Inspetor+"
     ids = []
-    for cid in list(CARGOS_FECHAR_MESA_IDS or []) + list(CARGOS_ADMIN_IDS or []) + [DOSSIE_CARGO_MINIMO_FECHAR_ID]:
+    for cid in list(CARGOS_AUTORIZADORES) + list(CARGOS_FECHAR_MESA_IDS or []) + list(CARGOS_ADMIN_IDS or []) + [DOSSIE_CARGO_MINIMO_FECHAR_ID]:
         try:
             cid = int(cid)
         except Exception:
@@ -10801,9 +10816,10 @@ class AutorizacaoComparecimentoBoletimView(View):
         for child in self.children:
             child.disabled = True
         try:
-            await interaction.message.edit(view=self)
-        except Exception:
-            pass
+            if interaction.message:
+                await interaction.message.delete()
+        except Exception as erro_apagar:
+            await enviar_log(f"⚠️ Comparecimento autorizado, mas não foi possível apagar a solicitação: {erro_apagar}")
         await enviar_log(f"✅ Comparecimento autorizado e publicado. Boletim `{atendimento.get('numero')}` | Solicitação `{registro.get('numero')}` | Autorizado por {interaction.user.mention} (`{interaction.user.id}`).")
         await interaction.followup.send("✅ Mandado autorizado e publicado no canal de mandados.", ephemeral=True)
 
@@ -10835,10 +10851,16 @@ class AutorizacaoComparecimentoBoletimView(View):
         for child in self.children:
             child.disabled = True
         try:
-            await interaction.message.edit(view=self)
+            if interaction.message:
+                await interaction.message.delete()
+        except Exception as erro_apagar:
+            await enviar_log(f"⚠️ Comparecimento recusado, mas não foi possível apagar a solicitação: {erro_apagar}")
+        aviso = await interaction.channel.send(f"❌ **Mandado de comparecimento recusado por {interaction.user.mention}.**")
+        try:
+            await asyncio.sleep(5)
+            await aviso.delete()
         except Exception:
             pass
-        await interaction.channel.send(f"❌ **Mandado de comparecimento recusado por {interaction.user.mention}.**")
         await enviar_log(f"❌ Comparecimento recusado no boletim `{atendimento.get('numero')}` por {interaction.user.mention} (`{interaction.user.id}`).")
         await interaction.followup.send("❌ Solicitação recusada.", ephemeral=True)
 
@@ -10910,8 +10932,11 @@ class AutorizacaoProcuradoBoletimView(View):
         hist = atendimento.get("historico", []) or []; hist.append({"acao": "Cadastro como procurado autorizado", "usuario": str(interaction.user), "data": agora_br()}); atendimento["historico"] = hist
         atualizar_atendimento_boletim("id", atendimento.get("id"), atendimento)
         for child in self.children: child.disabled = True
-        try: await interaction.message.edit(view=self)
-        except Exception: pass
+        try:
+            if interaction.message:
+                await interaction.message.delete()
+        except Exception as erro_apagar:
+            await enviar_log(f"⚠️ Procurado autorizado, mas não foi possível apagar a solicitação: {erro_apagar}")
         await interaction.channel.send("✅ **Cadastro autorizado.**\nEnvie agora a **foto do indivíduo** e a **foto do RG**. Depois clique em **📸 Confirmar Fotos e Publicar**.", view=FotoProcuradoBoletimView())
         await enviar_log(f"✅ Procurado autorizado no boletim `{atendimento.get('numero')}` por {interaction.user.mention} (`{interaction.user.id}`).")
         await interaction.followup.send("✅ Autorizado. Aguardando fotos obrigatórias.", ephemeral=True)
@@ -10926,9 +10951,17 @@ class AutorizacaoProcuradoBoletimView(View):
         atendimento.update({"procurado_status": "recusado", "procurado_recusado_por_id": interaction.user.id, "procurado_recusado_por_nome": str(interaction.user), "procurado_recusado_em": agora_br()})
         atualizar_atendimento_boletim("id", atendimento.get("id"), atendimento)
         for child in self.children: child.disabled = True
-        try: await interaction.message.edit(view=self)
-        except Exception: pass
-        await interaction.channel.send(f"❌ **Cadastro como procurado recusado por {interaction.user.mention}.**")
+        try:
+            if interaction.message:
+                await interaction.message.delete()
+        except Exception as erro_apagar:
+            await enviar_log(f"⚠️ Procurado recusado, mas não foi possível apagar a solicitação: {erro_apagar}")
+        aviso = await interaction.channel.send(f"❌ **Cadastro como procurado recusado por {interaction.user.mention}.**")
+        try:
+            await asyncio.sleep(5)
+            await aviso.delete()
+        except Exception:
+            pass
         await enviar_log(f"❌ Procurado recusado no boletim `{atendimento.get('numero')}` por {interaction.user.mention} (`{interaction.user.id}`).")
         await interaction.followup.send("❌ Solicitação recusada.", ephemeral=True)
 
